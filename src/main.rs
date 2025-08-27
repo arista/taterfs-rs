@@ -1,5 +1,6 @@
 pub mod file_store;
 pub mod fs_file_store;
+pub mod repo;
 
 use crate::file_store::{DirEntry, DirectoryLister, FileStoreService};
 use crate::fs_file_store::FsFileStoreService;

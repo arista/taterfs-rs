@@ -6,12 +6,15 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use bytes::Bytes;
 
 use async_trait::async_trait;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
-use crate::file_store::{DirEntry, DirectoryEntry, DirectoryLister, FileEntry, FileStoreService};
+use crate::file_store::{DirEntry, DirectoryEntry, DirectoryLister, FileEntry, FileStoreService, FileChunksIterator, FileChunkHandle};
+use crate::repo::repo_model::CHUNK_SIZES;
 
 // Tokio-based local filesystem implementation.
 #[derive(Debug, Default, Clone)]
@@ -23,6 +26,21 @@ impl FileStoreService for FsFileStoreService {
         LocalDirectoryLister::new_root(root)
             .await
             .map(|l| Box::new(l) as _)
+    }
+
+    async fn get_file_chunks(
+        &self,
+        path: PathBuf,
+    ) -> io::Result<Box<dyn FileChunksIterator>> {
+        let meta = fs::metadata(&path).await?;
+        let len = meta.len();
+
+        let iter = FsFileChunksIterator {
+            path: Arc::new(path),
+            file_len: len,
+            cursor: 0,
+        };
+        Ok(Box::new(iter))
     }
 }
 
@@ -310,4 +328,85 @@ impl DirectoryLister for LocalDirectoryLister {
 fn is_executable(meta: &std::fs::Metadata, _path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     (meta.permissions().mode() & 0o111) != 0
+}
+
+/// Filesystem iterator over chunks of a file.
+#[derive(Clone, Debug)]
+pub struct FsFileChunksIterator {
+    path: Arc<PathBuf>,
+    file_len: u64,
+    cursor: u64,
+}
+
+impl FsFileChunksIterator {
+    #[inline]
+    fn choose_chunk_size(remaining: u64) -> usize {
+        // Pick the largest CHUNK_SIZES entry <= remaining; if none, use remaining as tail.
+        let mut best: u64 = 0;
+        for &s in CHUNK_SIZES.iter() {
+            let sz = s as u64;
+            if sz <= remaining && sz > best {
+                best = sz;
+            }
+        }
+        if best == 0 {
+            remaining as usize
+        } else {
+            best as usize
+        }
+    }
+}
+
+#[async_trait]
+impl FileChunksIterator for FsFileChunksIterator {
+    async fn next(&mut self) -> io::Result<Option<Box<dyn FileChunkHandle>>> {
+        if self.cursor >= self.file_len {
+            return Ok(None);
+        }
+
+        let remaining = self.file_len - self.cursor;
+        let this_size = Self::choose_chunk_size(remaining);
+        let offset = self.cursor as usize;
+
+        self.cursor = self
+            .cursor
+            .saturating_add(this_size as u64)
+            .min(self.file_len);
+
+        let handle = FsFileChunkHandle {
+            path: Arc::clone(&self.path),
+            offset,
+            size: this_size,
+        };
+
+        Ok(Some(Box::new(handle)))
+    }
+}
+
+/// Filesystem-backed chunk handle (lazy reader for a byte range).
+#[derive(Clone, Debug)]
+pub struct FsFileChunkHandle {
+    path: Arc<PathBuf>,
+    offset: usize,
+    size: usize,
+}
+
+#[async_trait]
+impl FileChunkHandle for FsFileChunkHandle {
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    async fn get_chunk(&self) -> io::Result<Bytes> {
+        let mut f = fs::File::open(&*self.path).await?;
+        f.seek(SeekFrom::Start(self.offset as u64)).await?;
+
+        let mut buf = vec![0u8; self.size];
+        f.read_exact(&mut buf).await?;
+        Ok(Bytes::from(buf))
+    }
 }

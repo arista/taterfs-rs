@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use bytes::Bytes;
 
 //----------------------------------------
 // FileStoreService - interface to a FileStore
@@ -13,6 +14,10 @@ use std::path::{Path, PathBuf};
 #[async_trait]
 pub trait FileStoreService: Send + Sync {
     async fn list_directory(&self, root: &Path) -> io::Result<Box<dyn DirectoryLister>>;
+    async fn get_file_chunks(
+        &self,
+        path: std::path::PathBuf,
+    ) -> io::Result<Box<dyn FileChunksIterator>>;
 }
 
 //----------------------------------------
@@ -57,4 +62,26 @@ impl fmt::Debug for DirectoryEntry {
             .field("rel_path", &self.rel_path)
             .finish_non_exhaustive() // makes it obvious there are more fields
     }
+}
+
+//----------------------------------------
+// FileChunksIterator - iterates through a file, yielding chunks in CHUNK_SIZES order
+
+/// A handle for one file chunk.
+#[async_trait]
+pub trait FileChunkHandle: Send + Sync {
+    /// Size of this chunk in bytes.
+    fn size(&self) -> usize;
+
+    /// Offset of this chunk in bytes.
+    fn offset(&self) -> usize;
+
+    /// Fetch the chunk's bytes.
+    async fn get_chunk(&self) -> io::Result<Bytes>;
+}
+
+/// An async iterator over file chunks. Call `next().await` until it returns `Ok(None)`.
+#[async_trait]
+pub trait FileChunksIterator: Send {
+    async fn next(&mut self) -> io::Result<Option<Box<dyn FileChunkHandle>>>;
 }

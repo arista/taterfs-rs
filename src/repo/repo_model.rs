@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::str::FromStr;
+use bytes::Bytes;
 
 // =============================
 // Zero-cost strong typedefs
@@ -447,12 +448,16 @@ pub fn sha256_hex_id(bytes: &[u8]) -> ObjectId {
     ObjectId::from(hex::encode(out))
 }
 
-pub fn to_canonical_json_bytes<T: Serialize>(value: &T) -> Vec<u8> {
+pub fn to_canonical_json_bytes<T: Serialize>(value: &T) -> Bytes {
     let s = serde_jcs::to_string(value).expect("canonical JSON");
-    s.into_bytes()
+    s.into_bytes().into()
 }
 
 pub fn object_hash(value: &RepoObject) -> ObjectId {
     let bytes = to_canonical_json_bytes(value);
+    sha256_hex_id(&bytes)
+}
+
+pub fn bytes_hash(bytes: &Bytes) -> ObjectId {
     sha256_hex_id(&bytes)
 }

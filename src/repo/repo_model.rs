@@ -1,7 +1,11 @@
+// Thanks ChatGPT
+
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Deref;
+use std::str::FromStr;
 
 // =============================
 // Zero-cost strong typedefs
@@ -22,7 +26,7 @@ impl std::fmt::Display for TimestampISOString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObjectId(String);
 
@@ -35,6 +39,25 @@ impl From<&str> for ObjectId { fn from(s: &str) -> Self { Self(s.to_string()) } 
 impl From<String> for ObjectId { fn from(s: String) -> Self { Self(s) } }
 impl std::fmt::Display for ObjectId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+
+impl fmt::Debug for ObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Short debug to keep logs tidy
+        write!(f, "ObjectId({}…)", &self.0.get(0..8).unwrap_or(""))
+    }
+}
+
+impl FromStr for ObjectId {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 64 hex chars (sha-256 style). Loosen if you use different hash.
+        if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            Ok(ObjectId(s.to_ascii_lowercase()))
+        } else {
+            Err("invalid ObjectId: expected 64 hex chars")
+        }
+    }
 }
 
 // =============================

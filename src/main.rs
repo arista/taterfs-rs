@@ -8,9 +8,8 @@ use crate::samples::sample3::sample3;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-//    sample1().await?;
-//    sample2().await?;
+    //    sample1().await?;
+    //    sample2().await?;
     sample3().await?;
     Ok(())
 }
-

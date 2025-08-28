@@ -25,7 +25,10 @@ pub enum BackendError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error("{0}")]
+    #[error("S3 error: {0}")]
+    S3(String),
+
+    #[error("Other error: {0}")]
     Other(String),
 }
 

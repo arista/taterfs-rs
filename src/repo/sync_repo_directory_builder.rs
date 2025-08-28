@@ -1,11 +1,10 @@
 use crate::repo::repo_backend::RepoBackend;
-use crate::repo::repo_file_builder::RepoFileBuilder;
+use crate::repo::repo_directory_builder::RepoDirectoryBuilder;
 use crate::repo::repo_model::{
-    ChunkFilePart, File, FileFilePart, FilePart, MAX_FILE_PARTS, ObjectId, RepoObject, bytes_hash,
-    to_canonical_json_bytes,
+    Directory, DirectoryEntry, DirectoryPart, MAX_DIRECTORY_ENTRIES, ObjectId, PartialDirectory,
+    RepoObject, bytes_hash, to_canonical_json_bytes,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -15,24 +14,24 @@ pub struct Context {
 
 #[derive(Default)]
 pub struct PartsStackElem {
-    parts: Vec<FilePart>,
+    parts: Vec<DirectoryPart>,
 }
 
 impl PartsStackElem {
     // Return the current list of parts, replacing it with a new empty list
-    fn replace_parts(&mut self) -> Vec<FilePart> {
+    fn replace_parts(&mut self) -> Vec<DirectoryPart> {
         std::mem::take(&mut self.parts)
     }
 }
 
-pub struct SyncRepoFileBuilder {
+pub struct SyncRepoDirectoryBuilder {
     cx: Context,
 
     // [0] of the stack represents the current "bottom" of the stack where new parts will go.  The last element of the stack represents the root
     stack: Vec<PartsStackElem>,
 }
 
-impl SyncRepoFileBuilder {
+impl SyncRepoDirectoryBuilder {
     pub fn new(cx: Context) -> Self {
         Self {
             cx,
@@ -42,11 +41,11 @@ impl SyncRepoFileBuilder {
 
     // Test if the stack[ix] has enough space to hold a new part
     pub fn has_space(&self, ix: usize) -> bool {
-        self.stack[ix].parts.len() < MAX_FILE_PARTS
+        self.stack[ix].parts.len() < MAX_DIRECTORY_ENTRIES
     }
 
-    // Add a new part to stack[0].  If stack[0] doesn't have enough space to hold it, then collapse that stack element into a new FilePart, and add it to the next higher stack element, making sure that higher stack element has enough space, and so on.  If we run out of stack elements, then add a new item to the stack to act as the new root.
-    pub async fn add_part_at(&mut self, part: FilePart, ix: usize) -> anyhow::Result<()> {
+    // Add a new part to stack[0].  If stack[0] doesn't have enough space to hold it, then collapse that stack element into a new DirectoryPart, and add it to the next higher stack element, making sure that higher stack element has enough space, and so on.  If we run out of stack elements, then add a new item to the stack to act as the new root.
+    pub async fn add_part_at(&mut self, part: DirectoryPart, ix: usize) -> anyhow::Result<()> {
         // The stack item we're trying to add to, and the part we want to add to that item
         let mut ix_to_add = ix;
         let mut part_for_ix = part;
@@ -74,41 +73,36 @@ impl SyncRepoFileBuilder {
         Ok(())
     }
 
-    pub fn force_add_part_at(&mut self, part: FilePart, ix: usize) {
+    pub fn force_add_part_at(&mut self, part: DirectoryPart, ix: usize) {
         self.stack[ix].parts.push(part);
     }
 
-    // Get the list of parts from the given stack item, write it as a File object, return the File wrapped in a FilePart, and clear out the stack item so it can receive a new part
-    pub async fn turn_stack_elem_into_part(&mut self, ix: usize) -> anyhow::Result<FilePart> {
+    // Get the list of parts from the given stack item, write it as a Directory object, return the Directory wrapped in a PartialDirectory, and clear out the stack item so it can receive a new part
+    pub async fn turn_stack_elem_into_part(&mut self, ix: usize) -> anyhow::Result<DirectoryPart> {
         let parts = self.stack[ix].replace_parts();
-        let file = File { parts };
-        let file_size = file.total_len();
-        let file_obj = RepoObject::File(file);
-        let file_bytes = to_canonical_json_bytes(&file_obj);
-        let file_id = bytes_hash(&file_bytes);
-        self.cx.backend.write(&file_id, file_bytes).await?;
-        Ok(FilePart::File(FileFilePart {
-            size: file_size,
-            file: file_id,
+        let first_name = parts.first().unwrap().first_name().clone();
+        let last_name = parts.last().unwrap().last_name().clone();
+        let directory = Directory { entries: parts };
+        let directory_obj = RepoObject::Directory(directory);
+        let directory_bytes = to_canonical_json_bytes(&directory_obj);
+        let directory_id = bytes_hash(&directory_bytes);
+        self.cx
+            .backend
+            .write(&directory_id, directory_bytes)
+            .await?;
+        Ok(DirectoryPart::Partial(PartialDirectory {
+            first_name,
+            last_name,
+            directory: directory_id,
         }))
     }
 }
 
 #[async_trait]
-impl RepoFileBuilder for SyncRepoFileBuilder {
-    async fn add_chunk(&mut self, buf: Bytes) -> anyhow::Result<()> {
-        // Get the chunk's hash
-        let chunk_id = bytes_hash(&buf);
-        let chunk_size = buf.len() as u64;
-
-        // Write the chunk
-        self.cx.backend.write(&chunk_id, buf).await?;
-
-        let file_part = FilePart::Chunk(ChunkFilePart {
-            size: chunk_size,
-            content: chunk_id,
-        });
-        self.add_part_at(file_part, 0).await?;
+impl RepoDirectoryBuilder for SyncRepoDirectoryBuilder {
+    async fn add_entry(&mut self, entry: DirectoryEntry) -> anyhow::Result<()> {
+        let directory_part = DirectoryPart::from(entry);
+        self.add_part_at(directory_part, 0).await?;
 
         Ok(())
     }
@@ -124,11 +118,14 @@ impl RepoFileBuilder for SyncRepoFileBuilder {
 
         // Take the final element and turn it into a File
         let parts = self.stack[ix].replace_parts();
-        let file = File { parts };
-        let file_obj = RepoObject::File(file);
-        let file_bytes = to_canonical_json_bytes(&file_obj);
-        let file_id = bytes_hash(&file_bytes);
-        self.cx.backend.write(&file_id, file_bytes).await?;
-        Ok(file_id)
+        let directory = Directory { entries: parts };
+        let directory_obj = RepoObject::Directory(directory);
+        let directory_bytes = to_canonical_json_bytes(&directory_obj);
+        let directory_id = bytes_hash(&directory_bytes);
+        self.cx
+            .backend
+            .write(&directory_id, directory_bytes)
+            .await?;
+        Ok(directory_id)
     }
 }

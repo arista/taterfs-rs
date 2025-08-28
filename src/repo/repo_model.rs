@@ -179,10 +179,42 @@ pub struct Directory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
+pub enum DirectoryEntry {
+    File(FileEntry),
+    Directory(DirEntry),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "PascalCase")]
 pub enum DirectoryPart {
     File(FileEntry),
     Directory(DirEntry),
     Partial(PartialDirectory),
+}
+
+impl DirectoryPart {
+    pub fn from(entry: DirectoryEntry) -> DirectoryPart {
+        match entry {
+            DirectoryEntry::File(file_entry) => DirectoryPart::File(file_entry),
+            DirectoryEntry::Directory(dir_entry) => DirectoryPart::Directory(dir_entry),
+        }
+    }
+
+    pub fn first_name(&self) -> &String {
+        match self {
+            DirectoryPart::File(part) => &part.name,
+            DirectoryPart::Directory(part) => &part.name,
+            DirectoryPart::Partial(part) => &part.first_name,
+        }
+    }
+
+    pub fn last_name(&self) -> &String {
+        match self {
+            DirectoryPart::File(part) => &part.name,
+            DirectoryPart::Directory(part) => &part.name,
+            DirectoryPart::Partial(part) => &part.last_name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,8 +248,7 @@ pub struct PartialDirectory {
 // File
 // -----------------------------
 
-//pub const MAX_FILE_PARTS: usize = 64;
-pub const MAX_FILE_PARTS: usize = 3;
+pub const MAX_FILE_PARTS: usize = 64;
 pub const CHUNK_SIZES: &[u32] = &[
     4_194_304, // 4 MiB
     1_048_576, // 1 MiB

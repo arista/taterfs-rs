@@ -1,9 +1,12 @@
-use async_trait::async_trait;
-use std::sync::Arc;
-use bytes::Bytes;
-use crate::repo::repo_model::{RepoObject, File, FilePart, ChunkFilePart, FileFilePart, ObjectId, MAX_FILE_PARTS, to_canonical_json_bytes, bytes_hash};
-use crate::repo::repo_file_builder::RepoFileBuilder;
 use crate::repo::repo_backend::RepoBackend;
+use crate::repo::repo_file_builder::RepoFileBuilder;
+use crate::repo::repo_model::{
+    ChunkFilePart, File, FileFilePart, FilePart, MAX_FILE_PARTS, ObjectId, RepoObject, bytes_hash,
+    to_canonical_json_bytes,
+};
+use async_trait::async_trait;
+use bytes::Bytes;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Context {
@@ -26,7 +29,7 @@ pub struct SyncRepoFileBuilder {
     cx: Context,
 
     // [0] of the stack represents the current "bottom" of the stack where new parts will go.  The last element of the stack represents the root
-    stack: Vec<PartsStackElem>
+    stack: Vec<PartsStackElem>,
 }
 
 impl SyncRepoFileBuilder {
@@ -78,13 +81,16 @@ impl SyncRepoFileBuilder {
     // Get the list of parts from the given stack item, write it as a File object, return the File wrapped in a FilePart, and clear out the stack item so it can receive a new part
     pub async fn turn_stack_elem_into_part(&mut self, ix: usize) -> anyhow::Result<FilePart> {
         let parts = self.stack[ix].replace_parts();
-        let file = File{parts};
+        let file = File { parts };
         let file_size = file.total_len();
         let file_obj = RepoObject::File(file);
         let file_bytes = to_canonical_json_bytes(&file_obj);
         let file_id = bytes_hash(&file_bytes);
         self.cx.backend.write(&file_id, file_bytes).await?;
-        Ok(FilePart::File(FileFilePart {size: file_size, file: file_id}))
+        Ok(FilePart::File(FileFilePart {
+            size: file_size,
+            file: file_id,
+        }))
     }
 }
 
@@ -98,7 +104,10 @@ impl RepoFileBuilder for SyncRepoFileBuilder {
         // Write the chunk
         self.cx.backend.write(&chunk_id, buf).await?;
 
-        let file_part = FilePart::Chunk(ChunkFilePart {size: chunk_size, content: chunk_id});
+        let file_part = FilePart::Chunk(ChunkFilePart {
+            size: chunk_size,
+            content: chunk_id,
+        });
         self.add_part_at(file_part, 0).await?;
 
         Ok(())
@@ -115,7 +124,7 @@ impl RepoFileBuilder for SyncRepoFileBuilder {
 
         // Take the final element and turn it into a File
         let parts = self.stack[ix].replace_parts();
-        let file = File{parts};
+        let file = File { parts };
         let file_obj = RepoObject::File(file);
         let file_bytes = to_canonical_json_bytes(&file_obj);
         let file_id = bytes_hash(&file_bytes);

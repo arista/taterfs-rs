@@ -1,12 +1,12 @@
 // Thanks ChatGPT
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
-use bytes::Bytes;
 
 // =============================
 // Zero-cost strong typedefs
@@ -17,14 +17,33 @@ use bytes::Bytes;
 pub struct TimestampISOString(String);
 
 impl TimestampISOString {
-    pub fn new<S: Into<String>>(s: S) -> Self { Self(s.into()) }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
-impl Deref for TimestampISOString { type Target = str; fn deref(&self) -> &Self::Target { &self.0 } }
-impl From<&str> for TimestampISOString { fn from(s: &str) -> Self { Self(s.to_string()) } }
-impl From<String> for TimestampISOString { fn from(s: String) -> Self { Self(s) } }
+impl Deref for TimestampISOString {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl From<&str> for TimestampISOString {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+impl From<String> for TimestampISOString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
 impl std::fmt::Display for TimestampISOString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,14 +51,33 @@ impl std::fmt::Display for TimestampISOString {
 pub struct ObjectId(String);
 
 impl ObjectId {
-    pub fn new<S: Into<String>>(s: S) -> Self { Self(s.into()) }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
-impl Deref for ObjectId { type Target = str; fn deref(&self) -> &Self::Target { &self.0 } }
-impl From<&str> for ObjectId { fn from(s: &str) -> Self { Self(s.to_string()) } }
-impl From<String> for ObjectId { fn from(s: String) -> Self { Self(s) } }
+impl Deref for ObjectId {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl From<&str> for ObjectId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+impl From<String> for ObjectId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
 impl std::fmt::Display for ObjectId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl fmt::Debug for ObjectId {
@@ -85,7 +123,7 @@ pub struct Root {
     pub timestamp: TimestampISOString,
     pub default_branch_name: String,
     pub default_branch: Branch,
-    pub other_branches: ObjectId,     // points to Branches
+    pub other_branches: ObjectId, // points to Branches
     pub previous_root: Option<ObjectId>,
 }
 
@@ -182,9 +220,9 @@ pub const MAX_FILE_PARTS: usize = 64;
 pub const CHUNK_SIZES: &[u32] = &[
     4_194_304, // 4 MiB
     1_048_576, // 1 MiB
-      262_144, // 256 KiB
-       65_536, // 64 KiB
-       16_384, // 16 KiB
+    262_144,   // 256 KiB
+    65_536,    // 64 KiB
+    16_384,    // 16 KiB
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,7 +261,9 @@ pub struct FileFilePart {
 pub enum ValidateError {
     #[error("directory entry count {0} exceeds MAX_DIRECTORY_ENTRIES={1}")]
     DirTooMany(usize, usize),
-    #[error("directory entries must be uniformly typed: leaf(File/Directory) XOR internal(Partial)")]
+    #[error(
+        "directory entries must be uniformly typed: leaf(File/Directory) XOR internal(Partial)"
+    )]
     DirMixedLeafInternal,
     #[error("directory entries not sorted by UTF-16 name at index {0}")]
     DirOrder(usize),
@@ -261,10 +301,19 @@ fn is_sorted_utf16(names: impl Iterator<Item = String>) -> bool {
 impl Directory {
     pub fn validate(&self) -> Result<(), ValidateError> {
         if self.entries.len() > MAX_DIRECTORY_ENTRIES {
-            return Err(ValidateError::DirTooMany(self.entries.len(), MAX_DIRECTORY_ENTRIES));
+            return Err(ValidateError::DirTooMany(
+                self.entries.len(),
+                MAX_DIRECTORY_ENTRIES,
+            ));
         }
-        let has_partial = self.entries.iter().any(|e| matches!(e, DirectoryPart::Partial(_)));
-        let has_file_or_dir = self.entries.iter().any(|e| matches!(e, DirectoryPart::File(_) | DirectoryPart::Directory(_)));
+        let has_partial = self
+            .entries
+            .iter()
+            .any(|e| matches!(e, DirectoryPart::Partial(_)));
+        let has_file_or_dir = self
+            .entries
+            .iter()
+            .any(|e| matches!(e, DirectoryPart::File(_) | DirectoryPart::Directory(_)));
         if has_partial && has_file_or_dir {
             return Err(ValidateError::DirMixedLeafInternal);
         }
@@ -298,7 +347,11 @@ impl Directory {
                     _ => continue,
                 };
                 if cmp_utf16(&a.first_name, &a.last_name) == Ordering::Greater {
-                    return Err(ValidateError::DirPartialRange(a.first_name.clone(), a.last_name.clone(), i));
+                    return Err(ValidateError::DirPartialRange(
+                        a.first_name.clone(),
+                        a.last_name.clone(),
+                        i,
+                    ));
                 }
                 if cmp_utf16(&a.last_name, &b.first_name) == Ordering::Greater {
                     return Err(ValidateError::DirPartialOrder(i));
@@ -307,7 +360,11 @@ impl Directory {
             for (i, p) in self.entries.iter().enumerate() {
                 if let DirectoryPart::Partial(p) = p {
                     if cmp_utf16(&p.first_name, &p.last_name) == Ordering::Greater {
-                        return Err(ValidateError::DirPartialRange(p.first_name.clone(), p.last_name.clone(), i));
+                        return Err(ValidateError::DirPartialRange(
+                            p.first_name.clone(),
+                            p.last_name.clone(),
+                            i,
+                        ));
                     }
                 }
             }
@@ -340,10 +397,13 @@ impl File {
     }
 
     pub fn total_len(&self) -> u64 {
-        self.parts.iter().map(|p| match p {
-            FilePart::Chunk(c) => c.size,
-            FilePart::File(f) => f.size,
-        }).sum()
+        self.parts
+            .iter()
+            .map(|p| match p {
+                FilePart::Chunk(c) => c.size,
+                FilePart::File(f) => f.size,
+            })
+            .sum()
     }
 }
 
@@ -374,15 +434,23 @@ pub fn build_directory_tree(mut leaves: Vec<DirectoryPart>) -> Directory {
             DirectoryPart::Directory(d) => d.name.clone(),
             _ => unreachable!(),
         };
-        let last = match &chunk[chunk.len()-1] {
+        let last = match &chunk[chunk.len() - 1] {
             DirectoryPart::File(f) => f.name.clone(),
             DirectoryPart::Directory(d) => d.name.clone(),
             _ => unreachable!(),
         };
-        level.push((first, last, Directory { entries: chunk.to_vec() }));
+        level.push((
+            first,
+            last,
+            Directory {
+                entries: chunk.to_vec(),
+            },
+        ));
     }
 
-    if level.len() == 1 { return level.pop().unwrap().2; }
+    if level.len() == 1 {
+        return level.pop().unwrap().2;
+    }
 
     loop {
         let mut next: Vec<(String, String, Directory)> = Vec::new();
@@ -397,10 +465,18 @@ pub fn build_directory_tree(mut leaves: Vec<DirectoryPart>) -> Directory {
                 }));
             }
             let first = group.first().unwrap().0.clone();
-            let last  = group.last().unwrap().1.clone();
-            next.push((first, last, Directory { entries: parent_entries }));
+            let last = group.last().unwrap().1.clone();
+            next.push((
+                first,
+                last,
+                Directory {
+                    entries: parent_entries,
+                },
+            ));
         }
-        if next.len() == 1 { return next.pop().unwrap().2; }
+        if next.len() == 1 {
+            return next.pop().unwrap().2;
+        }
         level = next;
     }
 }
@@ -408,12 +484,20 @@ pub fn build_directory_tree(mut leaves: Vec<DirectoryPart>) -> Directory {
 pub fn build_file_tree(chunks: Vec<(u64, ObjectId)>) -> File {
     let mut leaves: Vec<File> = Vec::new();
     for group in chunks.chunks(MAX_FILE_PARTS) {
-        let parts = group.iter().map(|(size, content)| {
-            FilePart::Chunk(ChunkFilePart { size: *size, content: content.clone() })
-        }).collect::<Vec<_>>();
+        let parts = group
+            .iter()
+            .map(|(size, content)| {
+                FilePart::Chunk(ChunkFilePart {
+                    size: *size,
+                    content: content.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
         leaves.push(File { parts });
     }
-    if leaves.len() == 1 { return leaves.pop().unwrap(); }
+    if leaves.len() == 1 {
+        return leaves.pop().unwrap();
+    }
 
     let mut level = leaves;
     loop {
@@ -430,7 +514,9 @@ pub fn build_file_tree(chunks: Vec<(u64, ObjectId)>) -> File {
             }
             next.push(File { parts });
         }
-        if next.len() == 1 { return next.pop().unwrap(); }
+        if next.len() == 1 {
+            return next.pop().unwrap();
+        }
         level = next;
     }
 }

@@ -1,6 +1,6 @@
 // Thanks ChatGPT
 
-use crate::repo::repo_model::{ObjectId}; // your newtype module (where ObjectId lives)
+use crate::repo::repo_model::ObjectId; // your newtype module (where ObjectId lives)
 use async_trait::async_trait;
 use bytes::Bytes;
 

@@ -2,18 +2,21 @@
 
 // Thanks ChatGPT
 
+use bytes::Bytes;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use bytes::Bytes;
 
 use async_trait::async_trait;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
-use crate::file_store::{DirEntry, DirectoryEntry, DirectoryLister, FileEntry, FileStoreService, FileChunksIterator, FileChunkHandle};
+use crate::file_store::{
+    DirEntry, DirectoryEntry, DirectoryLister, FileChunkHandle, FileChunksIterator, FileEntry,
+    FileStoreService,
+};
 use crate::repo::repo_model::CHUNK_SIZES;
 
 // Tokio-based local filesystem implementation.
@@ -28,10 +31,7 @@ impl FileStoreService for FsFileStoreService {
             .map(|l| Box::new(l) as _)
     }
 
-    async fn get_file_chunks(
-        &self,
-        path: PathBuf,
-    ) -> io::Result<Box<dyn FileChunksIterator>> {
+    async fn get_file_chunks(&self, path: PathBuf) -> io::Result<Box<dyn FileChunksIterator>> {
         let meta = fs::metadata(&path).await?;
         let len = meta.len();
 

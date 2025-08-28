@@ -7,15 +7,15 @@ use crate::repo::repo_model::ObjectId;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rand::{distr::Alphanumeric, Rng};
+use rand::{Rng, distr::Alphanumeric};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::fs;
 use tokio::io::{self, AsyncWriteExt};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 /// Configuration for the filesystem backend.
 #[derive(Clone, Debug)]
@@ -37,9 +37,15 @@ impl FsRepoBackend {
         Self { ctx }
     }
 
-    fn objects_dir(&self) -> PathBuf { self.ctx.root.join("objects") }
-    fn current_root_dir(&self) -> PathBuf { self.ctx.root.join("current-root") }
-    fn tmp_dir(&self) -> PathBuf { self.ctx.root.join("tmp") }
+    fn objects_dir(&self) -> PathBuf {
+        self.ctx.root.join("objects")
+    }
+    fn current_root_dir(&self) -> PathBuf {
+        self.ctx.root.join("current-root")
+    }
+    fn tmp_dir(&self) -> PathBuf {
+        self.ctx.root.join("tmp")
+    }
 
     fn object_path(&self, id_hex: &str) -> PathBuf {
         let (xx, yy, zz) = (&id_hex[0..2], &id_hex[2..4], &id_hex[4..6]);
@@ -58,7 +64,10 @@ impl FsRepoBackend {
 
         let shard = &inv_str[0..6];
         let filename = format!("current-root-{}-{}", inv_str, iso);
-        Ok((self.current_root_dir().join(shard).join(&filename), filename))
+        Ok((
+            self.current_root_dir().join(shard).join(&filename),
+            filename,
+        ))
     }
 
     async fn find_current_root_head_file(&self) -> io::Result<Option<PathBuf>> {
@@ -221,7 +230,8 @@ impl RepoBackend for FsRepoBackend {
         let (final_path, _fname) = self.current_root_entry_paths()?;
         let mut contents = root.to_string();
         contents.push('\n');
-        self.durable_publish(&final_path, contents.as_bytes()).await?;
+        self.durable_publish(&final_path, contents.as_bytes())
+            .await?;
         Ok(())
     }
 
@@ -240,7 +250,8 @@ impl RepoBackend for FsRepoBackend {
         let (final_path, _fname) = self.current_root_entry_paths()?;
         let mut contents = new.to_string();
         contents.push('\n');
-        self.durable_publish(&final_path, contents.as_bytes()).await?;
+        self.durable_publish(&final_path, contents.as_bytes())
+            .await?;
 
         let head_now = self.read_current_root().await?;
         if &head_now != new {
@@ -259,7 +270,9 @@ impl RepoBackend for FsRepoBackend {
         let p = self.object_path(&id_str);
         match fs::read(&p).await {
             Ok(v) => Ok(Bytes::from(v)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(BackendError::NotFound(id.clone())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(BackendError::NotFound(id.clone()))
+            }
             Err(e) => Err(e.into()),
         }
     }

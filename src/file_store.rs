@@ -1,12 +1,12 @@
-// Interfaces for a FileStore - a representation of a filesystem that will likely serve as 
+// Interfaces for a FileStore - a representation of a filesystem that will likely serve as
 
 // Thanks ChatGPT
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use bytes::Bytes;
 
 //----------------------------------------
 // FileStoreService - interface to a FileStore

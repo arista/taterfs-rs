@@ -1,51 +1,16 @@
 pub mod file_store;
-pub mod fs_file_store;
 pub mod repo;
+pub mod samples;
 
-use crate::file_store::{DirEntry, DirectoryLister, FileStoreService};
-use crate::fs_file_store::FsFileStoreService;
-use std::future::Future;
-use std::io;
-use std::path::Path;
-use std::pin::Pin;
+//use crate::samples::sample1::sample1;
+//use crate::samples::sample2::sample2;
+use crate::samples::sample3::sample3;
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
-    let fs = FsFileStoreService::default();
-    let lister = fs.list_directory(Path::new(".")).await?;
-
-    fn descend(
-        mut l: Box<dyn DirectoryLister>,
-        indent: usize,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> {
-        Box::pin(async move {
-            while let Some(entry) = l.next().await? {
-                match entry {
-                    DirEntry::File(f) => {
-                        println!(
-                            "{:indent$}FILE  {:<30} size={:<8} exec={}",
-                            "",
-                            f.rel_path.display(),
-                            f.size,
-                            f.executable,
-                            indent = indent
-                        );
-                    }
-                    DirEntry::Directory(d) => {
-                        println!(
-                            "{:indent$}DIR   {}",
-                            "",
-                            d.rel_path.display(),
-                            indent = indent
-                        );
-                        // Recursive call is fine now because we're boxing each level.
-                        descend(d.lister, indent + 2).await?;
-                    }
-                }
-            }
-            Ok(())
-        })
-    }
-
-    descend(lister, 0).await
+async fn main() -> anyhow::Result<()> {
+//    sample1().await?;
+//    sample2().await?;
+    sample3().await?;
+    Ok(())
 }
+

@@ -216,7 +216,8 @@ pub struct PartialDirectory {
 // File
 // -----------------------------
 
-pub const MAX_FILE_PARTS: usize = 64;
+//pub const MAX_FILE_PARTS: usize = 64;
+pub const MAX_FILE_PARTS: usize = 3;
 pub const CHUNK_SIZES: &[u32] = &[
     4_194_304, // 4 MiB
     1_048_576, // 1 MiB

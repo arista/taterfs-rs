@@ -113,7 +113,7 @@ impl RepoFileBuilder for SyncRepoFileBuilder {
         Ok(())
     }
 
-    async fn complete(mut self: Box<Self>) -> anyhow::Result<ObjectId> {
+    async fn complete(&mut self) -> anyhow::Result<ObjectId> {
         // Go through and add each element of the stack to the item above
         let mut ix = 0;
         while ix < self.stack.len() - 1 {

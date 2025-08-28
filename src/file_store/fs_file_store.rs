@@ -13,7 +13,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
-use crate::file_store::{
+use crate::file_store::file_store::{
     DirEntry, DirectoryEntry, DirectoryLister, FileChunkHandle, FileChunksIterator, FileEntry,
     FileStoreService,
 };

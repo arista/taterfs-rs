@@ -1,7 +1,7 @@
 use crate::repo::repo_backend::RepoBackend;
-use crate::repo::repo_file_builder::RepoFileBuilder;
+use crate::repo::repo_file_builder::{RepoFileBuilder, RepoFileBuilderResult};
 use crate::repo::repo_model::{
-    ChunkFilePart, File, FileFilePart, FilePart, MAX_FILE_PARTS, ObjectId, RepoObject, bytes_hash,
+    ChunkFilePart, File, FileFilePart, FilePart, MAX_FILE_PARTS, RepoObject, bytes_hash,
     to_canonical_json_bytes,
 };
 use async_trait::async_trait;
@@ -113,22 +113,36 @@ impl RepoFileBuilder for SyncRepoFileBuilder {
         Ok(())
     }
 
-    async fn complete(&mut self) -> anyhow::Result<ObjectId> {
+    async fn complete(&mut self) -> anyhow::Result<RepoFileBuilderResult> {
         // Go through and add each element of the stack to the item above
         let mut ix = 0;
-        while ix < self.stack.len() - 1 {
+        while ix + 1 < self.stack.len() {
             let part = self.turn_stack_elem_into_part(ix).await?;
             self.add_part_at(part, ix + 1).await?;
             ix += 1;
         }
 
         // Take the final element and turn it into a File
-        let parts = self.stack[ix].replace_parts();
+        let parts = if self.stack.is_empty() {
+            Vec::new()
+        } else {
+            self.stack.last_mut().unwrap().replace_parts()
+        };
+        let size = parts
+            .iter()
+            .map(|p| match p {
+                FilePart::Chunk(c) => c.size,
+                FilePart::File(f) => f.size,
+            })
+            .sum();
         let file = File { parts };
         let file_obj = RepoObject::File(file);
         let file_bytes = to_canonical_json_bytes(&file_obj);
         let file_id = bytes_hash(&file_bytes);
         self.cx.backend.write(&file_id, file_bytes).await?;
-        Ok(file_id)
+        Ok(RepoFileBuilderResult {
+            file: file_id,
+            size,
+        })
     }
 }

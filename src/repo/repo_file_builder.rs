@@ -8,5 +8,10 @@ use crate::repo::repo_model::ObjectId;
 #[async_trait]
 pub trait RepoFileBuilder: Send {
     async fn add_chunk(&mut self, buf: Bytes) -> anyhow::Result<()>;
-    async fn complete(&mut self) -> anyhow::Result<ObjectId>;
+    async fn complete(&mut self) -> anyhow::Result<RepoFileBuilderResult>;
+}
+
+pub struct RepoFileBuilderResult {
+    pub file: ObjectId,
+    pub size: u64,
 }

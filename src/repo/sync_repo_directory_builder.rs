@@ -110,14 +110,18 @@ impl RepoDirectoryBuilder for SyncRepoDirectoryBuilder {
     async fn complete(&mut self) -> anyhow::Result<ObjectId> {
         // Go through and add each element of the stack to the item above
         let mut ix = 0;
-        while ix < self.stack.len() - 1 {
+        while ix + 1 < self.stack.len() {
             let part = self.turn_stack_elem_into_part(ix).await?;
             self.add_part_at(part, ix + 1).await?;
             ix += 1;
         }
 
         // Take the final element and turn it into a File
-        let parts = self.stack[ix].replace_parts();
+        let parts = if self.stack.is_empty() {
+            Vec::new()
+        } else {
+            self.stack[ix].replace_parts()
+        };
         let directory = Directory { entries: parts };
         let directory_obj = RepoObject::Directory(directory);
         let directory_bytes = to_canonical_json_bytes(&directory_obj);

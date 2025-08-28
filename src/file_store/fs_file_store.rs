@@ -268,6 +268,7 @@ impl DirectoryLister for LocalDirectoryLister {
                 return Ok(Some(DirEntry::Directory(DirectoryEntry {
                     name,
                     rel_path,
+                    abs_path,
                     lister: Box::new(child),
                 })));
             }
@@ -289,6 +290,7 @@ impl DirectoryLister for LocalDirectoryLister {
                             return Ok(Some(DirEntry::File(FileEntry {
                                 name,
                                 rel_path,
+                                abs_path,
                                 size,
                                 executable,
                             })));
@@ -312,6 +314,7 @@ impl DirectoryLister for LocalDirectoryLister {
                 return Ok(Some(DirEntry::File(FileEntry {
                     name,
                     rel_path,
+                    abs_path,
                     size,
                     executable,
                 })));

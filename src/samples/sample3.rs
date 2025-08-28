@@ -27,8 +27,8 @@ pub async fn sample3() -> anyhow::Result<()> {
         let bytes = handle.get_chunk().await?;
         file_builder.add_chunk(bytes).await?;
     }
-    let file_id = file_builder.complete().await?;
-    println!("file_id: {}", file_id);
+    let result = file_builder.complete().await?;
+    println!("file_id: {}, size: {}", result.file, result.size);
 
     Ok(())
 }

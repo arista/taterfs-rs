@@ -39,6 +39,7 @@ pub enum DirEntry {
 pub struct FileEntry {
     // Basename
     pub name: String,
+    pub abs_path: PathBuf,
     // Path relative to the listing root (uses OS separators)
     pub rel_path: PathBuf,
     pub size: u64,
@@ -48,6 +49,7 @@ pub struct FileEntry {
 pub struct DirectoryEntry {
     // Basename
     pub name: String,
+    pub abs_path: PathBuf,
     // Path relative to the listing root (uses OS separators)
     pub rel_path: PathBuf,
     // DirectoryLister that can be used to recursively list this directory

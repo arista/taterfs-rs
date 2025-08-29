@@ -5,7 +5,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 
 //----------------------------------------
@@ -13,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 #[async_trait]
 pub trait FileStoreService: Send + Sync {
-    async fn list_directory(&self, root: &Path) -> io::Result<Box<dyn DirectoryLister>>;
+    async fn list_directory(&self, root: &Path) -> anyhow::Result<Box<dyn DirectoryLister>>;
     async fn get_file_chunks(
         &self,
         path: std::path::PathBuf,
-    ) -> io::Result<Box<dyn FileChunksIterator>>;
+    ) -> anyhow::Result<Box<dyn FileChunksIterator>>;
 }
 
 //----------------------------------------
@@ -26,7 +25,7 @@ pub trait FileStoreService: Send + Sync {
 #[async_trait]
 pub trait DirectoryLister: Send {
     // Pull the next entry, or `Ok(None)` at end-of-directory.
-    async fn next(&mut self) -> io::Result<Option<DirEntry>>;
+    async fn next(&mut self) -> anyhow::Result<Option<DirEntry>>;
 }
 
 #[derive(Debug)]
@@ -79,11 +78,11 @@ pub trait FileChunkHandle: Send + Sync {
     fn offset(&self) -> usize;
 
     /// Fetch the chunk's bytes.
-    async fn get_chunk(&self) -> io::Result<Bytes>;
+    async fn get_chunk(&self) -> anyhow::Result<Bytes>;
 }
 
 /// An async iterator over file chunks. Call `next().await` until it returns `Ok(None)`.
 #[async_trait]
 pub trait FileChunksIterator: Send {
-    async fn next(&mut self) -> io::Result<Option<Box<dyn FileChunkHandle>>>;
+    async fn next(&mut self) -> anyhow::Result<Option<Box<dyn FileChunkHandle>>>;
 }

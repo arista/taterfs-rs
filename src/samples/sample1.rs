@@ -1,18 +1,17 @@
 use crate::file_store::file_store::{DirEntry, DirectoryLister, FileStoreService};
 use crate::file_store::fs_file_store::FsFileStoreService;
 use std::future::Future;
-use std::io;
 use std::path::Path;
 use std::pin::Pin;
 
-pub async fn sample1() -> io::Result<()> {
+pub async fn sample1() -> anyhow::Result<()> {
     let fs = FsFileStoreService::default();
     let lister = fs.list_directory(Path::new(".")).await?;
 
     fn descend(
         mut l: Box<dyn DirectoryLister>,
         indent: usize,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async move {
             while let Some(entry) = l.next().await? {
                 match entry {

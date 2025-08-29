@@ -4,10 +4,11 @@
 
 use bytes::Bytes;
 use std::ffi::OsString;
-use std::io;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
@@ -25,14 +26,16 @@ pub struct FsFileStoreService;
 
 #[async_trait]
 impl FileStoreService for FsFileStoreService {
-    async fn list_directory(&self, root: &Path) -> io::Result<Box<dyn DirectoryLister>> {
+    async fn list_directory(&self, root: &Path) -> Result<Box<dyn DirectoryLister>> {
         LocalDirectoryLister::new_root(root)
             .await
             .map(|l| Box::new(l) as _)
     }
 
-    async fn get_file_chunks(&self, path: PathBuf) -> io::Result<Box<dyn FileChunksIterator>> {
-        let meta = fs::metadata(&path).await?;
+    async fn get_file_chunks(&self, path: PathBuf) -> Result<Box<dyn FileChunksIterator>> {
+        let meta = fs::metadata(&path)
+            .await
+            .with_context(|| format!("stat failed for {}", path.display()))?;
         let len = meta.len();
 
         let iter = FsFileChunksIterator {
@@ -61,7 +64,7 @@ impl IgnoreChain {
     }
 
     // Extend with ignore rules found directly in `dir_abs` (.gitignore / .tfsignore).
-    async fn extend_with_dir(&self, dir_abs: &Path) -> io::Result<Self> {
+    async fn extend_with_dir(&self, dir_abs: &Path) -> Result<Self> {
         let gi = load_gitignore_for_dir(dir_abs).await?;
         if let Some(gi) = gi {
             let mut v = (*self.layers).clone();
@@ -98,20 +101,24 @@ impl IgnoreChain {
 
 // Read `.gitignore` and/or `.tfsignore` inside `dir_abs` and build a combined matcher.
 // Uses async reads and `GitignoreBuilder::add_line` so we don’t block.
-async fn load_gitignore_for_dir(dir_abs: &Path) -> io::Result<Option<Gitignore>> {
+async fn load_gitignore_for_dir(dir_abs: &Path) -> Result<Option<Gitignore>> {
     let git = dir_abs.join(".gitignore");
     let tfs = dir_abs.join(".tfsignore");
 
     // Read files if present (async).
     let git_txt = match fs::read_to_string(&git).await {
         Ok(s) => Some(s),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", git.display()));
+        }
     };
     let tfs_txt = match fs::read_to_string(&tfs).await {
         Ok(s) => Some(s),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", tfs.display()));
+        }
     };
 
     if git_txt.is_none() && tfs_txt.is_none() {
@@ -124,18 +131,28 @@ async fn load_gitignore_for_dir(dir_abs: &Path) -> io::Result<Option<Gitignore>>
         for line in s.lines() {
             // Treat both files with identical gitignore semantics.
             b.add_line(Some(dir_abs.to_path_buf()), line)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                .with_context(|| {
+                    format!(
+                        "invalid ignore pattern in {} (from .gitignore)",
+                        dir_abs.display()
+                    )
+                })?;
         }
     }
     if let Some(s) = tfs_txt {
         for line in s.lines() {
             b.add_line(Some(dir_abs.to_path_buf()), line)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                .with_context(|| {
+                    format!(
+                        "invalid ignore pattern in {} (from .tfsignore)",
+                        dir_abs.display()
+                    )
+                })?;
         }
     }
     let gi = b
         .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        .with_context(|| format!("building ignore matcher for {}", dir_abs.display()))?;
     Ok(Some(gi))
 }
 
@@ -163,13 +180,21 @@ impl std::fmt::Debug for LocalDirectoryLister {
 }
 
 impl LocalDirectoryLister {
-    pub async fn new_root(root: &Path) -> io::Result<Self> {
-        let root_abs = fs::canonicalize(root).await?;
+    pub async fn new_root(root: &Path) -> Result<Self> {
+        let root_abs = fs::canonicalize(root)
+            .await
+            .with_context(|| format!("canonicalize {}", root.display()))?;
         let rel_dir = PathBuf::new();
 
         let mut names = Vec::<OsString>::new();
-        let mut rd = fs::read_dir(&root_abs).await?;
-        while let Some(ent) = rd.next_entry().await? {
+        let mut rd = fs::read_dir(&root_abs)
+            .await
+            .with_context(|| format!("read_dir {}", root_abs.display()))?;
+        while let Some(ent) = rd
+            .next_entry()
+            .await
+            .with_context(|| format!("read_dir next_entry {}", root_abs.display()))?
+        {
             names.push(ent.file_name());
         }
         names.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
@@ -193,13 +218,19 @@ impl LocalDirectoryLister {
         parent_ignores: &IgnoreChain,
         parent_rel_dir: &Path,
         child_name: &OsString,
-    ) -> io::Result<Self> {
+    ) -> Result<Self> {
         let dir_abs = root_abs.join(parent_rel_dir).join(child_name);
         let rel_dir = parent_rel_dir.join(child_name);
 
         let mut names = Vec::<OsString>::new();
-        let mut rd = fs::read_dir(&dir_abs).await?;
-        while let Some(ent) = rd.next_entry().await? {
+        let mut rd = fs::read_dir(&dir_abs)
+            .await
+            .with_context(|| format!("read_dir {}", dir_abs.display()))?;
+        while let Some(ent) = rd
+            .next_entry()
+            .await
+            .with_context(|| format!("read_dir next_entry {}", dir_abs.display()))?
+        {
             names.push(ent.file_name());
         }
         names.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
@@ -219,7 +250,7 @@ impl LocalDirectoryLister {
 
 #[async_trait]
 impl DirectoryLister for LocalDirectoryLister {
-    async fn next(&mut self) -> io::Result<Option<DirEntry>> {
+    async fn next(&mut self) -> Result<Option<DirEntry>> {
         loop {
             if self.idx >= self.names_sorted.len() {
                 return Ok(None);
@@ -362,7 +393,7 @@ impl FsFileChunksIterator {
 
 #[async_trait]
 impl FileChunksIterator for FsFileChunksIterator {
-    async fn next(&mut self) -> io::Result<Option<Box<dyn FileChunkHandle>>> {
+    async fn next(&mut self) -> Result<Option<Box<dyn FileChunkHandle>>> {
         if self.cursor >= self.file_len {
             return Ok(None);
         }
@@ -404,12 +435,23 @@ impl FileChunkHandle for FsFileChunkHandle {
         self.offset
     }
 
-    async fn get_chunk(&self) -> io::Result<Bytes> {
-        let mut f = fs::File::open(&*self.path).await?;
-        f.seek(SeekFrom::Start(self.offset as u64)).await?;
+    async fn get_chunk(&self) -> Result<Bytes> {
+        let mut f = fs::File::open(&*self.path)
+            .await
+            .with_context(|| format!("open {}", self.path.display()))?;
+        f.seek(SeekFrom::Start(self.offset as u64))
+            .await
+            .with_context(|| format!("seek to {} in {}", self.offset, self.path.display()))?;
 
         let mut buf = vec![0u8; self.size];
-        f.read_exact(&mut buf).await?;
+        f.read_exact(&mut buf).await.with_context(|| {
+            format!(
+                "read {} bytes at offset {} from {}",
+                self.size,
+                self.offset,
+                self.path.display()
+            )
+        })?;
         Ok(Bytes::from(buf))
     }
 }

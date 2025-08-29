@@ -4,8 +4,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 //----------------------------------------
 // FileStoreService - interface to a FileStore
@@ -23,46 +22,35 @@ pub trait FileStoreService: Send + Sync {
 // DirectoryLister - lists the contents of a directory, sorted by name.  Directory entries are yielded one at a time by calling "next()", until Ok(None) is reached.
 
 #[async_trait]
-pub trait DirectoryLister: Send {
+pub trait DirectoryLister: Send + Sync {
     // Pull the next entry, or `Ok(None)` at end-of-directory.
     async fn next(&mut self) -> anyhow::Result<Option<DirEntry>>;
 }
 
-#[derive(Debug)]
 pub enum DirEntry {
-    File(FileEntry),
-    Directory(DirectoryEntry),
+    File(Box<dyn FileEntry>),
+    Directory(Box<dyn DirectoryEntry>),
 }
 
-#[derive(Debug, Clone)]
-pub struct FileEntry {
+pub trait FileEntry {
     // Basename
-    pub name: String,
-    pub abs_path: PathBuf,
+    fn name(&self) -> &str;
+    // Absolute path
+    fn abs_path(&self) -> &Path;
     // Path relative to the listing root (uses OS separators)
-    pub rel_path: PathBuf,
-    pub size: u64,
-    pub executable: bool,
+    fn rel_path(&self) -> &Path;
+    fn size(&self) -> u64;
+    fn executable(&self) -> bool;
 }
 
-pub struct DirectoryEntry {
+pub trait DirectoryEntry {
     // Basename
-    pub name: String,
-    pub abs_path: PathBuf,
+    fn name(&self) -> &str;
+    fn abs_path(&self) -> &Path;
     // Path relative to the listing root (uses OS separators)
-    pub rel_path: PathBuf,
-    // DirectoryLister that can be used to recursively list this directory
-    pub lister: Box<dyn DirectoryLister>,
-}
-
-// Implement Debug without including lister
-impl fmt::Debug for DirectoryEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DirectoryEntry")
-            .field("name", &self.name)
-            .field("rel_path", &self.rel_path)
-            .finish_non_exhaustive() // makes it obvious there are more fields
-    }
+    fn rel_path(&self) -> &Path;
+    // DirectoryLister that can be used to recursively list this directory - this method transfers ownership out of the DirectoryEntry
+    fn lister(&mut self) -> Box<dyn DirectoryLister>;
 }
 
 //----------------------------------------

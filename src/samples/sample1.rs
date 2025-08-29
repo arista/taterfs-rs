@@ -19,9 +19,9 @@ pub async fn sample1() -> anyhow::Result<()> {
                         println!(
                             "{:indent$}FILE  {:<30} size={:<8} exec={}",
                             "",
-                            f.rel_path.display(),
-                            f.size,
-                            f.executable,
+                            f.rel_path().display(),
+                            f.size(),
+                            f.executable(),
                             indent = indent
                         );
                     }
@@ -29,11 +29,11 @@ pub async fn sample1() -> anyhow::Result<()> {
                         println!(
                             "{:indent$}DIR   {}",
                             "",
-                            d.rel_path.display(),
+                            d.rel_path().display(),
                             indent = indent
                         );
                         // Recursive call is fine now because we're boxing each level.
-                        descend(d.lister, indent + 2).await?;
+                        descend(d.lister(), indent + 2).await?;
                     }
                 }
             }

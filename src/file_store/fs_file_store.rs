@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::fmt;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -296,12 +297,14 @@ impl DirectoryLister for LocalDirectoryLister {
                 )
                 .await?;
 
-                return Ok(Some(DirEntry::Directory(DirectoryEntry {
-                    name,
-                    rel_path,
-                    abs_path,
-                    lister: Box::new(child),
-                })));
+                return Ok(Some(DirEntry::Directory(Box::new(FsDirectoryEntry {
+                    inner: FsDirectoryEntryInner {
+                        name,
+                        rel_path,
+                        abs_path,
+                        lister: Some(Box::new(child)),
+                    }
+                }))));
             }
 
             if is_symlink {
@@ -318,13 +321,15 @@ impl DirectoryLister for LocalDirectoryLister {
                             }
                             let size = target_meta.len();
                             let executable = is_executable(&target_meta, &abs_path);
-                            return Ok(Some(DirEntry::File(FileEntry {
-                                name,
-                                rel_path,
-                                abs_path,
-                                size,
-                                executable,
-                            })));
+                            return Ok(Some(DirEntry::File(Box::new(FsFileEntry {
+                                inner: FsFileEntryInner {
+                                    name,
+                                    rel_path,
+                                    abs_path,
+                                    size,
+                                    executable,
+                                }
+                            }))));
                         }
                         // special type: skip
                         continue;
@@ -342,13 +347,15 @@ impl DirectoryLister for LocalDirectoryLister {
                 }
                 let size = lmeta.len();
                 let executable = is_executable(&lmeta, &abs_path);
-                return Ok(Some(DirEntry::File(FileEntry {
-                    name,
-                    rel_path,
-                    abs_path,
-                    size,
-                    executable,
-                })));
+                return Ok(Some(DirEntry::File(Box::new(FsFileEntry {
+                    inner: FsFileEntryInner {
+                        name,
+                        rel_path,
+                        abs_path,
+                        size,
+                        executable,
+                    }
+                }))));
             }
 
             // Special file (fifo, socket, device): skip
@@ -453,5 +460,74 @@ impl FileChunkHandle for FsFileChunkHandle {
             )
         })?;
         Ok(Bytes::from(buf))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FsFileEntry {
+    pub inner: FsFileEntryInner
+}
+
+#[derive(Debug, Clone)]
+pub struct FsFileEntryInner {
+    name: String,
+    abs_path: PathBuf,
+    rel_path: PathBuf,
+    size: u64,
+    executable: bool,
+}
+
+impl FileEntry for FsFileEntry {
+    fn name(&self) -> &str {
+        self.inner.name.as_str()
+    }
+    fn abs_path(&self) -> &Path {
+        self.inner.abs_path.as_path()
+    }
+    fn rel_path(&self) -> &Path {
+        self.inner.rel_path.as_path()
+    }
+    fn size(&self) -> u64 {
+        self.inner.size
+    }
+    fn executable(&self) -> bool {
+        self.inner.executable
+    }
+}
+
+
+pub struct FsDirectoryEntry {
+    pub inner: FsDirectoryEntryInner
+}
+
+pub struct FsDirectoryEntryInner {
+    name: String,
+    abs_path: PathBuf,
+    rel_path: PathBuf,
+    lister: Option<Box<dyn DirectoryLister>>,
+}
+
+impl DirectoryEntry for FsDirectoryEntry {
+    fn name(&self) -> &str {
+        self.inner.name.as_str()
+    }
+    fn abs_path(&self) -> &Path {
+        self.inner.abs_path.as_path()
+    }
+    fn rel_path(&self) -> &Path {
+        self.inner.rel_path.as_path()
+    }
+    fn lister(&mut self) -> Box<dyn DirectoryLister> {
+        self.inner.lister.take().expect("FsDirectoryEntry::lister() called more than once")
+    }
+}
+
+// Implement Debug without including lister
+impl fmt::Debug for FsDirectoryEntryInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectoryEntry")
+            .field("name", &self.name)
+            .field("rel_path", &self.rel_path)
+            .finish_non_exhaustive() // makes it obvious there are more fields
     }
 }

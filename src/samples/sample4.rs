@@ -66,23 +66,23 @@ impl Uploader {
             match top.iter.next().await? {
                 Some(dir_entry) => match dir_entry {
                     file_store::DirEntry::File(f) => {
-                        let result = self.upload_file(f.abs_path.as_path()).await?;
+                        let result = self.upload_file(f.abs_path()).await?;
                         self.frames
                             .last_mut()
                             .unwrap()
                             .builder
                             .add_entry(repo_model::DirectoryEntry::File(repo_model::FileEntry {
-                                name: f.name,
-                                executable: f.executable,
+                                name: f.name().to_string(),
+                                executable: f.executable(),
                                 file: result.file,
                                 size: result.size,
                             }))
                             .await?;
                     }
-                    file_store::DirEntry::Directory(d) => {
+                    file_store::DirEntry::Directory(mut d) => {
                         self.frames.push(UploaderFrame {
-                            name: d.name,
-                            iter: d.lister,
+                            name: d.name().to_string(),
+                            iter: d.lister(),
                             builder: Box::new(
                                 sync_repo_directory_builder::SyncRepoDirectoryBuilder::new(
                                     sync_repo_directory_builder::Context {

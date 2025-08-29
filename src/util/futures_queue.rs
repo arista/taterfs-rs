@@ -18,6 +18,13 @@ struct Inner<T> {
     notify: Arc<Notify>,
 }
 
+// Helper enum to keep the control flow tidy
+enum Decision<T> {
+    Got(tokio::sync::oneshot::Receiver<anyhow::Result<T>>),
+    Done,
+    Wait(Arc<tokio::sync::Notify>),
+}
+
 impl<T: Send + 'static> FuturesQueue<T> {
     pub fn new() -> Self {
         Self {
@@ -66,31 +73,38 @@ impl<T: Send + 'static> FuturesQueue<T> {
         });
     }
 
+
     /// Await the next result in FIFO order.
-    /// - Some(Ok(T))  : next item finished successfully
-    /// - Some(Err(_)) : next item errored/panicked/cancelled
-    /// - None         : completed and drained
-    pub async fn next(&self) -> Option<anyhow::Result<T>> {
+    /// - Ok(Some(T))  : next item finished successfully
+    /// - Ok(None)     : completed and drained
+    /// - Err(_) : next item errored/panicked/cancelled
+    pub async fn next(&self) -> anyhow::Result<Option<T>> {
         loop {
-            let wait_on: Option<Arc<Notify>> = {
+            // decide what to do under the lock
+            let decision: Decision<T> = {
                 let mut g = self.inner.lock().await;
 
                 if let Some(rx) = g.queue.pop_front() {
-                    drop(g);
-                    return Some(match rx.await {
-                        Ok(r) => r,
-                        Err(_) => Err(anyhow::anyhow!("task cancelled before sending result")),
-                    });
+                    Decision::Got(rx)
                 } else if g.completed {
-                    return None;
+                    Decision::Done
                 } else {
-                    // Clone the Arc so it outlives the lock guard
-                    Some(Arc::clone(&g.notify))
+                    Decision::Wait(Arc::clone(&g.notify))
                 }
             };
 
-            if let Some(n) = wait_on {
-                n.notified().await;
+            match decision {
+                Decision::Got(rx) => {
+                    match rx.await {
+                        Ok(r) => return r.map(Some), // r is Result<T>, map into Ok(Some(T)) / Err
+                        Err(_) => return Err(anyhow::anyhow!("task cancelled before sending result")),
+                    }
+                }
+                Decision::Done => return Ok(None),
+                Decision::Wait(n) => {
+                    n.notified().await;
+                    continue;
+                }
             }
         }
     }

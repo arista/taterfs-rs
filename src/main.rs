@@ -1,4 +1,4 @@
-pub mod file_store;
+pub mod file_source;
 pub mod repo;
 pub mod samples;
 pub mod util;

@@ -1,4 +1,4 @@
-// Implementation of FileStore that uses the local filesystem.  Ignores any directories named ".git" or ".tfs".  Also respects the directives in ".gitignore" and ".tfsignore" (.tfsignore is the same format as .gitignore - if both are present, their entries are combined, .gitignore first then .tfsignore)
+// Implementation of FileSource that uses the local filesystem.  Ignores any directories named ".git" or ".tfs".  Also respects the directives in ".gitignore" and ".tfsignore" (.tfsignore is the same format as .gitignore - if both are present, their entries are combined, .gitignore first then .tfsignore)
 
 // Thanks ChatGPT
 
@@ -14,18 +14,18 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
-use crate::file_store::file_store::{
+use crate::file_source::file_source::{
     DirEntry, DirectoryEntry, DirectoryLister, FileChunkHandle, FileChunksIterator, FileEntry,
-    FileStoreService,
+    FileSourceService,
 };
 use crate::repo::repo_model::CHUNK_SIZES;
 
 // Tokio-based local filesystem implementation.
 #[derive(Debug, Default, Clone)]
-pub struct FsFileStoreService;
+pub struct FsFileSourceService;
 
 #[async_trait]
-impl FileStoreService for FsFileStoreService {
+impl FileSourceService for FsFileSourceService {
     async fn list_directory(&self, root: &Path) -> Result<Box<dyn DirectoryLister>> {
         LocalDirectoryLister::new_root(root)
             .await

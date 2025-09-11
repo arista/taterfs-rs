@@ -1,4 +1,4 @@
-// Interfaces for a FileStore - a representation of a filesystem that will likely serve as
+// Interfaces for a FileSource - a representation of a filesystem that provides files, typically for uploading
 
 // Thanks ChatGPT
 
@@ -8,10 +8,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 //----------------------------------------
-// FileStoreService - interface to a FileStore
+// FileSourceService - interface to a FileSource
 
 #[async_trait]
-pub trait FileStoreService: Send + Sync {
+pub trait FileSourceService: Send + Sync {
     async fn list_directory(&self, root: &Path) -> anyhow::Result<Box<dyn DirectoryLister>>;
     async fn get_file_chunks(
         &self,

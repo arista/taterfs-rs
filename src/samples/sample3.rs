@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::file_store::file_store::FileStoreService;
-use crate::file_store::fs_file_store::FsFileStoreService;
+use crate::file_source::{FileSourceService, FsFileSourceService};
 use crate::repo::fs_repo_backend;
 use crate::repo::repo_file_builder::RepoFileBuilder;
 use crate::repo::sync_repo_file_builder;
@@ -14,7 +13,7 @@ pub async fn sample3() -> anyhow::Result<()> {
             validate_hashes_on_write: true,
         },
     ));
-    let fs = FsFileStoreService {};
+    let fs = FsFileSourceService {};
     let mut iter = fs
         .get_file_chunks(PathBuf::from("/data/taterfs/tatercore/docs/log"))
         .await?;

@@ -1,11 +1,10 @@
-use crate::file_store::file_store::{DirEntry, DirectoryLister, FileStoreService};
-use crate::file_store::fs_file_store::FsFileStoreService;
+use crate::file_source::{DirEntry, DirectoryLister, FileSourceService, FsFileSourceService};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
 pub async fn sample1() -> anyhow::Result<()> {
-    let fs = FsFileStoreService::default();
+    let fs = FsFileSourceService::default();
     let lister = fs.list_directory(Path::new(".")).await?;
 
     fn descend(

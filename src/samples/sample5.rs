@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::file_store::file_store;
-use crate::file_store::file_store::{DirectoryLister, FileStoreService};
-use crate::file_store::fs_file_store::FsFileStoreService;
+use crate::file_source::file_source;
+use crate::file_source::file_source::{DirectoryLister, FileSourceService};
+use crate::file_source::fs_file_source::FsFileSourceService;
 use crate::repo::repo_backend::RepoBackend;
 use crate::repo::repo_directory_builder::RepoDirectoryBuilder;
 use crate::repo::repo_file_builder::{RepoFileBuilder, RepoFileBuilderResult};
@@ -20,11 +20,11 @@ pub async fn sample5() -> anyhow::Result<()> {
     })
     .await?;
     let repo_backend = Arc::new(repo_backend_obj);
-    let fs = Arc::new(FsFileStoreService {});
+    let fs = Arc::new(FsFileSourceService {});
 
     let mut uploader = Uploader {
         repo_backend: repo_backend.clone(),
-        file_store: fs.clone(),
+        file_source: fs.clone(),
         frames: Vec::new(),
     };
 
@@ -39,7 +39,7 @@ pub async fn sample5() -> anyhow::Result<()> {
 
 struct Uploader {
     repo_backend: Arc<dyn RepoBackend>,
-    file_store: Arc<dyn FileStoreService>,
+    file_source: Arc<dyn FileSourceService>,
     frames: Vec<UploaderFrame>,
 }
 
@@ -53,7 +53,7 @@ impl Uploader {
     pub async fn upload_directory(&mut self, path: &Path) -> anyhow::Result<ObjectId> {
         self.frames.push(UploaderFrame {
             name: "".to_string(),
-            iter: self.file_store.list_directory(path).await?,
+            iter: self.file_source.list_directory(path).await?,
             builder: Box::new(sync_repo_directory_builder::SyncRepoDirectoryBuilder::new(
                 sync_repo_directory_builder::Context {
                     backend: self.repo_backend.clone(),
@@ -65,7 +65,7 @@ impl Uploader {
             let top = self.frames.last_mut().unwrap();
             match top.iter.next().await? {
                 Some(dir_entry) => match dir_entry {
-                    file_store::DirEntry::File(f) => {
+                    file_source::DirEntry::File(f) => {
                         let result = self.upload_file(f.abs_path.as_path()).await?;
                         self.frames
                             .last_mut()
@@ -79,7 +79,7 @@ impl Uploader {
                             }))
                             .await?;
                     }
-                    file_store::DirEntry::Directory(d) => {
+                    file_source::DirEntry::Directory(d) => {
                         self.frames.push(UploaderFrame {
                             name: d.name,
                             iter: d.lister,
@@ -117,7 +117,7 @@ impl Uploader {
     }
 
     pub async fn upload_file(&self, path: &Path) -> anyhow::Result<RepoFileBuilderResult> {
-        let mut iter = self.file_store.get_file_chunks(PathBuf::from(path)).await?;
+        let mut iter = self.file_source.get_file_chunks(PathBuf::from(path)).await?;
         let mut file_builder =
             sync_repo_file_builder::SyncRepoFileBuilder::new(sync_repo_file_builder::Context {
                 backend: self.repo_backend.clone(),

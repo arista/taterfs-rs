@@ -6,11 +6,9 @@ use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::result::SdkError as SmithySdkError;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata; // trait for .code()/.meta()
 use bytes::Bytes;
-use std::path::{Path, PathBuf};
 
 use super::FileStore;
 
-#[derive(Clone)]
 pub struct S3FileStoreContext {
     pub client: Client,
     pub bucket: String,
@@ -18,7 +16,6 @@ pub struct S3FileStoreContext {
     pub prefix: String,
 }
 
-#[derive(Clone)]
 pub struct S3FileStore {
     ctx: S3FileStoreContext,
 }
@@ -33,16 +30,16 @@ impl S3FileStore {
         Self { ctx: S3FileStoreContext { prefix, ..ctx }}
     }
 
-    fn key_for(&self, rel: &Path) -> String {
+    fn key_for(&self, rel: &str) -> String {
         let rel = rel.strip_prefix("/").unwrap_or(rel);
         match self.ctx.prefix.is_empty() {
-            true => rel.to_string_lossy().to_string(),
-            false if rel.as_os_str().is_empty() => self.ctx.prefix.clone(),
-            false => format!("{}/{}", self.ctx.prefix, rel.to_string_lossy()),
+            true => rel.to_string(),
+            false if rel.to_string().is_empty() => self.ctx.prefix.clone(),
+            false => format!("{}/{}", self.ctx.prefix, rel),
         }
     }
 
-    fn dir_prefix_for(&self, rel_dir: &Path) -> String {
+    fn dir_prefix_for(&self, rel_dir: &str) -> String {
         let mut p = self.key_for(rel_dir);
         if !p.is_empty() && !p.ends_with('/') {
             p.push('/');
@@ -53,7 +50,7 @@ impl S3FileStore {
 
 #[async_trait(?Send)]
 impl FileStore for S3FileStore {
-    async fn exists(&self, path: &Path) -> Result<bool> {
+    async fn exists(&self, path: &str) -> Result<bool> {
         let key = self.key_for(path);
         let res = self
             .ctx
@@ -77,7 +74,7 @@ impl FileStore for S3FileStore {
         }
     }
 
-    async fn read(&self, path: &Path) -> Result<Bytes> {
+    async fn read(&self, path: &str) -> Result<Bytes> {
         let key = self.key_for(path);
         let out = self
             .ctx
@@ -97,7 +94,7 @@ impl FileStore for S3FileStore {
         Ok(Bytes::from(b.to_vec()))
     }
 
-    async fn write(&self, path: &Path, buf: Bytes) -> Result<()> {
+    async fn write(&self, path: &str, buf: Bytes) -> Result<()> {
         let key = self.key_for(path);
         self.ctx
             .client
@@ -113,7 +110,7 @@ impl FileStore for S3FileStore {
 
     // Recursively search under the given "directory" (key prefix) for the first file.
     // Returns the path RELATIVE TO the given directory (e.g. "dir1/file.txt" or "a/b/c.txt").
-    async fn first_file(&self, path: &Path) -> Result<Option<PathBuf>> {
+    async fn first_file(&self, path: &str) -> Result<Option<String>> {
         let dir_prefix = self.dir_prefix_for(path);
 
         let out = self
@@ -138,7 +135,7 @@ impl FileStore for S3FileStore {
         {
             if let Some(rel) = first_key.strip_prefix(&dir_prefix) {
                 if !rel.is_empty() {
-                    return Ok(Some(PathBuf::from(rel)));
+                    return Ok(Some(rel.to_string()));
                 }
             }
         }

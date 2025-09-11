@@ -10,13 +10,12 @@ use anyhow::{Context as AnyhowContext, Result};
 use bytes::Bytes;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
-use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use std::path::{Path, PathBuf};
 
 use super::FileStore;
 
-#[derive(Clone, Debug)]
 pub struct FSFileStoreContext {
     /// Root of the logical store; all paths are relative to this.
     pub root_path: PathBuf,
@@ -60,7 +59,7 @@ impl FSFileStore {
         })
     }
 
-    fn abs(&self, rel: &Path) -> PathBuf {
+    fn abs(&self, rel: &str) -> PathBuf {
         let rel = rel.strip_prefix("/").unwrap_or(rel);
         self.ctx.root_path.join(rel)
     }
@@ -84,7 +83,7 @@ impl FSFileStore {
     #[cfg(unix)]
     async fn fsync_dir(path: &Path) -> Result<()> {
         use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
-        let p = path.to_path_buf();
+        let p = PathBuf::from(path);
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let f = OpenOptions::new()
                 .read(true)
@@ -99,7 +98,7 @@ impl FSFileStore {
     }
 
     #[cfg(not(unix))]
-    async fn fsync_dir(_path: &Path) -> Result<()> {
+    async fn fsync_dir(_path: &str) -> Result<()> {
         // TODO: add Windows-specific directory fsync if you need strong durability there.
         Ok(())
     }
@@ -107,18 +106,18 @@ impl FSFileStore {
 
 #[async_trait(?Send)]
 impl FileStore for FSFileStore {
-    async fn exists(&self, path: &Path) -> Result<bool> {
+    async fn exists(&self, path: &str) -> Result<bool> {
         Ok(fs::try_exists(self.abs(path)).await?)
     }
 
-    async fn read(&self, path: &Path) -> Result<Bytes> {
+    async fn read(&self, path: &str) -> Result<Bytes> {
         let p = self.abs(path);
         let v = fs::read(&p).await.with_context(|| format!("read {:?}", p))?;
         Ok(Bytes::from(v))
     }
 
     /// Write to a temp in `tmp_dir`, queue it, and auto-flush if the queue is “full”.
-    async fn write(&self, path: &Path, buf: Bytes) -> Result<()> {
+    async fn write(&self, path: &str, buf: Bytes) -> Result<()> {
         let final_path = self.abs(path);
         let parent = final_path
             .parent()
@@ -174,7 +173,7 @@ impl FileStore for FSFileStore {
     }
 
     /// Deterministic recursive search (iterative, lexicographic paths).
-    async fn first_file(&self, path: &Path) -> Result<Option<PathBuf>> {
+    async fn first_file(&self, path: &str) -> Result<Option<String>> {
         let base_abs = self.abs(path);
         if !fs::try_exists(&base_abs).await? {
             return Ok(None);
@@ -219,7 +218,7 @@ impl FileStore for FSFileStore {
             if meta.is_file() {
                 let rel = child.strip_prefix(&base_abs).unwrap().to_path_buf();
                 if !rel.as_os_str().is_empty() {
-                    return Ok(Some(rel));
+                    return Ok(Some(rel.to_string_lossy().to_string()));
                 }
             } else if meta.is_dir() {
                 dir_stack.push(child.clone());
@@ -313,7 +312,7 @@ fn verify_same_filesystem(a: &Path, b: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn verify_same_filesystem(_a: &Path, _b: &Path) -> Result<()> {
+fn verify_same_filesystem(_a: &str, _b: &str) -> Result<()> {
     // TODO: implement a Windows check if you need it (compare volume/drive).
     Ok(())
 }

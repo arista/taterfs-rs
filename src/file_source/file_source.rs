@@ -2,6 +2,7 @@
 
 // Thanks ChatGPT
 
+use crate::prelude::*;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::fmt;
@@ -12,11 +13,11 @@ use std::path::{Path, PathBuf};
 
 #[async_trait(?Send)]
 pub trait FileSourceService {
-    async fn list_directory(&self, root: &Path) -> anyhow::Result<Box<dyn DirectoryLister>>;
+    async fn list_directory(&self, root: &Path) -> Result<Box<dyn DirectoryLister>>;
     async fn get_file_chunks(
         &self,
         path: std::path::PathBuf,
-    ) -> anyhow::Result<Box<dyn FileChunksIterator>>;
+    ) -> Result<Box<dyn FileChunksIterator>>;
 }
 
 //----------------------------------------
@@ -25,7 +26,7 @@ pub trait FileSourceService {
 #[async_trait(?Send)]
 pub trait DirectoryLister {
     // Pull the next entry, or `Ok(None)` at end-of-directory.
-    async fn next(&mut self) -> anyhow::Result<Option<DirEntry>>;
+    async fn next(&mut self) -> Result<Option<DirEntry>>;
 }
 
 #[derive(Debug)]
@@ -78,11 +79,11 @@ pub trait FileChunkHandle {
     fn offset(&self) -> usize;
 
     /// Fetch the chunk's bytes.
-    async fn get_chunk(&self) -> anyhow::Result<Bytes>;
+    async fn get_chunk(&self) -> Result<Bytes>;
 }
 
 /// An async iterator over file chunks. Call `next().await` until it returns `Ok(None)`.
 #[async_trait(?Send)]
 pub trait FileChunksIterator {
-    async fn next(&mut self) -> anyhow::Result<Option<Box<dyn FileChunkHandle>>>;
+    async fn next(&mut self) -> Result<Option<Box<dyn FileChunkHandle>>>;
 }

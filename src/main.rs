@@ -2,6 +2,8 @@ mod cli;
 mod cmd;
 mod context;
 mod prelude;
+mod file_source;
+mod repo;
 
 use crate::prelude::*;
 use clap::Parser;

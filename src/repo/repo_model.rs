@@ -1,7 +1,7 @@
 // Thanks ChatGPT
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, Deserializer};
 use std::{cmp::Ordering, rc::Rc};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -46,13 +46,12 @@ impl std::fmt::Display for TimestampISOString {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ObjectId(Rc<String>);
 
 impl ObjectId {
     pub fn new<S: Into<String>>(s: S) -> Self {
-        Self(s.into())
+        Self(Rc::new(s.into()))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -66,12 +65,35 @@ impl Deref for ObjectId {
 }
 impl From<&str> for ObjectId {
     fn from(s: &str) -> Self {
-        Self(s.to_string())
+        Self(Rc::new(s.to_string()))
     }
 }
 impl From<String> for ObjectId {
     fn from(s: String) -> Self {
-        Self(s)
+        Self(Rc::new(s))
+    }
+}
+impl From<Rc<String>> for ObjectId {
+    fn from(s: Rc<String>) -> Self {
+        Self(s.clone())
+    }
+}
+impl Serialize for ObjectId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ObjectId(Rc::new(s)))
     }
 }
 impl std::fmt::Display for ObjectId {
@@ -92,7 +114,7 @@ impl FromStr for ObjectId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // 64 hex chars (sha-256 style). Loosen if you use different hash.
         if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-            Ok(ObjectId(s.to_ascii_lowercase()))
+            Ok(ObjectId(s.to_ascii_lowercase().into()))
         } else {
             Err("invalid ObjectId: expected 64 hex chars")
         }

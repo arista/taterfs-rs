@@ -2,13 +2,13 @@
 
 // Thanks ChatGPT
 
+use crate::prelude::*;
 use bytes::Bytes;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tokio::fs;
@@ -23,6 +23,12 @@ use crate::repo::repo_model::CHUNK_SIZES;
 // Tokio-based local filesystem implementation.
 #[derive(Debug, Default, Clone)]
 pub struct FsFileSourceService;
+
+impl FsFileSourceService {
+    pub fn new() -> FsFileSourceService {
+        FsFileSourceService {}
+    }
+}
 
 #[async_trait(?Send)]
 impl FileSourceService for FsFileSourceService {

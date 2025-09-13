@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-//    pub data_dir: String,
+    //    pub data_dir: String,
 }
 
 #[derive(Clone)]
@@ -13,7 +13,10 @@ pub struct Context {
 
 impl Context {
     pub fn load() -> anyhow::Result<Self> {
-        use figment::{providers::{Env, Format, Toml}, Figment};
+        use figment::{
+            Figment,
+            providers::{Env, Format, Toml},
+        };
         let cfg: AppConfig = Figment::new()
             // FIXME - do actual config file loading
             .merge(Toml::file("taterfs.toml"))

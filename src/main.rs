@@ -3,9 +3,9 @@ mod cmd;
 mod context;
 mod prelude;
 
-use clap::{Parser};
-use tracing_subscriber::EnvFilter;
 use crate::prelude::*;
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
 
 fn init_tracing(verbosity: u8) {
     let base = match verbosity {

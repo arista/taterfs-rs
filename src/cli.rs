@@ -1,10 +1,15 @@
-use clap::{Parser, Subcommand, Args, CommandFactory};
+use crate::cmd;
 use crate::context;
 use crate::prelude::*;
-use crate::cmd;
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "tfs", version, about = "FIXME - Example CLI", arg_required_else_help = true)]
+#[command(
+    name = "tfs",
+    version,
+    about = "FIXME - Example CLI",
+    arg_required_else_help = true
+)]
 pub struct Cli {
     /// Increase output verbosity (-v, -vv)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -38,11 +43,11 @@ impl Commands {
         Ok(match self {
             Commands::Test(a) => a.run(&ctx).await?,
             Commands::Completions(a) => {
-            use clap_complete::{generate};
-            use std::io;
-            let mut cmd = Cli::command();
-            generate(a.shell, &mut cmd, "tfs", &mut io::stdout());
-        }
+                use clap_complete::generate;
+                use std::io;
+                let mut cmd = Cli::command();
+                generate(a.shell, &mut cmd, "tfs", &mut io::stdout());
+            }
         })
     }
 }
@@ -58,7 +63,7 @@ pub mod test {
     impl Commands {
         pub async fn run(&self, ctx: &context::Context) -> Result<()> {
             Ok(match self {
-                Commands::ListDirectory(a) => cmd::test::list_directory::handle(&ctx, &a).await?
+                Commands::ListDirectory(a) => cmd::test::list_directory::handle(&ctx, &a).await?,
             })
         }
     }

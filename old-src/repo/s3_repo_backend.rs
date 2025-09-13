@@ -111,7 +111,7 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl RepoBackend for S3RepoBackend {
     async fn current_root_exists(&self) -> Result<bool, BackendError> {
         let resp = self

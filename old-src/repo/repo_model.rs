@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, rc::Rc};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
@@ -48,7 +48,7 @@ impl std::fmt::Display for TimestampISOString {
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ObjectId(String);
+pub struct ObjectId(Rc<String>);
 
 impl ObjectId {
     pub fn new<S: Into<String>>(s: S) -> Self {

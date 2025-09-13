@@ -212,7 +212,7 @@ impl FsRepoBackend {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl RepoBackend for FsRepoBackend {
     async fn current_root_exists(&self) -> Result<bool, BackendError> {
         Ok(self.find_current_root_head_file().await?.is_some())

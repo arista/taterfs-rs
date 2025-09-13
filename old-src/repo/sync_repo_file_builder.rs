@@ -94,7 +94,7 @@ impl SyncRepoFileBuilder {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl RepoFileBuilder for SyncRepoFileBuilder {
     async fn add_chunk(&mut self, buf: Bytes) -> anyhow::Result<()> {
         // Get the chunk's hash

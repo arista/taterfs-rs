@@ -43,8 +43,8 @@ pub enum BackendError {
 /// - `write(id, bytes)` SHOULD verify that `sha256(bytes) == id` and error otherwise
 /// - `read(id)` MUST return exactly the bytes previously written for that id
 /// - `write_current_root(new)` replaces the current pointer (see CAS method below)
-#[async_trait]
-pub trait RepoBackend: Send + Sync {
+#[async_trait(?Send)]
+pub trait RepoBackend {
     /// Does the root pointer exist at all?
     async fn current_root_exists(&self) -> Result<bool, BackendError>;
 

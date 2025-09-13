@@ -98,7 +98,7 @@ impl SyncRepoDirectoryBuilder {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl RepoDirectoryBuilder for SyncRepoDirectoryBuilder {
     async fn add_entry(&mut self, entry: DirectoryEntry) -> anyhow::Result<()> {
         let directory_part = DirectoryPart::from(entry);

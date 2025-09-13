@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 //----------------------------------------
 // FileSourceService - interface to a FileSource
 
-#[async_trait]
-pub trait FileSourceService: Send + Sync {
+#[async_trait(?Send)]
+pub trait FileSourceService {
     async fn list_directory(&self, root: &Path) -> anyhow::Result<Box<dyn DirectoryLister>>;
     async fn get_file_chunks(
         &self,
@@ -22,8 +22,8 @@ pub trait FileSourceService: Send + Sync {
 //----------------------------------------
 // DirectoryLister - lists the contents of a directory, sorted by name.  Directory entries are yielded one at a time by calling "next()", until Ok(None) is reached.
 
-#[async_trait]
-pub trait DirectoryLister: Send {
+#[async_trait(?Send)]
+pub trait DirectoryLister {
     // Pull the next entry, or `Ok(None)` at end-of-directory.
     async fn next(&mut self) -> anyhow::Result<Option<DirEntry>>;
 }
@@ -69,8 +69,8 @@ impl fmt::Debug for DirectoryEntry {
 // FileChunksIterator - iterates through a file, yielding chunks in CHUNK_SIZES order
 
 /// A handle for one file chunk.
-#[async_trait]
-pub trait FileChunkHandle: Send + Sync {
+#[async_trait(?Send)]
+pub trait FileChunkHandle {
     /// Size of this chunk in bytes.
     fn size(&self) -> usize;
 
@@ -82,7 +82,7 @@ pub trait FileChunkHandle: Send + Sync {
 }
 
 /// An async iterator over file chunks. Call `next().await` until it returns `Ok(None)`.
-#[async_trait]
-pub trait FileChunksIterator: Send {
+#[async_trait(?Send)]
+pub trait FileChunksIterator {
     async fn next(&mut self) -> anyhow::Result<Option<Box<dyn FileChunkHandle>>>;
 }

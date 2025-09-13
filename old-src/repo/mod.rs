@@ -20,3 +20,5 @@ pub use repo_backend2::RepoBackend;
 
 pub mod file_store_repo_backend;
 pub use file_store_repo_backend::FileStoreRepoBackend;
+
+pub mod repo;

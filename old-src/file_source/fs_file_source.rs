@@ -24,7 +24,7 @@ use crate::repo::repo_model::CHUNK_SIZES;
 #[derive(Debug, Default, Clone)]
 pub struct FsFileSourceService;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl FileSourceService for FsFileSourceService {
     async fn list_directory(&self, root: &Path) -> Result<Box<dyn DirectoryLister>> {
         LocalDirectoryLister::new_root(root)
@@ -248,7 +248,7 @@ impl LocalDirectoryLister {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl DirectoryLister for LocalDirectoryLister {
     async fn next(&mut self) -> Result<Option<DirEntry>> {
         loop {
@@ -391,7 +391,7 @@ impl FsFileChunksIterator {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl FileChunksIterator for FsFileChunksIterator {
     async fn next(&mut self) -> Result<Option<Box<dyn FileChunkHandle>>> {
         if self.cursor >= self.file_len {
@@ -425,7 +425,7 @@ pub struct FsFileChunkHandle {
     size: usize,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl FileChunkHandle for FsFileChunkHandle {
     fn size(&self) -> usize {
         self.size

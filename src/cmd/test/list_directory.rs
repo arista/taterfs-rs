@@ -1,7 +1,6 @@
 use crate::{context::Context, prelude::*};
 
-pub async fn handle(ctx: &Context, args: &crate::cli::test::ListDirectoryArgs) -> Result<()> {
-    print!("data_dir: {:?}", ctx.cfg.data_dir);
+pub async fn handle(_ctx: &Context, args: &crate::cli::test::ListDirectoryArgs) -> Result<()> {
     print!("running list_directory, path: {:?}", args.path);
     Ok(())
 }

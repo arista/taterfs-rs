@@ -5,6 +5,7 @@ mod prelude;
 mod file_source;
 mod file_store;
 mod repo;
+mod util;
 
 use crate::prelude::*;
 use clap::Parser;

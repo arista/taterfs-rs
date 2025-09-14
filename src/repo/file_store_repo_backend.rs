@@ -4,8 +4,8 @@ use std::rc::Rc;
 use bytes::Bytes;
 use anyhow::anyhow;
 
-use super::{FileStore};
-use super::repo_backend2::RepoBackend;
+use crate::file_store::{FileStore};
+use super::repo_backend::RepoBackend;
 use super::repo_model as RM;
 
 pub struct FileStoreRepoBackendContext {

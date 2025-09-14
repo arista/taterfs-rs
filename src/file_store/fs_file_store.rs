@@ -5,14 +5,14 @@
 
 // Thanks ChatGPT
 
-use async_trait::async_trait;
 use anyhow::{Context as AnyhowContext, Result};
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use std::path::{Path, PathBuf};
 
 use super::FileStore;
 
@@ -32,10 +32,10 @@ struct PendingFile {
 }
 
 pub struct FSFileStore {
-    ctx: FSFileStoreContext,                  // owned
-    pending: RefCell<VecDeque<PendingFile>>,  // single-threaded => RefCell
-    dirty_dirs: RefCell<HashSet<PathBuf>>,    // dirs to fsync on flush
-    nonce: Cell<u64>,                          // tmp suffix
+    ctx: FSFileStoreContext,                 // owned
+    pending: RefCell<VecDeque<PendingFile>>, // single-threaded => RefCell
+    dirty_dirs: RefCell<HashSet<PathBuf>>,   // dirs to fsync on flush
+    nonce: Cell<u64>,                        // tmp suffix
 }
 
 impl FSFileStore {
@@ -112,7 +112,9 @@ impl FileStore for FSFileStore {
 
     async fn read(&self, path: &str) -> Result<Bytes> {
         let p = self.abs(path);
-        let v = fs::read(&p).await.with_context(|| format!("read {:?}", p))?;
+        let v = fs::read(&p)
+            .await
+            .with_context(|| format!("read {:?}", p))?;
         Ok(Bytes::from(v))
     }
 
@@ -289,10 +291,8 @@ fn verify_same_filesystem(a: &Path, b: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
     // Follow symlinks to the real mount points.
-    let a_real = std::fs::canonicalize(a)
-        .with_context(|| format!("canonicalize {:?}", a))?;
-    let b_real = std::fs::canonicalize(b)
-        .with_context(|| format!("canonicalize {:?}", b))?;
+    let a_real = std::fs::canonicalize(a).with_context(|| format!("canonicalize {:?}", a))?;
+    let b_real = std::fs::canonicalize(b).with_context(|| format!("canonicalize {:?}", b))?;
 
     let a_dev = std::fs::metadata(&a_real)
         .with_context(|| format!("stat {:?}", a_real))?
@@ -305,7 +305,10 @@ fn verify_same_filesystem(a: &Path, b: &Path) -> Result<()> {
         anyhow::bail!(
             "root_path ({:?}) and tmp_dir ({:?}) are on different filesystems \
              (st_dev {} != {}): cross-device rename would fail (EXDEV)",
-            a_real, b_real, a_dev, b_dev
+            a_real,
+            b_real,
+            a_dev,
+            b_dev
         );
     }
     Ok(())

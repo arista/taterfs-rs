@@ -1,9 +1,9 @@
 mod cli;
 mod cmd;
 mod context;
-mod prelude;
 mod file_source;
 mod file_store;
+mod prelude;
 mod repo;
 mod util;
 

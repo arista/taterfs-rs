@@ -1,6 +1,6 @@
 // S3 implementation of FileStore
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::result::SdkError as SmithySdkError;
@@ -27,7 +27,9 @@ impl S3FileStore {
         if prefix == "." {
             prefix.clear();
         }
-        Self { ctx: S3FileStoreContext { prefix, ..ctx }}
+        Self {
+            ctx: S3FileStoreContext { prefix, ..ctx },
+        }
     }
 
     fn key_for(&self, rel: &str) -> String {
@@ -66,8 +68,7 @@ impl FileStore for S3FileStore {
             Err(e) => {
                 if is_not_found(&e) {
                     Ok(false)
-                }
-                else {
+                } else {
                     Err(anyhow::anyhow!(e).context(format!("head_object key={key}")))
                 }
             }

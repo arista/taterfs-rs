@@ -1,7 +1,7 @@
 // Represents a simple mechanism for interacting with a filesystem-like storage mechanism.  RepoBackends may choose to build on this trait.
 
+use anyhow::Result;
 use async_trait::async_trait;
-use anyhow::{Result};
 use bytes::Bytes;
 
 #[async_trait(?Send)]

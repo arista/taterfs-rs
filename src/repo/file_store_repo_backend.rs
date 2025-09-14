@@ -1,19 +1,19 @@
-use async_trait::async_trait;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::rc::Rc;
-use bytes::Bytes;
 use anyhow::anyhow;
+use async_trait::async_trait;
+use bytes::Bytes;
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::file_store::{FileStore};
 use super::repo_backend::RepoBackend;
 use super::repo_model as RM;
+use crate::file_store::FileStore;
 
 pub struct FileStoreRepoBackendContext {
-    file_store: Rc<dyn FileStore>
+    file_store: Rc<dyn FileStore>,
 }
 
 pub struct FileStoreRepoBackend {
-    ctx: FileStoreRepoBackendContext
+    ctx: FileStoreRepoBackendContext,
 }
 
 impl FileStoreRepoBackend {
@@ -43,9 +43,14 @@ impl FileStoreRepoBackend {
 #[async_trait(?Send)]
 impl RepoBackend for FileStoreRepoBackend {
     async fn current_root_exists(&self) -> anyhow::Result<bool> {
-        Ok(self.ctx.file_store.first_file("current-root").await?.is_some())
+        Ok(self
+            .ctx
+            .file_store
+            .first_file("current-root")
+            .await?
+            .is_some())
     }
-    
+
     async fn read_current_root(&self) -> anyhow::Result<RM::ObjectId> {
         match self.ctx.file_store.first_file("current-root").await? {
             Some(path) => {
@@ -53,30 +58,33 @@ impl RepoBackend for FileStoreRepoBackend {
                 match path.rsplit_once('/') {
                     Some((_, after)) => Ok(RM::ObjectId::from(after)),
                     None => Ok(RM::ObjectId::from(path)),
-                }                
+                }
             }
-            None => Err(anyhow!("No current root found"))
+            None => Err(anyhow!("No current root found")),
         }
     }
-    
+
     async fn write_current_root(&self, root: &RM::ObjectId) -> anyhow::Result<()> {
         let key = self.current_root_entry_key(root);
         Ok(self.ctx.file_store.write(&key, Bytes::new()).await?)
     }
-    
+
     async fn exists(&self, id: &RM::ObjectId) -> anyhow::Result<bool> {
         Ok(self.ctx.file_store.exists(&self.object_key_for(id)).await?)
     }
-    
+
     async fn read(&self, id: &RM::ObjectId) -> anyhow::Result<Bytes> {
         Ok(self.ctx.file_store.read(&self.object_key_for(id)).await?)
     }
-    
+
     async fn write(&self, id: &RM::ObjectId, bytes: Bytes) -> anyhow::Result<()> {
-        Ok(self.ctx.file_store.write(&self.object_key_for(id), bytes).await?)
+        Ok(self
+            .ctx
+            .file_store
+            .write(&self.object_key_for(id), bytes)
+            .await?)
     }
 }
-
 
 /// Inverted timestamp so lexicographically *smallest* is the newest.
 /// (Zero-padded to 20 digits for stable lexical ordering.)

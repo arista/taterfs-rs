@@ -1,9 +1,9 @@
+use super::repo_model::{self, ObjectId};
+use crate::util::ReleasedFuture;
+use anyhow::anyhow;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::FutureExt;
-use crate::util::ReleasedFuture;
-use super::repo_model::{self, ObjectId};
-use anyhow::{anyhow};
 
 #[async_trait(?Send)]
 pub trait Repo {
@@ -20,7 +20,8 @@ pub trait Repo {
                 repo_model::RepoObject::Root(o) => Ok(o),
                 _ => Err(anyhow!("obj {:?} is not a Root", id)),
             }
-        }.boxed_local();
+        }
+        .boxed_local();
 
         Ok(fut)
     }
@@ -33,7 +34,8 @@ pub trait Repo {
                 repo_model::RepoObject::Branches(o) => Ok(o),
                 _ => Err(anyhow!("obj {:?} is not a Branches", id)),
             }
-        }.boxed_local();
+        }
+        .boxed_local();
 
         Ok(fut)
     }
@@ -46,7 +48,8 @@ pub trait Repo {
                 repo_model::RepoObject::Commit(o) => Ok(o),
                 _ => Err(anyhow!("obj {:?} is not a Commit", id)),
             }
-        }.boxed_local();
+        }
+        .boxed_local();
 
         Ok(fut)
     }
@@ -59,7 +62,8 @@ pub trait Repo {
                 repo_model::RepoObject::Directory(o) => Ok(o),
                 _ => Err(anyhow!("obj {:?} is not a Directory", id)),
             }
-        }.boxed_local();
+        }
+        .boxed_local();
 
         Ok(fut)
     }
@@ -72,7 +76,8 @@ pub trait Repo {
                 repo_model::RepoObject::File(o) => Ok(o),
                 _ => Err(anyhow!("obj {:?} is not a File", id)),
             }
-        }.boxed_local();
+        }
+        .boxed_local();
 
         Ok(fut)
     }
@@ -82,15 +87,21 @@ pub trait Repo {
     }
 
     async fn write_branches(&self, obj: repo_model::Branches) -> ReleasedFuture<()> {
-        Ok(self.write_object(repo_model::RepoObject::Branches(obj)).await?)
+        Ok(self
+            .write_object(repo_model::RepoObject::Branches(obj))
+            .await?)
     }
 
     async fn write_commit(&self, obj: repo_model::Commit) -> ReleasedFuture<()> {
-        Ok(self.write_object(repo_model::RepoObject::Commit(obj)).await?)
+        Ok(self
+            .write_object(repo_model::RepoObject::Commit(obj))
+            .await?)
     }
 
     async fn write_directory(&self, obj: repo_model::Directory) -> ReleasedFuture<()> {
-        Ok(self.write_object(repo_model::RepoObject::Directory(obj)).await?)
+        Ok(self
+            .write_object(repo_model::RepoObject::Directory(obj))
+            .await?)
     }
 
     async fn write_file(&self, obj: repo_model::File) -> ReleasedFuture<()> {

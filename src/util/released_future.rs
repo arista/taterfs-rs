@@ -7,7 +7,6 @@
 //
 // Note that all of this implies a single-threaded context, so Rc<> can be used instead of Arc<>, for example, and no values are required to be Send or Sync.  It also requires 'static context, meaning that everything the async function uses internally must be 'static - it can't depend on some local frame not disappearing.  Things like Rc<> are ok, borrows may be less so.
 
-
 use futures_util::future::LocalBoxFuture;
 
 pub type ReleasedFuture<T> = anyhow::Result<LocalBoxFuture<'static, anyhow::Result<T>>>;

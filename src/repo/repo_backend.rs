@@ -1,9 +1,9 @@
 // Thanks ChatGPT
 
 use super::repo_model as RM;
+use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use anyhow::Result;
 
 /// Storage backends are dumb object stores + a single "current root" pointer.  Objects are intended to be immutable; their key is the SHA-256 of their bytes (hex string).
 #[async_trait(?Send)]

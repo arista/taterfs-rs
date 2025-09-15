@@ -7,6 +7,8 @@ use futures_util::FutureExt;
 
 #[async_trait(?Send)]
 pub trait Repo {
+    async fn read_current_root(&self) -> ReleasedFuture<Option<repo_model::ObjectId>>;
+    async fn write_current_root(&self, current_root: ObjectId) -> ReleasedFuture<()>;
     async fn read_object(&self, id: ObjectId) -> ReleasedFuture<repo_model::RepoObject>;
     async fn write_object(&self, obj: repo_model::RepoObject) -> ReleasedFuture<()>;
     async fn read_chunk(&self, id: ObjectId) -> ReleasedFuture<Bytes>;

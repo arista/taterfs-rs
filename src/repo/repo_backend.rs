@@ -5,14 +5,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-/// Storage backends are dumb object stores + a single "current root" pointer.  Objects are intended to be immutable; their key is the SHA-256 of their bytes (hex string).
+/// Storage backends are dumb object stores + a single "current root" pointer.  Objects are intended to be immutable; their key is the SHA-256 (lower case hex string) of their bytes
 #[async_trait(?Send)]
 pub trait RepoBackend {
-    /// Does the root pointer exist at all?
-    async fn current_root_exists(&self) -> Result<bool>;
-
-    /// Read the current root pointer (ObjectId of a RepoObject::Root).
-    async fn read_current_root(&self) -> Result<RM::ObjectId>;
+    /// Read the current root pointer (ObjectId of a RepoObject::Root), if it exists
+    async fn read_current_root(&self) -> Result<Option<RM::ObjectId>>;
 
     /// Overwrite the current root pointer to `root`.
     /// Backends that can provide atomicity SHOULD override the CAS method below

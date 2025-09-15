@@ -42,25 +42,16 @@ impl FileStoreRepoBackend {
 
 #[async_trait(?Send)]
 impl RepoBackend for FileStoreRepoBackend {
-    async fn current_root_exists(&self) -> anyhow::Result<bool> {
-        Ok(self
-            .ctx
-            .file_store
-            .first_file("current-root")
-            .await?
-            .is_some())
-    }
-
-    async fn read_current_root(&self) -> anyhow::Result<RM::ObjectId> {
+    async fn read_current_root(&self) -> anyhow::Result<Option<RM::ObjectId>> {
         match self.ctx.file_store.first_file("current-root").await? {
             Some(path) => {
                 // Take everything after the last "/", or the whole string if there is no "/"
                 match path.rsplit_once('/') {
-                    Some((_, after)) => Ok(RM::ObjectId::from(after)),
-                    None => Ok(RM::ObjectId::from(path)),
+                    Some((_, after)) => Ok(Some(RM::ObjectId::from(after))),
+                    None => Ok(Some(RM::ObjectId::from(path))),
                 }
             }
-            None => Err(anyhow!("No current root found")),
+            None => Ok(None),
         }
     }
 

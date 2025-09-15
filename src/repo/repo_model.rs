@@ -4,6 +4,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Cursor;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::{cmp::Ordering, rc::Rc};
@@ -133,6 +134,14 @@ pub enum RepoObject {
     Commit(Commit),
     Directory(Directory),
     File(File),
+}
+
+impl RepoObject {
+    pub fn from_json_bytes(data: Bytes) -> anyhow::Result<RepoObject> {
+        let cursor = Cursor::new(&data[..]);
+        let obj: RepoObject = serde_json::from_reader(cursor)?;
+        Ok(obj)
+    }
 }
 
 // -----------------------------

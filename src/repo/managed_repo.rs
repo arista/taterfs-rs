@@ -7,7 +7,7 @@
 // * Request deduplication - combines multiple identical requests into a single request
 // * Caching - can be configured to cache which objects exist in the repo, as well as the contents of repo objects
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -17,10 +17,14 @@ use super::{
     Repo, RepoBackend,
     repo_model::{self, ObjectId},
 };
-use crate::{prelude::*, util::ReleasedFuture};
+use crate::{
+    prelude::*,
+    util::{InUse, Pool, ReleasedFuture},
+};
 
 pub struct ManagedRepo {
     ctx: Rc<ManagedRepoContext>,
+    request_limiter: Option<Pool<()>>,
 }
 
 pub struct ManagedRepoContext {
@@ -44,12 +48,17 @@ impl Repo for ManagedRepo {
     async fn read_object(&self, id: ObjectId) -> ReleasedFuture<repo_model::RepoObject> {
         // FIXME - check if the object is in cache
         // FIXME - check for request deduplication
-        // FIXME - apply simultaneous request limiting
+
+        // Apply simultaneous request limiting
+        let request_limiter_in_use = self.use_request_limiter().await;
+
         // FIXME - apply request rate limiting
         // FIXME - apply throughput limiting
 
         let ctx = self.ctx.clone();
         Ok(async move {
+            let _request_limiter_in_use = request_limiter_in_use;
+
             // FIXME - set up request deduplication
             let bytes = ctx.backend.read(&id).await?;
             // FIXME - report to throughput manager
@@ -101,4 +110,11 @@ impl Repo for ManagedRepo {
     }
 }
 
-impl ManagedRepo {}
+impl ManagedRepo {
+    async fn use_request_limiter(&self) -> Option<InUse<()>> {
+        match self.request_limiter.as_ref() {
+            Some(l) => Some(l.checkout().await),
+            None => None,
+        }
+    }
+}

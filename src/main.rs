@@ -1,3 +1,8 @@
+// Quiet in debug builds:
+#![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, dead_code))]
+// Strict in non-debug (e.g., release/CI):
+#![cfg_attr(not(debug_assertions), deny(warnings))]
+
 mod cli;
 mod cmd;
 mod context;

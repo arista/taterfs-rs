@@ -6,6 +6,7 @@ use std::time::Instant;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 
 pub struct RefillingPool {
@@ -18,6 +19,8 @@ struct State {
     available: RefillingAmount,
     // The queue of those waiting for an item to become available
     waiters: VecDeque<Waiter>,
+
+    refilling_process: Option<JoinHandle<()>>,
 }
 
 // Abstraction of a value that "refills" at a particular rate up to a given capacity.  The value doesn't actually refill in real time - instead, whenever has_at_least is called, it recomputes how much should be refilled based on the last time has_at_least was called
@@ -138,11 +141,12 @@ impl Removed {
 pub struct RefillingPoolContext {
     capacity: u64,
     refill_amount_per_sec: u32,
+    refill_interval_ms: u32,
 }
 
 impl RefillingPool {
     pub fn new(ctx: RefillingPoolContext) -> Self {
-        Self {
+        let ret = Self {
             state: Rc::new(RefCell::new(State {
                 ctx,
                 available: RefillingAmount::new(
@@ -151,10 +155,25 @@ impl RefillingPool {
                     ctx.refill_amount_per_sec,
                 ),
                 waiters: VecDeque::new(),
+                refilling_process: None,
             })),
-        }
+        };
+        ret.state.borrow_mut().refilling_process = Some(ret.start_refilling());
+        ret
     }
 
+    pub fn start_refilling(&self) -> JoinHandle<()> {
+        let state = self.state.clone();
+        tokio::task::spawn_local(async move {
+            let _state = state;
+            let mut interval = time::interval(Duration::from_millis(u64::from(_state.borrow().ctx.refill_interval_ms)));
+            loop {
+                interval.tick().await;
+                _state.borrow_mut().check_waiters();
+            }
+        })
+    }
+    
     // Wait until the given amount is available in the pool, then removes it
     pub async fn remove(&self, amount: u32) -> Removed {
         if self.can_remove_immediately(amount) {
@@ -188,6 +207,17 @@ impl RefillingPool {
         Removed {
             state: self.state.clone(),
             amount: amount.into(),
+        }
+    }
+}
+
+impl Drop for RefillingPool {
+    fn drop(&mut self) {
+        match &self.state.borrow_mut().refilling_process {
+            Some(h) => {
+                h.abort();
+            }
+            None => ()
         }
     }
 }

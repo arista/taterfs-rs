@@ -19,12 +19,18 @@ use super::{
 };
 use crate::{
     prelude::*,
-    util::{InUse, Pool, ReleasedFuture},
+    util::{InUse, Pool, RefillingPool, ReleasedFuture, Removed},
 };
 
 pub struct ManagedRepo {
     ctx: Rc<ManagedRepoContext>,
+
+    // For limiting number of simultaneous requests
     request_limiter: Option<Pool<()>>,
+    // For limiting overall requests/s
+    request_rate_limiter: Option<RefillingPool>,
+    // For limiting throughput
+    throughput_limiter: Option<RefillingPool>,
 }
 
 pub struct ManagedRepoContext {
@@ -50,17 +56,25 @@ impl Repo for ManagedRepo {
         // FIXME - check for request deduplication
 
         // Apply simultaneous request limiting
-        let request_limiter_in_use = self.use_request_limiter().await;
-
-        // FIXME - apply request rate limiting
-        // FIXME - apply throughput limiting
+        let request_limiter_handle = self.use_request_limiter().await;
+        // Apply request rate limiting
+        let request_rate_handle = self.use_request_rate_limiter().await;
+        // Apply throughput limiting
+        let throughput_handle = self.use_throughput_limiter(1000).await;
 
         let ctx = self.ctx.clone();
         Ok(async move {
-            let _request_limiter_in_use = request_limiter_in_use;
+            let _request_limiter_handle = request_limiter_handle;
+            let _request_rate_handle = request_rate_handle;
+            let _throughput_handle = throughput_handle;
 
             // FIXME - set up request deduplication
+
             let bytes = ctx.backend.read(&id).await?;
+
+            // Report how many bytes were actually used
+            _throughput_handle.map(|h| h.actually_removed(u64::from(bytes.len() as u64)));
+
             // FIXME - report to throughput manager
             // FIXME - end request deduplication
             // FIXME - cache the object
@@ -93,7 +107,7 @@ impl Repo for ManagedRepo {
         .boxed_local())
     }
 
-    async fn read_chunk(&self, id: ObjectId) -> ReleasedFuture<Bytes> {
+    async fn read_chunk(&self, id: ObjectId, expected_size: u64) -> ReleasedFuture<Bytes> {
         // FIXME - implement this
         let ctx = self.ctx.clone();
         Ok(async move { Ok(ctx.backend.read(&id).await?) }.boxed_local())
@@ -114,6 +128,20 @@ impl ManagedRepo {
     async fn use_request_limiter(&self) -> Option<InUse<()>> {
         match self.request_limiter.as_ref() {
             Some(l) => Some(l.checkout().await),
+            None => None,
+        }
+    }
+
+    async fn use_request_rate_limiter(&self) -> Option<Removed> {
+        match self.request_rate_limiter.as_ref() {
+            Some(l) => Some(l.remove(1).await),
+            None => None,
+        }
+    }
+
+    async fn use_throughput_limiter(&self, estimated_amount: u32) -> Option<Removed> {
+        match self.throughput_limiter.as_ref() {
+            Some(l) => Some(l.remove(estimated_amount).await),
             None => None,
         }
     }

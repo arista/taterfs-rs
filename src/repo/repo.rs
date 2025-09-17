@@ -11,7 +11,7 @@ pub trait Repo {
     async fn write_current_root(&self, current_root: ObjectId) -> ReleasedFuture<()>;
     async fn read_object(&self, id: ObjectId) -> ReleasedFuture<repo_model::RepoObject>;
     async fn write_object(&self, obj: repo_model::RepoObject) -> ReleasedFuture<()>;
-    async fn read_chunk(&self, id: ObjectId) -> ReleasedFuture<Bytes>;
+    async fn read_chunk(&self, id: ObjectId, expected_size: u64) -> ReleasedFuture<Bytes>;
     async fn write_chunk(&self, buf: Bytes) -> ReleasedFuture<()>;
 
     async fn read_root(&self, id: ObjectId) -> ReleasedFuture<repo_model::Root> {

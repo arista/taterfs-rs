@@ -3,6 +3,8 @@
 // When a pool is constructed, it must also be initialized with a set of items by calling add()
 //
 // This is only intended to be used in a single-threaded context
+//
+// A typical application is to limit the number of concurrent requests, where the items are just (), and the checkout/return behavior is used to manage the limit.
 
 use anyhow::Result;
 use std::{
@@ -96,19 +98,21 @@ impl<T> Pool<T> {
     }
 
     pub async fn checkout(&self) -> InUse<T> {
-        // Return an item if one is available
-        if !self.state.borrow_mut().items.is_empty() {
+        if self.can_checkout_immediately() {
             self.put_in_use()
-        }
-        // Otherwise queue a waiter, to be notified when an item
-        // becomes available
-        else {
+        } else {
             let (tx, rx) = oneshot::channel();
             self.state.borrow_mut().waiters.push_back(Waiter { tx });
             rx.await
                 .expect("Assertion failed: error while waiting for item");
             self.put_in_use()
         }
+    }
+
+    // true if one is available for checkout, and there are no waiters
+    fn can_checkout_immediately(&self) -> bool {
+        let state = self.state.borrow();
+        !state.items.is_empty() && state.waiters.is_empty()
     }
 
     pub fn put_in_use(&self) -> InUse<T> {

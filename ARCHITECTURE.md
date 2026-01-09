@@ -8,6 +8,8 @@ This document describes the high-level architecture of taterfs-rs.
 
 ## Components
 
+* (backend storage model)[docs/architecture/backend_storage_model.md]
+
 ### Entry Point
 
 `src/main.rs` - Application entry point and CLI handling.

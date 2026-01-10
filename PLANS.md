@@ -17,4 +17,4 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Ideas / Backlog
 
-(TODO: Add ideas for future consideration)
+- Set up LocalStack or MinIO for S3Backend integration tests

@@ -160,7 +160,7 @@ let source = IgnoringFileSource::new(inner);
 
 The file ignoring rules are as follows:
 
-* The directory ".tfs/" is always ignored
+* The directories ".tfs/" and ".git/" are always ignored
 * If a ".gitignore" is present, then its directives are followed the same way that git works
 * If a ".tfsignore" is present, it is treated the same as ".gitignore"
 * If both ".gitignore" and ".tfsignore" are present, they are treated as concatenated with ".gitignore" patterns first

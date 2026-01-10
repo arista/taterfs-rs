@@ -110,8 +110,8 @@ impl<S: FileSource> IgnoringFileSource<S> {
         let path = entry.path();
         let is_dir = matches!(entry, DirectoryListEntry::Directory(_));
 
-        // Always ignore .tfs directory
-        if name == ".tfs" && is_dir {
+        // Always ignore .tfs and .git directories
+        if is_dir && (name == ".tfs" || name == ".git") {
             return true;
         }
 
@@ -146,10 +146,10 @@ impl<S: FileSource + 'static> FileSource for IgnoringFileSource<S> {
                 return Err(FileSourceError::NotFound);
             }
 
-            // Also check for .tfs in path components
+            // Also check for .tfs or .git in path components
             for component in path.components() {
                 if let std::path::Component::Normal(name) = component {
-                    if name == ".tfs" {
+                    if name == ".tfs" || name == ".git" {
                         return Err(FileSourceError::NotFound);
                     }
                 }
@@ -175,10 +175,13 @@ impl<S: FileSource + 'static> FileSource for IgnoringFileSource<S> {
 
             Ok(entry)
         } else {
-            // Root path, just check for .tfs
+            // Root path, just check for .tfs and .git
             let entry = self.inner.get_entry(path).await?;
             if let Some(ref e) = entry {
-                if e.name() == ".tfs" && matches!(e, DirectoryListEntry::Directory(_)) {
+                let name = e.name();
+                if (name == ".tfs" || name == ".git")
+                    && matches!(e, DirectoryListEntry::Directory(_))
+                {
                     return Ok(None);
                 }
             }
@@ -204,8 +207,8 @@ impl<S: FileSource> DirectoryListing for IgnoringDirectoryList<S> {
                     let path = entry.path();
                     let is_dir = matches!(entry, DirectoryListEntry::Directory(_));
 
-                    // Always ignore .tfs directory
-                    if name == ".tfs" && is_dir {
+                    // Always ignore .tfs and .git directories
+                    if is_dir && (name == ".tfs" || name == ".git") {
                         continue;
                     }
 
@@ -228,10 +231,11 @@ mod tests {
     use crate::file_source::{MemoryFileSource, MemoryFsEntry};
 
     #[tokio::test]
-    async fn test_ignores_tfs_directory() {
+    async fn test_ignores_tfs_and_git_directories() {
         let inner = MemoryFileSource::builder()
             .add("file.txt", MemoryFsEntry::file("content"))
             .add(".tfs/config", MemoryFsEntry::file("config"))
+            .add(".git/HEAD", MemoryFsEntry::file("ref: refs/heads/main"))
             .add("other/file.txt", MemoryFsEntry::file("other"))
             .build();
 
@@ -245,8 +249,9 @@ mod tests {
             entries.push(entry.name().to_string());
         }
 
-        // .tfs should not appear
+        // .tfs and .git should not appear
         assert!(!entries.contains(&".tfs".to_string()));
+        assert!(!entries.contains(&".git".to_string()));
         assert!(entries.contains(&"file.txt".to_string()));
         assert!(entries.contains(&"other".to_string()));
     }

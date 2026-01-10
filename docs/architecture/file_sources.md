@@ -139,7 +139,8 @@ Configuration options:
 Notes:
 - Uses the standard AWS credential chain (environment variables, ~/.aws, IAM roles)
 - Directory listings use `list_objects_v2` with "/" delimiter to simulate directories
-- Files are read entirely into memory before chunking (S3 doesn't support efficient streaming range requests)
+- Directory pages are fetched lazily as entries are consumed (handles arbitrarily large directories)
+- File chunks are fetched lazily using S3 range requests (handles arbitrarily large files)
 - The `executable` flag is always `false` since S3 doesn't track file permissions
 
 ### HttpFileSource

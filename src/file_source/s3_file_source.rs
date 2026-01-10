@@ -56,6 +56,8 @@ impl S3FileSourceConfig {
 /// An S3-based implementation of `FileSource`.
 ///
 /// Treats S3 objects as files, using "/" as directory separators.
+/// Directory listings and file reads are performed incrementally to handle
+/// buckets and files of arbitrary size.
 pub struct S3FileSource {
     client: Client,
     bucket: String,
@@ -114,21 +116,6 @@ impl S3FileSource {
             format!("{}/", key.trim_end_matches('/'))
         }
     }
-
-    /// Convert an S3 key back to a path relative to the source root.
-    fn key_to_path(&self, key: &str) -> PathBuf {
-        let relative = match &self.prefix {
-            Some(prefix) => {
-                let prefix = prefix.trim_end_matches('/');
-                key.strip_prefix(prefix)
-                    .and_then(|s| s.strip_prefix('/'))
-                    .unwrap_or(key)
-            }
-            None => key,
-        };
-        // Convert "/" separators to OS path separators
-        PathBuf::from(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
-    }
 }
 
 /// Convert a Path to an S3 key (using "/" as separator).
@@ -152,99 +139,26 @@ impl FileSource for S3FileSource {
         let prefix = self.list_prefix(path);
         let parent_path = path_to_s3_key(path);
 
-        let mut entries = Vec::new();
-        let mut continuation_token: Option<String> = None;
-
-        loop {
-            let mut request = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .delimiter("/");
-
-            if !prefix.is_empty() {
-                request = request.prefix(&prefix);
-            }
-
-            if let Some(token) = &continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(map_sdk_error)?;
-
-            // Process files (Contents)
-            for obj in response.contents() {
-                if let Some(key) = obj.key() {
-                    // Extract just the filename from the key
-                    if let Some(name) = key.strip_prefix(&prefix) {
-                        if !name.is_empty() && !name.contains('/') {
-                            let entry_path = if parent_path.is_empty() {
-                                PathBuf::from(name)
-                            } else {
-                                PathBuf::from(format!("{}/{}", parent_path, name)
-                                    .replace('/', std::path::MAIN_SEPARATOR_STR))
-                            };
-
-                            entries.push((
-                                name.to_string(),
-                                DirectoryListEntry::File(FileEntry {
-                                    name: name.to_string(),
-                                    path: entry_path,
-                                    size: obj.size().unwrap_or(0) as u64,
-                                    executable: false, // S3 doesn't have executable flag
-                                }),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Process directories (CommonPrefixes)
-            for cp in response.common_prefixes() {
-                if let Some(cp_prefix) = cp.prefix() {
-                    if let Some(name) = cp_prefix.strip_prefix(&prefix) {
-                        let name = name.trim_end_matches('/');
-                        if !name.is_empty() {
-                            let entry_path = if parent_path.is_empty() {
-                                PathBuf::from(name)
-                            } else {
-                                PathBuf::from(format!("{}/{}", parent_path, name)
-                                    .replace('/', std::path::MAIN_SEPARATOR_STR))
-                            };
-
-                            entries.push((
-                                name.to_string(),
-                                DirectoryListEntry::Directory(DirEntry {
-                                    name: name.to_string(),
-                                    path: entry_path,
-                                }),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Check if there are more results
-            if response.is_truncated() == Some(true) {
-                continuation_token = response.next_continuation_token().map(|s| s.to_string());
-            } else {
-                break;
-            }
-        }
-
-        // Sort by name for lexical ordering
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        Ok(DirectoryList::new(S3DirectoryList { entries, index: 0 }))
+        Ok(DirectoryList::new(S3DirectoryList {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            prefix,
+            parent_path,
+            buffer: Vec::new(),
+            buffer_index: 0,
+            continuation_token: None,
+            initial_fetch_done: false,
+            exhausted: false,
+        }))
     }
 
     async fn get_file_chunks(&self, path: &Path) -> Result<FileChunks> {
         let key = self.full_key(path);
 
-        // Get the object to read its contents
-        let response = self
+        // Get file size via HEAD request (doesn't download the file)
+        let head_response = self
             .client
-            .get_object()
+            .head_object()
             .bucket(&self.bucket)
             .key(&key)
             .send()
@@ -257,19 +171,12 @@ impl FileSource for S3FileSource {
                 }
             })?;
 
-        let size = response.content_length().unwrap_or(0) as u64;
-
-        // Collect the body into memory
-        let body = response
-            .body
-            .collect()
-            .await
-            .map_err(|e| FileSourceError::Other(e.to_string()))?;
-
-        let data = body.to_vec();
+        let size = head_response.content_length().unwrap_or(0) as u64;
 
         Ok(FileChunks::new(S3FileChunks {
-            data,
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            key,
             size,
             offset: 0,
         }))
@@ -344,28 +251,151 @@ impl FileSource for S3FileSource {
 }
 
 /// Directory listing iterator for S3FileSource.
+///
+/// Fetches pages lazily - only makes S3 requests as entries are consumed.
+/// Each page's Contents and CommonPrefixes are merged in lexical order.
 struct S3DirectoryList {
-    entries: Vec<(String, DirectoryListEntry)>,
-    index: usize,
+    client: Client,
+    bucket: String,
+    /// The S3 prefix to list (includes trailing slash if non-empty).
+    prefix: String,
+    /// The parent path (without trailing slash) for building entry paths.
+    parent_path: String,
+    /// Buffer of entries from the current page, sorted by name.
+    buffer: Vec<(String, DirectoryListEntry)>,
+    /// Current index into the buffer.
+    buffer_index: usize,
+    /// Continuation token for fetching the next page.
+    continuation_token: Option<String>,
+    /// Whether we've done the initial fetch.
+    initial_fetch_done: bool,
+    /// Whether we've exhausted all pages.
+    exhausted: bool,
+}
+
+impl S3DirectoryList {
+    /// Fetch the next page of results from S3.
+    async fn fetch_next_page(&mut self) -> Result<()> {
+        let mut request = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .delimiter("/");
+
+        if !self.prefix.is_empty() {
+            request = request.prefix(&self.prefix);
+        }
+
+        if let Some(token) = &self.continuation_token {
+            request = request.continuation_token(token);
+        }
+
+        let response = request.send().await.map_err(map_sdk_error)?;
+
+        self.buffer.clear();
+        self.buffer_index = 0;
+
+        // Process files (Contents)
+        for obj in response.contents() {
+            if let Some(key) = obj.key() {
+                // Extract just the filename from the key
+                if let Some(name) = key.strip_prefix(&self.prefix) {
+                    if !name.is_empty() && !name.contains('/') {
+                        let entry_path = if self.parent_path.is_empty() {
+                            PathBuf::from(name)
+                        } else {
+                            PathBuf::from(
+                                format!("{}/{}", self.parent_path, name)
+                                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+                            )
+                        };
+
+                        self.buffer.push((
+                            name.to_string(),
+                            DirectoryListEntry::File(FileEntry {
+                                name: name.to_string(),
+                                path: entry_path,
+                                size: obj.size().unwrap_or(0) as u64,
+                                executable: false,
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Process directories (CommonPrefixes)
+        for cp in response.common_prefixes() {
+            if let Some(cp_prefix) = cp.prefix() {
+                if let Some(name) = cp_prefix.strip_prefix(&self.prefix) {
+                    let name = name.trim_end_matches('/');
+                    if !name.is_empty() {
+                        let entry_path = if self.parent_path.is_empty() {
+                            PathBuf::from(name)
+                        } else {
+                            PathBuf::from(
+                                format!("{}/{}", self.parent_path, name)
+                                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+                            )
+                        };
+
+                        self.buffer.push((
+                            name.to_string(),
+                            DirectoryListEntry::Directory(DirEntry {
+                                name: name.to_string(),
+                                path: entry_path,
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Sort by name for lexical ordering within this page
+        self.buffer.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Update pagination state
+        if response.is_truncated() == Some(true) {
+            self.continuation_token = response.next_continuation_token().map(|s| s.to_string());
+        } else {
+            self.continuation_token = None;
+            self.exhausted = true;
+        }
+
+        self.initial_fetch_done = true;
+
+        Ok(())
+    }
 }
 
 impl DirectoryListing for S3DirectoryList {
     async fn next(&mut self) -> Result<Option<DirectoryListEntry>> {
-        if self.index >= self.entries.len() {
-            return Ok(None);
+        // If we haven't fetched yet, or buffer is exhausted and more pages exist
+        if !self.initial_fetch_done
+            || (self.buffer_index >= self.buffer.len() && !self.exhausted)
+        {
+            self.fetch_next_page().await?;
         }
-        let (_, entry) = self.entries[self.index].clone();
-        self.index += 1;
-        Ok(Some(entry))
+
+        // Return next entry from buffer if available
+        if self.buffer_index < self.buffer.len() {
+            let (_, entry) = self.buffer[self.buffer_index].clone();
+            self.buffer_index += 1;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
     }
 }
 
 /// File chunks iterator for S3FileSource.
 ///
-/// Since S3 doesn't support range requests in a streaming fashion easily,
-/// we read the entire file into memory and chunk it.
+/// Fetches chunks lazily using S3 range requests - only downloads each chunk
+/// as it's requested.
 struct S3FileChunks {
-    data: Vec<u8>,
+    client: Client,
+    bucket: String,
+    key: String,
     size: u64,
     offset: u64,
 }
@@ -379,10 +409,35 @@ impl FileChunking for S3FileChunks {
         let remaining = self.size - self.offset;
         let chunk_size = next_chunk_size(remaining);
 
-        let start = self.offset as usize;
-        let end = (self.offset + chunk_size) as usize;
-        let chunk_data = self.data[start..end.min(self.data.len())].to_vec();
+        // Calculate range (inclusive end)
+        let range_start = self.offset;
+        let range_end = self.offset + chunk_size - 1;
+        let range = format!("bytes={}-{}", range_start, range_end);
 
+        // Fetch just this chunk using a range request
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .range(range)
+            .send()
+            .await
+            .map_err(|err| {
+                if is_not_found(&err) {
+                    FileSourceError::NotFound
+                } else {
+                    map_sdk_error(err)
+                }
+            })?;
+
+        let body = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| FileSourceError::Other(e.to_string()))?;
+
+        let chunk_data = body.to_vec();
         let chunk = FileChunk::new(self.offset, chunk_data);
         self.offset += chunk_size;
 

@@ -7,15 +7,27 @@ A FileSource is a source of directory and file data to be stored in a repository
 A FileSource's task boils down to listing the items in a directory, and retrieving the chunks of a file.
 
 ```
-interface FileSource {
-  list_directory(path: Path) -> Stream of DirectoryListEntry
-  get_file_chunks(path: Path) -> Stream of FileChunks
+trait FileSource {
+  // List directory entries, returned via async iterator
+  async list_directory(path: Path) -> DirectoryList
+  // Get file chunks, returned via async iterator
+  async get_file_chunks(path: Path) -> FileChunks
+  // Get a single entry (file or directory) at a path
   async get_entry(path: Path) -> DirectoryListEntry | null
 }
 
+// Async iterator for directory entries
+trait DirectoryListing {
+  async next() -> DirectoryListEntry | null
+}
+
+// Async iterator for file chunks
+trait FileChunking {
+  async next() -> FileChunk | null
+}
 ```
 
-Directory entries are listed in lexical order
+Directory entries are listed in lexical order.
 
 ```
 enum DirectoryListEntry {
@@ -32,8 +44,6 @@ DirectoryListEntryName {
 
 DirEntry {
     name: DirectoryListEntryName
-    // Recursively list entries in this directory
-    list_directory() -> Stream of DirectoryListEntry
 }
 
 FileEntry {
@@ -41,20 +51,40 @@ FileEntry {
     size: u64,
     executable: bool,
 }
-
 ```
+
+To recursively list entries in a subdirectory, call `file_source.list_directory(dir_entry.abs_path)`.
 
 TODO: links are currently ignored - should they be included?
 
+### File Chunks
+
+File chunks contain the actual file data and are used to break large files into smaller pieces for storage.
+
 ```
 FileChunk {
-    size() -> u64
-    // The offset of the chunk within the overall File
-    offset() -> u64
-    // Retrieve the contents of the chunk
-    async get_chunk() -> bytes
+    offset: u64,     // Offset of this chunk within the file
+    data: Vec<u8>,   // The chunk data
+
+    size() -> u64    // Size of this chunk in bytes
+    offset() -> u64  // Offset within the file
+    data() -> &[u8]  // Access the chunk data
 }
 ```
+
+#### Chunking Algorithm
+
+Files are broken into chunks according to the algorithm defined in [backend_storage_model.md](./backend_storage_model.md). The chunk sizes are (in descending order):
+
+- 4 MB (4,194,304 bytes)
+- 1 MB (1,048,576 bytes)
+- 256 KB (262,144 bytes)
+- 64 KB (65,536 bytes)
+- 16 KB (16,384 bytes)
+
+When chunking a file, the process selects the largest chunk size from this list that is less than or equal to the remaining file size. This continues until no entry from the table fits, at which point the remainder becomes the final chunk.
+
+This approach optimizes for files that grow from their end, minimizing changes between versions.
 
 ## Implementations
 
@@ -62,11 +92,33 @@ FileChunk {
 
 This implementation stores an in-memory representation of a filesystem and exposes a FileSource to access it.  This will most likely be used for testing.
 
-The implementation should provide a convenient mechanism for defining the file hierarchy in memory, including the executable flag and the contents of each file.  One should be able to define the entire contents of the file inline, or declare that the file should be of a certain length, filled with repeats of a given string.
+The implementation provides a builder API for defining the file hierarchy in memory:
+
+```rust
+let source = MemoryFileSource::builder()
+    .add("file.txt", MemoryFsEntry::file("contents"))
+    .add("script.sh", MemoryFsEntry::executable("#!/bin/bash"))
+    .add("large.bin", MemoryFsEntry::repeated(b"x", 10_000_000))
+    .add("dir/nested.txt", MemoryFsEntry::file("nested"))
+    .build();
+```
+
+Entry types:
+- `MemoryFsEntry::file(contents)` - File with explicit contents
+- `MemoryFsEntry::executable(contents)` - Executable file with explicit contents
+- `MemoryFsEntry::repeated(pattern, size)` - File filled with repeated pattern to given size
+- `MemoryFsEntry::repeated_executable(pattern, size)` - Executable file with repeated content
+- `MemoryFsEntry::dir()` - Empty directory (usually created implicitly)
 
 ### FsFileSource
 
 This implementation is pointed at a local filesystem path and will implement FileSource using that path as the root.
+
+```rust
+let source = FsFileSource::new("/path/to/root");
+```
+
+On Unix systems, the executable flag is determined by checking if any execute bit is set in the file permissions.
 
 ### S3FileSource
 
@@ -86,4 +138,3 @@ This is a FileSource that takes another FileSource as a parameter, and filters i
 * If a ".gitignore" is present, then its directives should be followed the same way that git works
 * If a ".tfsignore" is present, it should be treated the same as ".gitignore"
 * If both ".gitignore" and ".tfsignore" are present, it should behave as if they were concatenated into a single file, with ".gitignore" preceding ".tfsignore"
-

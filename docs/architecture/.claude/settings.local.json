@@ -6,7 +6,8 @@
       "Bash(git commit:*)",
       "Bash(git checkout:*)",
       "Bash(cargo build:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(git branch:*)"
     ]
   }
 }

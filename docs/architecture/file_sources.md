@@ -119,7 +119,29 @@ On Unix systems, the executable flag is determined by checking if any execute bi
 
 ### S3FileSource
 
-This implementation is pointed at an S3 bucket and prefix, and will implement FileSource on the assumption that "/" should be used as directory separators.
+This implementation reads from an S3 bucket, treating S3 object keys as paths where "/" is used as the directory separator.
+
+```rust
+let config = S3FileSourceConfig::new("my-bucket")
+    .with_prefix("data/root")           // Optional: prefix within the bucket
+    .with_endpoint_url("http://localhost:4566")  // Optional: for LocalStack/MinIO
+    .with_region("us-west-2");          // Optional: region override
+
+let source = S3FileSource::new(config).await;
+```
+
+Configuration options:
+- `bucket` - The S3 bucket name (required)
+- `prefix` - Optional path prefix within the bucket
+- `endpoint_url` - Custom endpoint URL for LocalStack, MinIO, or other S3-compatible services
+- `region` - Region override (otherwise uses standard AWS credential chain)
+
+Notes:
+- Uses the standard AWS credential chain (environment variables, ~/.aws, IAM roles)
+- Directory listings use `list_objects_v2` with "/" delimiter to simulate directories
+- Directory pages are fetched lazily as entries are consumed (handles arbitrarily large directories)
+- File chunks are fetched lazily using S3 range requests (handles arbitrarily large files)
+- The `executable` flag is always `false` since S3 doesn't track file permissions
 
 ### HttpFileSource
 

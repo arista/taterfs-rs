@@ -35,25 +35,22 @@ enum DirectoryListEntry {
   File(FileEntry)
 }
 
-DirectoryListEntryName {
-    name: String,
-    abs_path: PathBuf,
-    // Path relative to the listing root (uses OS separators)
-    rel_path: PathBuf,
-}
-
 DirEntry {
-    name: DirectoryListEntryName
+    name: String,
+    // Path from the FileSource root (uses OS separators)
+    path: PathBuf,
 }
 
 FileEntry {
-    name: DirectoryListEntryName
+    name: String,
+    // Path from the FileSource root (uses OS separators)
+    path: PathBuf,
     size: u64,
     executable: bool,
 }
 ```
 
-To recursively list entries in a subdirectory, call `file_source.list_directory(dir_entry.abs_path)`.
+To recursively list entries in a subdirectory, call `file_source.list_directory(&dir_entry.path)`.
 
 TODO: links are currently ignored - should they be included?
 

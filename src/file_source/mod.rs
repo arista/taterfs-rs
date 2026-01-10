@@ -13,6 +13,5 @@ pub use file_source::FileSource;
 pub use fs_file_source::FsFileSource;
 pub use memory_file_source::{MemoryFileSource, MemoryFileSourceBuilder, MemoryFsEntry};
 pub use types::{
-    next_chunk_size, DirEntry, DirectoryListEntry, DirectoryListEntryName, FileChunk, FileEntry,
-    CHUNK_SIZES,
+    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry, CHUNK_SIZES,
 };

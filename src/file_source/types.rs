@@ -1,28 +1,21 @@
 use std::path::PathBuf;
 
-/// Common name information for directory list entries.
-#[derive(Debug, Clone)]
-pub struct DirectoryListEntryName {
-    /// The base name of the file or directory.
-    pub name: String,
-    /// The absolute path to the file or directory.
-    pub abs_path: PathBuf,
-    /// The path relative to the listing root (uses OS separators).
-    pub rel_path: PathBuf,
-}
-
 /// A directory entry in a directory listing.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
-    /// Name information for this directory.
-    pub name: DirectoryListEntryName,
+    /// The base name of the directory.
+    pub name: String,
+    /// The path to the directory from the FileSource root (uses OS separators).
+    pub path: PathBuf,
 }
 
 /// A file entry in a directory listing.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
-    /// Name information for this file.
-    pub name: DirectoryListEntryName,
+    /// The base name of the file.
+    pub name: String,
+    /// The path to the file from the FileSource root (uses OS separators).
+    pub path: PathBuf,
     /// Size of the file in bytes.
     pub size: u64,
     /// Whether the file is executable.
@@ -39,27 +32,20 @@ pub enum DirectoryListEntry {
 }
 
 impl DirectoryListEntry {
-    /// Get the name information for this entry.
-    pub fn name(&self) -> &DirectoryListEntryName {
+    /// Get the base name of this entry.
+    pub fn name(&self) -> &str {
         match self {
             DirectoryListEntry::Directory(d) => &d.name,
             DirectoryListEntry::File(f) => &f.name,
         }
     }
 
-    /// Get the base name of this entry.
-    pub fn base_name(&self) -> &str {
-        &self.name().name
-    }
-
-    /// Get the absolute path of this entry.
-    pub fn abs_path(&self) -> &PathBuf {
-        &self.name().abs_path
-    }
-
-    /// Get the relative path of this entry.
-    pub fn rel_path(&self) -> &PathBuf {
-        &self.name().rel_path
+    /// Get the path of this entry from the FileSource root.
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            DirectoryListEntry::Directory(d) => &d.path,
+            DirectoryListEntry::File(f) => &f.path,
+        }
     }
 }
 

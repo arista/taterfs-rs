@@ -8,7 +8,7 @@ use crate::file_source::error::{FileSourceError, Result};
 use crate::file_source::file_chunks::{FileChunking, FileChunks};
 use crate::file_source::file_source::FileSource;
 use crate::file_source::types::{
-    next_chunk_size, DirEntry, DirectoryListEntry, DirectoryListEntryName, FileChunk, FileEntry,
+    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry,
 };
 
 /// A FileSource implementation backed by the local filesystem.
@@ -40,6 +40,14 @@ impl FsFileSource {
             self.root.join(path)
         }
     }
+
+    /// Get the path relative to the root.
+    fn to_rel_path(&self, abs_path: &Path) -> PathBuf {
+        abs_path
+            .strip_prefix(&self.root)
+            .unwrap_or(abs_path)
+            .to_path_buf()
+    }
 }
 
 impl FileSource for FsFileSource {
@@ -53,24 +61,19 @@ impl FileSource for FsFileSource {
             let file_name = entry.file_name().to_string_lossy().to_string();
             let file_type = entry.file_type().await?;
             let entry_abs_path = entry.path();
-            let rel_path = entry_abs_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&entry_abs_path)
-                .to_path_buf();
-
-            let entry_name = DirectoryListEntryName {
-                name: file_name.clone(),
-                abs_path: entry_abs_path.clone(),
-                rel_path,
-            };
+            let entry_path = self.to_rel_path(&entry_abs_path);
 
             let dir_entry = if file_type.is_dir() {
-                DirectoryListEntry::Directory(DirEntry { name: entry_name })
+                DirectoryListEntry::Directory(DirEntry {
+                    name: file_name.clone(),
+                    path: entry_path,
+                })
             } else if file_type.is_file() {
                 let metadata = entry.metadata().await?;
                 let executable = is_executable(&metadata);
                 DirectoryListEntry::File(FileEntry {
-                    name: entry_name,
+                    name: file_name.clone(),
+                    path: entry_path,
                     size: metadata.len(),
                     executable,
                 })
@@ -120,23 +123,18 @@ impl FileSource for FsFileSource {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let rel_path = abs_path
-            .strip_prefix(&self.root)
-            .unwrap_or(&abs_path)
-            .to_path_buf();
-
-        let entry_name = DirectoryListEntryName {
-            name: file_name,
-            abs_path: abs_path.clone(),
-            rel_path,
-        };
+        let entry_path = self.to_rel_path(&abs_path);
 
         let entry = if metadata.is_dir() {
-            DirectoryListEntry::Directory(DirEntry { name: entry_name })
+            DirectoryListEntry::Directory(DirEntry {
+                name: file_name,
+                path: entry_path,
+            })
         } else if metadata.is_file() {
             let executable = is_executable(&metadata);
             DirectoryListEntry::File(FileEntry {
-                name: entry_name,
+                name: file_name,
+                path: entry_path,
                 size: metadata.len(),
                 executable,
             })
@@ -248,14 +246,14 @@ mod tests {
 
         // Should be in lexical order
         let entry1 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry1.base_name(), "a.txt");
+        assert_eq!(entry1.name(), "a.txt");
         assert!(matches!(entry1, DirectoryListEntry::File(_)));
 
         let entry2 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry2.base_name(), "b.txt");
+        assert_eq!(entry2.name(), "b.txt");
 
         let entry3 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry3.base_name(), "subdir");
+        assert_eq!(entry3.name(), "subdir");
         assert!(matches!(entry3, DirectoryListEntry::Directory(_)));
 
         assert!(list.next().await.unwrap().is_none());
@@ -373,7 +371,8 @@ mod tests {
         // List nested directory
         let mut list = source.list_directory(Path::new("/a/b")).await.unwrap();
         let entry = list.next().await.unwrap().unwrap();
-        assert_eq!(entry.base_name(), "file.txt");
+        assert_eq!(entry.name(), "file.txt");
+        assert_eq!(entry.path(), &PathBuf::from("a/b/file.txt"));
     }
 
     #[cfg(unix)]

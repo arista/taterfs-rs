@@ -7,7 +7,7 @@ use crate::file_source::error::{FileSourceError, Result};
 use crate::file_source::file_chunks::{FileChunking, FileChunks};
 use crate::file_source::file_source::FileSource;
 use crate::file_source::types::{
-    next_chunk_size, DirEntry, DirectoryListEntry, DirectoryListEntryName, FileChunk, FileEntry,
+    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry,
 };
 
 /// An entry in the in-memory filesystem.
@@ -74,15 +74,6 @@ impl MemoryFsEntry {
             MemoryFsEntry::Directory(_) => None,
             MemoryFsEntry::File { contents, .. } => Some(contents.len() as u64),
             MemoryFsEntry::RepeatedFile { size, .. } => Some(*size),
-        }
-    }
-
-    /// Check if this entry is executable.
-    fn is_executable(&self) -> bool {
-        match self {
-            MemoryFsEntry::Directory(_) => false,
-            MemoryFsEntry::File { executable, .. } => *executable,
-            MemoryFsEntry::RepeatedFile { executable, .. } => *executable,
         }
     }
 
@@ -221,17 +212,14 @@ impl MemoryFileSource {
         Some(current)
     }
 
-    /// Create entry name info for an entry.
-    fn make_entry_name(
-        &self,
-        name: &str,
-        parent_abs: &Path,
-        parent_rel: &Path,
-    ) -> DirectoryListEntryName {
-        DirectoryListEntryName {
-            name: name.to_string(),
-            abs_path: parent_abs.join(name),
-            rel_path: parent_rel.join(name),
+    /// Normalize a path by stripping leading "/" and converting to PathBuf.
+    fn normalize_path(path: &Path) -> PathBuf {
+        let path_str = path.to_string_lossy();
+        let stripped = path_str.trim_start_matches('/');
+        if stripped.is_empty() {
+            PathBuf::new()
+        } else {
+            PathBuf::from(stripped)
         }
     }
 }
@@ -247,25 +235,37 @@ impl FileSource for MemoryFileSource {
             _ => return Err(FileSourceError::NotFound),
         };
 
+        let parent_path = Self::normalize_path(path);
+
         // Collect entries sorted by name (BTreeMap already sorted)
         let entries: Vec<(String, DirectoryListEntry)> = children
             .iter()
             .map(|(name, entry)| {
-                let entry_name = self.make_entry_name(name, path, Path::new(""));
+                let entry_path = if parent_path.as_os_str().is_empty() {
+                    PathBuf::from(name)
+                } else {
+                    parent_path.join(name)
+                };
+
                 let dir_entry = match entry {
                     MemoryFsEntry::Directory(_) => {
-                        DirectoryListEntry::Directory(DirEntry { name: entry_name })
+                        DirectoryListEntry::Directory(DirEntry {
+                            name: name.clone(),
+                            path: entry_path,
+                        })
                     }
                     MemoryFsEntry::File { contents, executable } => {
                         DirectoryListEntry::File(FileEntry {
-                            name: entry_name,
+                            name: name.clone(),
+                            path: entry_path,
                             size: contents.len() as u64,
                             executable: *executable,
                         })
                     }
                     MemoryFsEntry::RepeatedFile { size, executable, .. } => {
                         DirectoryListEntry::File(FileEntry {
-                            name: entry_name,
+                            name: name.clone(),
+                            path: entry_path,
                             size: *size,
                             executable: *executable,
                         })
@@ -306,27 +306,27 @@ impl FileSource for MemoryFileSource {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let parent = path.parent().unwrap_or(Path::new(""));
-        let entry_name = DirectoryListEntryName {
-            name,
-            abs_path: path.to_path_buf(),
-            rel_path: path.strip_prefix(parent).unwrap_or(path).to_path_buf(),
-        };
+        let entry_path = Self::normalize_path(path);
 
         let result = match entry {
             MemoryFsEntry::Directory(_) => {
-                DirectoryListEntry::Directory(DirEntry { name: entry_name })
+                DirectoryListEntry::Directory(DirEntry {
+                    name,
+                    path: entry_path,
+                })
             }
             MemoryFsEntry::File { contents, executable } => {
                 DirectoryListEntry::File(FileEntry {
-                    name: entry_name,
+                    name,
+                    path: entry_path,
                     size: contents.len() as u64,
                     executable: *executable,
                 })
             }
             MemoryFsEntry::RepeatedFile { size, executable, .. } => {
                 DirectoryListEntry::File(FileEntry {
-                    name: entry_name,
+                    name,
+                    path: entry_path,
                     size: *size,
                     executable: *executable,
                 })
@@ -404,14 +404,14 @@ mod tests {
 
         // Entries should be in lexical order
         let entry1 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry1.base_name(), "file1.txt");
+        assert_eq!(entry1.name(), "file1.txt");
         assert!(matches!(entry1, DirectoryListEntry::File(_)));
 
         let entry2 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry2.base_name(), "file2.txt");
+        assert_eq!(entry2.name(), "file2.txt");
 
         let entry3 = list.next().await.unwrap().unwrap();
-        assert_eq!(entry3.base_name(), "subdir");
+        assert_eq!(entry3.name(), "subdir");
         assert!(matches!(entry3, DirectoryListEntry::Directory(_)));
 
         assert!(list.next().await.unwrap().is_none());
@@ -426,13 +426,14 @@ mod tests {
         // List root
         let mut list = source.list_directory(Path::new("/")).await.unwrap();
         let entry = list.next().await.unwrap().unwrap();
-        assert_eq!(entry.base_name(), "a");
+        assert_eq!(entry.name(), "a");
         assert!(matches!(entry, DirectoryListEntry::Directory(_)));
 
         // List nested directory
         let mut list = source.list_directory(Path::new("/a/b")).await.unwrap();
         let entry = list.next().await.unwrap().unwrap();
-        assert_eq!(entry.base_name(), "c.txt");
+        assert_eq!(entry.name(), "c.txt");
+        assert_eq!(entry.path(), &PathBuf::from("a/b/c.txt"));
     }
 
     #[tokio::test]
@@ -525,9 +526,9 @@ mod tests {
 
         let mut list = source.list_directory(Path::new("/")).await.unwrap();
 
-        assert_eq!(list.next().await.unwrap().unwrap().base_name(), "a.txt");
-        assert_eq!(list.next().await.unwrap().unwrap().base_name(), "m.txt");
-        assert_eq!(list.next().await.unwrap().unwrap().base_name(), "z.txt");
+        assert_eq!(list.next().await.unwrap().unwrap().name(), "a.txt");
+        assert_eq!(list.next().await.unwrap().unwrap().name(), "m.txt");
+        assert_eq!(list.next().await.unwrap().unwrap().name(), "z.txt");
     }
 
     #[tokio::test]

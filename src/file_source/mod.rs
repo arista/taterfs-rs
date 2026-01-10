@@ -3,6 +3,7 @@ mod error;
 mod file_chunks;
 mod file_source;
 mod fs_file_source;
+mod ignoring_file_source;
 mod memory_file_source;
 mod s3_file_source;
 mod types;
@@ -12,6 +13,7 @@ pub use error::{FileSourceError, Result};
 pub use file_chunks::{FileChunking, FileChunks};
 pub use file_source::FileSource;
 pub use fs_file_source::FsFileSource;
+pub use ignoring_file_source::IgnoringFileSource;
 pub use memory_file_source::{MemoryFileSource, MemoryFileSourceBuilder, MemoryFsEntry};
 pub use s3_file_source::{S3FileSource, S3FileSourceConfig};
 pub use types::{

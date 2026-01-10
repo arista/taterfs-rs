@@ -151,9 +151,24 @@ TODO: What HTTP API should it expect the server to implement?  Does WebDAV make 
 
 ### IgnoringFileSource
 
-This is a FileSource that takes another FileSource as a parameter, and filters its output to ignore certain files.  The file ignoring rules are as follows:
+This is a FileSource that takes another FileSource as a parameter, and filters its output to ignore certain files.
 
-* The directory ".tfs/" should be ignored
-* If a ".gitignore" is present, then its directives should be followed the same way that git works
-* If a ".tfsignore" is present, it should be treated the same as ".gitignore"
-* If both ".gitignore" and ".tfsignore" are present, it should behave as if they were concatenated into a single file, with ".gitignore" preceding ".tfsignore"
+```rust
+let inner = FsFileSource::new("/path/to/root");
+let source = IgnoringFileSource::new(inner);
+```
+
+The file ignoring rules are as follows:
+
+* The directories ".tfs/" and ".git/" are always ignored
+* If a ".gitignore" is present, then its directives are followed the same way that git works
+* If a ".tfsignore" is present, it is treated the same as ".gitignore"
+* If both ".gitignore" and ".tfsignore" are present, they are treated as concatenated with ".gitignore" patterns first
+
+Ignore rules are inherited from parent directories, following git semantics. When listing `foo/bar/`, the ignore patterns from `/.gitignore`, `/foo/.gitignore`, and `/foo/bar/.gitignore` are all applied.
+
+The implementation uses the `ignore` crate for gitignore pattern matching, which provides full compatibility with git's ignore specification including:
+- Glob patterns (`*.log`, `build/`)
+- Negation patterns (`!important.log`)
+- Directory-only patterns (`logs/`)
+- Comments and blank lines

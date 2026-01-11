@@ -6,51 +6,82 @@ A FileSource is a source of directory and file data to be stored in a repository
 
 A FileSource's task boils down to listing the items in a directory, and retrieving the chunks of a file.
 
+### FileSource Trait
+
+```rust
+trait FileSource: Send + Sync {
+    // List directory entries, returned via async iterator
+    async fn list_directory(&self, path: &Path) -> Result<DirectoryList>;
+    // Get file chunks, returned via async iterator
+    async fn get_file_chunks(&self, path: &Path) -> Result<FileChunks>;
+    // Get a single entry (file or directory) at a path
+    async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryListEntry>>;
+}
 ```
-trait FileSource {
-  // List directory entries, returned via async iterator
-  async list_directory(path: Path) -> DirectoryList
-  // Get file chunks, returned via async iterator
-  async get_file_chunks(path: Path) -> FileChunks
-  // Get a single entry (file or directory) at a path
-  async get_entry(path: Path) -> DirectoryListEntry | null
+
+### Directory Entries
+
+```rust
+enum DirectoryListEntry {
+    Directory(DirEntry),
+    File(FileEntry),
 }
 
-// Async iterator for directory entries
-trait DirectoryListing {
-  async next() -> DirectoryListEntry | null
+struct DirEntry {
+    pub name: String,     // Base name of the directory
+    pub path: PathBuf,    // Path from the FileSource root (uses OS separators)
+    // Methods:
+    async fn list_directory(&self) -> Result<DirectoryList>;
+    async fn get_entry(&self, name: &str) -> Result<Option<DirectoryListEntry>>;
 }
 
-// Async iterator for file chunks
-trait FileChunking {
-  async next() -> FileChunk | null
+struct FileEntry {
+    pub name: String,     // Base name of the file
+    pub path: PathBuf,    // Path from the FileSource root (uses OS separators)
+    pub size: u64,        // Size of the file in bytes
+    pub executable: bool, // Whether the file is executable
+    // Methods:
+    async fn get_chunks(&self) -> Result<FileChunks>;
 }
 ```
 
 Directory entries are listed in lexical order.
 
+### Entry-Based Operations
+
+The preferred way to traverse a file tree is using the entry-based API. Each `DirEntry` provides methods to list its contents or get specific children, and each `FileEntry` provides a method to get its chunks:
+
+```rust
+// Start from the root
+let mut root_list = source.list_directory(Path::new("")).await?;
+
+// Iterate through entries
+while let Some(entry) = root_list.next().await? {
+    match entry {
+        DirectoryListEntry::Directory(dir) => {
+            // List directory contents
+            let mut contents = dir.list_directory().await?;
+
+            // Or get a specific child by name
+            if let Some(child) = dir.get_entry("specific_file.txt").await? {
+                // ...
+            }
+        }
+        DirectoryListEntry::File(file) => {
+            // Get file chunks
+            let mut chunks = file.get_chunks().await?;
+            while let Some(chunk) = chunks.next().await? {
+                // Process chunk data...
+            }
+        }
+    }
+}
 ```
-enum DirectoryListEntry {
-  Directory(DirEntry)
-  File(FileEntry)
-}
 
-DirEntry {
-    name: String,
-    // Path from the FileSource root (uses OS separators)
-    path: PathBuf,
-}
-
-FileEntry {
-    name: String,
-    // Path from the FileSource root (uses OS separators)
-    path: PathBuf,
-    size: u64,
-    executable: bool,
-}
-```
-
-To recursively list entries in a subdirectory, call `file_source.list_directory(&dir_entry.path)`.
+This entry-based approach has several advantages:
+- Natural tree traversal without needing to construct paths
+- Context propagation (e.g., IgnoringFileSource passes ignore rules down the tree)
+- Efficient lazy loading of directory contents
 
 TODO: links are currently ignored - should they be included?
 
@@ -58,14 +89,14 @@ TODO: links are currently ignored - should they be included?
 
 File chunks contain the actual file data and are used to break large files into smaller pieces for storage.
 
-```
-FileChunk {
+```rust
+struct FileChunk {
     offset: u64,     // Offset of this chunk within the file
     data: Vec<u8>,   // The chunk data
 
-    size() -> u64    // Size of this chunk in bytes
-    offset() -> u64  // Offset within the file
-    data() -> &[u8]  // Access the chunk data
+    fn size(&self) -> u64;    // Size of this chunk in bytes
+    fn offset(&self) -> u64;  // Offset within the file
+    fn data(&self) -> &[u8];  // Access the chunk data
 }
 ```
 
@@ -166,6 +197,8 @@ The file ignoring rules are as follows:
 * If both ".gitignore" and ".tfsignore" are present, they are treated as concatenated with ".gitignore" patterns first
 
 Ignore rules are inherited from parent directories, following git semantics. When listing `foo/bar/`, the ignore patterns from `/.gitignore`, `/foo/.gitignore`, and `/foo/bar/.gitignore` are all applied.
+
+The ignore context is propagated through the entry-based API. When you traverse the tree using `dir.list_directory()` or `dir.get_entry(name)`, the returned entries automatically inherit the accumulated ignore rules. This makes traversal efficient - ignore files are loaded once per directory level rather than re-scanned for each operation.
 
 The implementation uses the `ignore` crate for gitignore pattern matching, which provides full compatibility with git's ignore specification including:
 - Glob patterns (`*.log`, `build/`)

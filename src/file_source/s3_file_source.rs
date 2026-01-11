@@ -1,14 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
-use aws_sdk_s3::Client;
 use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::Client;
 
 use crate::file_source::directory_list::{DirectoryList, DirectoryListing};
 use crate::file_source::error::{FileSourceError, Result};
 use crate::file_source::file_chunks::{FileChunking, FileChunks};
 use crate::file_source::file_source::FileSource;
 use crate::file_source::types::{
-    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry,
+    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry, GetChildEntryFn,
+    GetChunksFn, ListDirectoryFn,
 };
 
 /// Configuration for S3FileSource.
@@ -53,15 +56,21 @@ impl S3FileSourceConfig {
     }
 }
 
+/// Inner state for S3FileSource, wrapped in Arc for sharing with closures.
+struct S3FileSourceInner {
+    client: Client,
+    bucket: String,
+    prefix: Option<String>,
+}
+
 /// An S3-based implementation of `FileSource`.
 ///
 /// Treats S3 objects as files, using "/" as directory separators.
 /// Directory listings and file reads are performed incrementally to handle
 /// buckets and files of arbitrary size.
+#[derive(Clone)]
 pub struct S3FileSource {
-    client: Client,
-    bucket: String,
-    prefix: Option<String>,
+    inner: Arc<S3FileSourceInner>,
 }
 
 impl S3FileSource {
@@ -69,8 +78,7 @@ impl S3FileSource {
     ///
     /// Uses the standard AWS credential chain (env vars, ~/.aws, IAM roles, etc.).
     pub async fn new(config: S3FileSourceConfig) -> Self {
-        let mut aws_config_loader =
-            aws_config::defaults(aws_config::BehaviorVersion::latest());
+        let mut aws_config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
 
         if let Some(region) = &config.region {
             aws_config_loader =
@@ -85,16 +93,18 @@ impl S3FileSource {
         let client = Client::new(&aws_config);
 
         Self {
-            client,
-            bucket: config.bucket,
-            prefix: config.prefix,
+            inner: Arc::new(S3FileSourceInner {
+                client,
+                bucket: config.bucket,
+                prefix: config.prefix,
+            }),
         }
     }
 
     /// Build the full S3 key from a path.
-    fn full_key(&self, path: &Path) -> String {
+    fn full_key(inner: &S3FileSourceInner, path: &Path) -> String {
         let path_str = path_to_s3_key(path);
-        match &self.prefix {
+        match &inner.prefix {
             Some(prefix) => {
                 let prefix = prefix.trim_end_matches('/');
                 if path_str.is_empty() {
@@ -108,13 +118,190 @@ impl S3FileSource {
     }
 
     /// Build the S3 prefix for listing a directory.
-    fn list_prefix(&self, path: &Path) -> String {
-        let key = self.full_key(path);
+    fn list_prefix(inner: &S3FileSourceInner, path: &Path) -> String {
+        let key = Self::full_key(inner, path);
         if key.is_empty() {
             String::new()
         } else {
             format!("{}/", key.trim_end_matches('/'))
         }
+    }
+
+    /// Create a closure that lists a directory.
+    fn make_list_fn(inner: Arc<S3FileSourceInner>, path: PathBuf) -> ListDirectoryFn {
+        Arc::new(move || {
+            let inner = Arc::clone(&inner);
+            let path = path.clone();
+            Box::pin(async move { Self::list_directory_internal(inner, &path).await })
+        })
+    }
+
+    /// Create a closure that gets a child entry by name.
+    fn make_get_child_fn(inner: Arc<S3FileSourceInner>, path: PathBuf) -> GetChildEntryFn {
+        Arc::new(move |name: String| {
+            let inner = Arc::clone(&inner);
+            let child_path = if path.as_os_str().is_empty() {
+                PathBuf::from(&name)
+            } else {
+                path.join(&name)
+            };
+            Box::pin(async move { Self::get_entry_internal(inner, &child_path).await })
+        })
+    }
+
+    /// Create a closure that gets file chunks.
+    fn make_get_chunks_fn(inner: Arc<S3FileSourceInner>, path: PathBuf) -> GetChunksFn {
+        Arc::new(move || {
+            let inner = Arc::clone(&inner);
+            let path = path.clone();
+            Box::pin(async move { Self::get_file_chunks_internal(inner, &path).await })
+        })
+    }
+
+    /// Internal implementation of list_directory.
+    fn list_directory_internal(
+        inner: Arc<S3FileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<DirectoryList>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let prefix = Self::list_prefix(&inner, &path);
+            let parent_path = path_to_s3_key(&path);
+
+            Ok(DirectoryList::new(S3DirectoryList {
+                inner,
+                prefix,
+                parent_path,
+                buffer: Vec::new(),
+                buffer_index: 0,
+                continuation_token: None,
+                initial_fetch_done: false,
+                exhausted: false,
+            }))
+        })
+    }
+
+    /// Internal implementation of get_entry.
+    fn get_entry_internal(
+        inner: Arc<S3FileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<DirectoryListEntry>>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let key = Self::full_key(&inner, &path);
+            let path_str = path_to_s3_key(&path);
+
+            // First, try to get the object directly (it might be a file)
+            match inner
+                .client
+                .head_object()
+                .bucket(&inner.bucket)
+                .key(&key)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    let entry_path =
+                        PathBuf::from(path_str.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    let get_chunks_fn = Self::make_get_chunks_fn(Arc::clone(&inner), entry_path.clone());
+
+                    return Ok(Some(DirectoryListEntry::File(FileEntry::new(
+                        name,
+                        entry_path,
+                        response.content_length().unwrap_or(0) as u64,
+                        false,
+                        get_chunks_fn,
+                    ))));
+                }
+                Err(err) if is_not_found(&err) => {
+                    // Not a file, check if it's a directory (has objects with this prefix)
+                }
+                Err(err) => return Err(map_sdk_error(err)),
+            }
+
+            // Check if it's a directory by looking for objects with this prefix
+            let prefix = if key.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", key)
+            };
+
+            let response = inner
+                .client
+                .list_objects_v2()
+                .bucket(&inner.bucket)
+                .prefix(&prefix)
+                .max_keys(1)
+                .send()
+                .await
+                .map_err(map_sdk_error)?;
+
+            let has_contents = response.contents().first().is_some()
+                || response.common_prefixes().first().is_some();
+
+            if has_contents {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                let entry_path =
+                    PathBuf::from(path_str.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let list_fn = Self::make_list_fn(Arc::clone(&inner), entry_path.clone());
+                let get_child_fn = Self::make_get_child_fn(Arc::clone(&inner), entry_path.clone());
+
+                Ok(Some(DirectoryListEntry::Directory(DirEntry::new(
+                    name,
+                    entry_path,
+                    list_fn,
+                    get_child_fn,
+                ))))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    /// Internal implementation of get_file_chunks.
+    fn get_file_chunks_internal(
+        inner: Arc<S3FileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<FileChunks>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let key = Self::full_key(&inner, &path);
+
+            // Get file size via HEAD request (doesn't download the file)
+            let head_response = inner
+                .client
+                .head_object()
+                .bucket(&inner.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|err| {
+                    if is_not_found(&err) {
+                        FileSourceError::NotFound
+                    } else {
+                        map_sdk_error(err)
+                    }
+                })?;
+
+            let size = head_response.content_length().unwrap_or(0) as u64;
+
+            Ok(FileChunks::new(S3FileChunks {
+                client: inner.client.clone(),
+                bucket: inner.bucket.clone(),
+                key,
+                size,
+                offset: 0,
+            }))
+        })
     }
 }
 
@@ -136,118 +323,22 @@ fn map_sdk_error<E: std::fmt::Debug>(err: SdkError<E>) -> FileSourceError {
 
 impl FileSource for S3FileSource {
     async fn list_directory(&self, path: &Path) -> Result<DirectoryList> {
-        let prefix = self.list_prefix(path);
-        let parent_path = path_to_s3_key(path);
-
-        Ok(DirectoryList::new(S3DirectoryList {
-            client: self.client.clone(),
-            bucket: self.bucket.clone(),
-            prefix,
-            parent_path,
-            buffer: Vec::new(),
-            buffer_index: 0,
-            continuation_token: None,
-            initial_fetch_done: false,
-            exhausted: false,
-        }))
+        Self::list_directory_internal(Arc::clone(&self.inner), path).await
     }
 
     async fn get_file_chunks(&self, path: &Path) -> Result<FileChunks> {
-        let key = self.full_key(path);
-
-        // Get file size via HEAD request (doesn't download the file)
-        let head_response = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|err| {
-                if is_not_found(&err) {
-                    FileSourceError::NotFound
-                } else {
-                    map_sdk_error(err)
-                }
-            })?;
-
-        let size = head_response.content_length().unwrap_or(0) as u64;
-
-        Ok(FileChunks::new(S3FileChunks {
-            client: self.client.clone(),
-            bucket: self.bucket.clone(),
-            key,
-            size,
-            offset: 0,
-        }))
+        Self::get_file_chunks_internal(Arc::clone(&self.inner), path).await
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryListEntry>> {
-        let key = self.full_key(path);
-        let path_str = path_to_s3_key(path);
-
-        // First, try to get the object directly (it might be a file)
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                return Ok(Some(DirectoryListEntry::File(FileEntry {
-                    name,
-                    path: PathBuf::from(path_str.replace('/', std::path::MAIN_SEPARATOR_STR)),
-                    size: response.content_length().unwrap_or(0) as u64,
-                    executable: false,
-                })));
-            }
-            Err(err) if is_not_found(&err) => {
-                // Not a file, check if it's a directory (has objects with this prefix)
-            }
-            Err(err) => return Err(map_sdk_error(err)),
-        }
-
-        // Check if it's a directory by looking for objects with this prefix
-        let prefix = if key.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", key)
-        };
-
-        let response = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&prefix)
-            .max_keys(1)
-            .send()
-            .await
-            .map_err(map_sdk_error)?;
-
-        let has_contents = response.contents().first().is_some()
-            || response.common_prefixes().first().is_some();
-
-        if has_contents {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            Ok(Some(DirectoryListEntry::Directory(DirEntry {
-                name,
-                path: PathBuf::from(path_str.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            })))
-        } else {
-            Ok(None)
-        }
+        Self::get_entry_internal(Arc::clone(&self.inner), path).await
     }
+}
+
+/// Entry type for S3DirectoryList.
+enum S3EntryType {
+    Directory,
+    File { size: u64 },
 }
 
 /// Directory listing iterator for S3FileSource.
@@ -255,14 +346,13 @@ impl FileSource for S3FileSource {
 /// Fetches pages lazily - only makes S3 requests as entries are consumed.
 /// Each page's Contents and CommonPrefixes are merged in lexical order.
 struct S3DirectoryList {
-    client: Client,
-    bucket: String,
+    inner: Arc<S3FileSourceInner>,
     /// The S3 prefix to list (includes trailing slash if non-empty).
     prefix: String,
     /// The parent path (without trailing slash) for building entry paths.
     parent_path: String,
     /// Buffer of entries from the current page, sorted by name.
-    buffer: Vec<(String, DirectoryListEntry)>,
+    buffer: Vec<(String, PathBuf, S3EntryType)>,
     /// Current index into the buffer.
     buffer_index: usize,
     /// Continuation token for fetching the next page.
@@ -277,9 +367,10 @@ impl S3DirectoryList {
     /// Fetch the next page of results from S3.
     async fn fetch_next_page(&mut self) -> Result<()> {
         let mut request = self
+            .inner
             .client
             .list_objects_v2()
-            .bucket(&self.bucket)
+            .bucket(&self.inner.bucket)
             .delimiter("/");
 
         if !self.prefix.is_empty() {
@@ -312,12 +403,10 @@ impl S3DirectoryList {
 
                         self.buffer.push((
                             name.to_string(),
-                            DirectoryListEntry::File(FileEntry {
-                                name: name.to_string(),
-                                path: entry_path,
+                            entry_path,
+                            S3EntryType::File {
                                 size: obj.size().unwrap_or(0) as u64,
-                                executable: false,
-                            }),
+                            },
                         ));
                     }
                 }
@@ -339,13 +428,7 @@ impl S3DirectoryList {
                             )
                         };
 
-                        self.buffer.push((
-                            name.to_string(),
-                            DirectoryListEntry::Directory(DirEntry {
-                                name: name.to_string(),
-                                path: entry_path,
-                            }),
-                        ));
+                        self.buffer.push((name.to_string(), entry_path, S3EntryType::Directory));
                     }
                 }
             }
@@ -379,8 +462,35 @@ impl DirectoryListing for S3DirectoryList {
 
         // Return next entry from buffer if available
         if self.buffer_index < self.buffer.len() {
-            let (_, entry) = self.buffer[self.buffer_index].clone();
+            let (name, entry_path, entry_type) = &self.buffer[self.buffer_index];
             self.buffer_index += 1;
+
+            let entry = match entry_type {
+                S3EntryType::Directory => {
+                    let list_fn =
+                        S3FileSource::make_list_fn(Arc::clone(&self.inner), entry_path.clone());
+                    let get_child_fn =
+                        S3FileSource::make_get_child_fn(Arc::clone(&self.inner), entry_path.clone());
+                    DirectoryListEntry::Directory(DirEntry::new(
+                        name.clone(),
+                        entry_path.clone(),
+                        list_fn,
+                        get_child_fn,
+                    ))
+                }
+                S3EntryType::File { size } => {
+                    let get_chunks_fn =
+                        S3FileSource::make_get_chunks_fn(Arc::clone(&self.inner), entry_path.clone());
+                    DirectoryListEntry::File(FileEntry::new(
+                        name.clone(),
+                        entry_path.clone(),
+                        *size,
+                        false,
+                        get_chunks_fn,
+                    ))
+                }
+            };
+
             Ok(Some(entry))
         } else {
             Ok(None)

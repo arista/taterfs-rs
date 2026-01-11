@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -8,142 +10,215 @@ use crate::file_source::error::{FileSourceError, Result};
 use crate::file_source::file_chunks::{FileChunking, FileChunks};
 use crate::file_source::file_source::FileSource;
 use crate::file_source::types::{
-    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry,
+    next_chunk_size, DirEntry, DirectoryListEntry, FileChunk, FileEntry, GetChildEntryFn,
+    GetChunksFn, ListDirectoryFn,
 };
+
+/// Inner state for FsFileSource, wrapped in Arc for sharing with closures.
+struct FsFileSourceInner {
+    root: PathBuf,
+}
 
 /// A FileSource implementation backed by the local filesystem.
 #[derive(Clone)]
 pub struct FsFileSource {
-    root: PathBuf,
+    inner: Arc<FsFileSourceInner>,
 }
 
 impl FsFileSource {
     /// Create a new FsFileSource rooted at the given path.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            inner: Arc::new(FsFileSourceInner { root: root.into() }),
+        }
     }
 
     /// Get the root path of this file source.
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.inner.root
     }
 
     /// Convert a relative path to an absolute path within this source.
-    fn to_abs_path(&self, path: &Path) -> PathBuf {
+    fn to_abs_path(inner: &FsFileSourceInner, path: &Path) -> PathBuf {
         if path.is_absolute() {
             // Strip leading / and treat as relative to root
-            let stripped = path
-                .strip_prefix("/")
-                .unwrap_or(path);
-            self.root.join(stripped)
+            let stripped = path.strip_prefix("/").unwrap_or(path);
+            inner.root.join(stripped)
         } else {
-            self.root.join(path)
+            inner.root.join(path)
         }
     }
 
     /// Get the path relative to the root.
-    fn to_rel_path(&self, abs_path: &Path) -> PathBuf {
+    fn to_rel_path(inner: &FsFileSourceInner, abs_path: &Path) -> PathBuf {
         abs_path
-            .strip_prefix(&self.root)
+            .strip_prefix(&inner.root)
             .unwrap_or(abs_path)
             .to_path_buf()
+    }
+
+    /// Create a closure that lists a directory.
+    fn make_list_fn(inner: Arc<FsFileSourceInner>, path: PathBuf) -> ListDirectoryFn {
+        Arc::new(move || {
+            let inner = Arc::clone(&inner);
+            let path = path.clone();
+            Box::pin(async move { Self::list_directory_internal(inner, &path).await })
+        })
+    }
+
+    /// Create a closure that gets a child entry by name.
+    fn make_get_child_fn(inner: Arc<FsFileSourceInner>, path: PathBuf) -> GetChildEntryFn {
+        Arc::new(move |name: String| {
+            let inner = Arc::clone(&inner);
+            let child_path = if path.as_os_str().is_empty() {
+                PathBuf::from(&name)
+            } else {
+                path.join(&name)
+            };
+            Box::pin(async move { Self::get_entry_internal(inner, &child_path).await })
+        })
+    }
+
+    /// Create a closure that gets file chunks.
+    fn make_get_chunks_fn(inner: Arc<FsFileSourceInner>, path: PathBuf) -> GetChunksFn {
+        Arc::new(move || {
+            let inner = Arc::clone(&inner);
+            let path = path.clone();
+            Box::pin(async move { Self::get_file_chunks_internal(inner, &path).await })
+        })
+    }
+
+    /// Internal implementation of list_directory.
+    fn list_directory_internal(
+        inner: Arc<FsFileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<DirectoryList>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let abs_path = Self::to_abs_path(&inner, &path);
+
+            let mut read_dir = fs::read_dir(&abs_path).await?;
+            let mut entries = Vec::new();
+
+            while let Some(entry) = read_dir.next_entry().await? {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let file_type = entry.file_type().await?;
+                let entry_abs_path = entry.path();
+                let entry_path = Self::to_rel_path(&inner, &entry_abs_path);
+
+                if file_type.is_dir() {
+                    entries.push((file_name, entry_path, FsEntryType::Directory));
+                } else if file_type.is_file() {
+                    let metadata = entry.metadata().await?;
+                    let executable = is_executable(&metadata);
+                    let size = metadata.len();
+                    entries.push((
+                        file_name,
+                        entry_path,
+                        FsEntryType::File { size, executable },
+                    ));
+                }
+                // Skip symlinks and other special files
+            }
+
+            // Sort by name for lexical ordering
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+            Ok(DirectoryList::new(FsDirectoryList {
+                inner,
+                entries,
+                index: 0,
+            }))
+        })
+    }
+
+    /// Internal implementation of get_entry.
+    fn get_entry_internal(
+        inner: Arc<FsFileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<DirectoryListEntry>>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let abs_path = Self::to_abs_path(&inner, &path);
+
+            let metadata = match fs::metadata(&abs_path).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+
+            let file_name = abs_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let entry_path = Self::to_rel_path(&inner, &abs_path);
+
+            let entry = if metadata.is_dir() {
+                let list_fn = Self::make_list_fn(Arc::clone(&inner), entry_path.clone());
+                let get_child_fn = Self::make_get_child_fn(Arc::clone(&inner), entry_path.clone());
+                DirectoryListEntry::Directory(DirEntry::new(
+                    file_name,
+                    entry_path,
+                    list_fn,
+                    get_child_fn,
+                ))
+            } else if metadata.is_file() {
+                let executable = is_executable(&metadata);
+                let get_chunks_fn = Self::make_get_chunks_fn(Arc::clone(&inner), entry_path.clone());
+                DirectoryListEntry::File(FileEntry::new(
+                    file_name,
+                    entry_path,
+                    metadata.len(),
+                    executable,
+                    get_chunks_fn,
+                ))
+            } else {
+                // Symlinks and other special files return None
+                return Ok(None);
+            };
+
+            Ok(Some(entry))
+        })
+    }
+
+    /// Internal implementation of get_file_chunks.
+    fn get_file_chunks_internal(
+        inner: Arc<FsFileSourceInner>,
+        path: &Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<FileChunks>> + Send>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let abs_path = Self::to_abs_path(&inner, &path);
+
+            let metadata = fs::metadata(&abs_path).await?;
+            if !metadata.is_file() {
+                return Err(FileSourceError::NotFound);
+            }
+
+            let file = fs::File::open(&abs_path).await?;
+            let size = metadata.len();
+
+            Ok(FileChunks::new(FsFileChunks {
+                file,
+                size,
+                offset: 0,
+            }))
+        })
     }
 }
 
 impl FileSource for FsFileSource {
     async fn list_directory(&self, path: &Path) -> Result<DirectoryList> {
-        let abs_path = self.to_abs_path(path);
-
-        let mut read_dir = fs::read_dir(&abs_path).await?;
-        let mut entries = Vec::new();
-
-        while let Some(entry) = read_dir.next_entry().await? {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let file_type = entry.file_type().await?;
-            let entry_abs_path = entry.path();
-            let entry_path = self.to_rel_path(&entry_abs_path);
-
-            let dir_entry = if file_type.is_dir() {
-                DirectoryListEntry::Directory(DirEntry {
-                    name: file_name.clone(),
-                    path: entry_path,
-                })
-            } else if file_type.is_file() {
-                let metadata = entry.metadata().await?;
-                let executable = is_executable(&metadata);
-                DirectoryListEntry::File(FileEntry {
-                    name: file_name.clone(),
-                    path: entry_path,
-                    size: metadata.len(),
-                    executable,
-                })
-            } else {
-                // Skip symlinks and other special files for now
-                continue;
-            };
-
-            entries.push((file_name, dir_entry));
-        }
-
-        // Sort by name for lexical ordering
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        Ok(DirectoryList::new(FsDirectoryList { entries, index: 0 }))
+        Self::list_directory_internal(Arc::clone(&self.inner), path).await
     }
 
     async fn get_file_chunks(&self, path: &Path) -> Result<FileChunks> {
-        let abs_path = self.to_abs_path(path);
-
-        let metadata = fs::metadata(&abs_path).await?;
-        if !metadata.is_file() {
-            return Err(FileSourceError::NotFound);
-        }
-
-        let file = fs::File::open(&abs_path).await?;
-        let size = metadata.len();
-
-        Ok(FileChunks::new(FsFileChunks {
-            file,
-            size,
-            offset: 0,
-        }))
+        Self::get_file_chunks_internal(Arc::clone(&self.inner), path).await
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryListEntry>> {
-        let abs_path = self.to_abs_path(path);
-
-        let metadata = match fs::metadata(&abs_path).await {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-
-        let file_name = abs_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let entry_path = self.to_rel_path(&abs_path);
-
-        let entry = if metadata.is_dir() {
-            DirectoryListEntry::Directory(DirEntry {
-                name: file_name,
-                path: entry_path,
-            })
-        } else if metadata.is_file() {
-            let executable = is_executable(&metadata);
-            DirectoryListEntry::File(FileEntry {
-                name: file_name,
-                path: entry_path,
-                size: metadata.len(),
-                executable,
-            })
-        } else {
-            // Symlinks and other special files return None
-            return Ok(None);
-        };
-
-        Ok(Some(entry))
+        Self::get_entry_internal(Arc::clone(&self.inner), path).await
     }
 }
 
@@ -159,9 +234,16 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Entry type for FsDirectoryList.
+enum FsEntryType {
+    Directory,
+    File { size: u64, executable: bool },
+}
+
 /// Directory listing iterator for FsFileSource.
 struct FsDirectoryList {
-    entries: Vec<(String, DirectoryListEntry)>,
+    inner: Arc<FsFileSourceInner>,
+    entries: Vec<(String, PathBuf, FsEntryType)>,
     index: usize,
 }
 
@@ -170,8 +252,35 @@ impl DirectoryListing for FsDirectoryList {
         if self.index >= self.entries.len() {
             return Ok(None);
         }
-        let (_, entry) = self.entries[self.index].clone();
+
+        let (name, entry_path, entry_type) = &self.entries[self.index];
         self.index += 1;
+
+        let entry = match entry_type {
+            FsEntryType::Directory => {
+                let list_fn = FsFileSource::make_list_fn(Arc::clone(&self.inner), entry_path.clone());
+                let get_child_fn =
+                    FsFileSource::make_get_child_fn(Arc::clone(&self.inner), entry_path.clone());
+                DirectoryListEntry::Directory(DirEntry::new(
+                    name.clone(),
+                    entry_path.clone(),
+                    list_fn,
+                    get_child_fn,
+                ))
+            }
+            FsEntryType::File { size, executable } => {
+                let get_chunks_fn =
+                    FsFileSource::make_get_chunks_fn(Arc::clone(&self.inner), entry_path.clone());
+                DirectoryListEntry::File(FileEntry::new(
+                    name.clone(),
+                    entry_path.clone(),
+                    *size,
+                    *executable,
+                    get_chunks_fn,
+                ))
+            }
+        };
+
         Ok(Some(entry))
     }
 }
@@ -262,10 +371,15 @@ mod tests {
     #[tokio::test]
     async fn test_file_chunks_small_file() {
         let temp_dir = create_test_dir().await;
-        fs::write(temp_dir.path().join("small.txt"), "hello world").await.unwrap();
+        fs::write(temp_dir.path().join("small.txt"), "hello world")
+            .await
+            .unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
-        let mut chunks = source.get_file_chunks(Path::new("/small.txt")).await.unwrap();
+        let mut chunks = source
+            .get_file_chunks(Path::new("/small.txt"))
+            .await
+            .unwrap();
 
         let chunk = chunks.next().await.unwrap().unwrap();
         assert_eq!(chunk.offset(), 0);
@@ -282,10 +396,15 @@ mod tests {
         // 4MB + 1MB + some remainder = 5MB + 100KB
         let size = 5 * 1024 * 1024 + 100 * 1024;
         let data = vec![0x42u8; size];
-        fs::write(temp_dir.path().join("large.bin"), &data).await.unwrap();
+        fs::write(temp_dir.path().join("large.bin"), &data)
+            .await
+            .unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
-        let mut chunks = source.get_file_chunks(Path::new("/large.bin")).await.unwrap();
+        let mut chunks = source
+            .get_file_chunks(Path::new("/large.bin"))
+            .await
+            .unwrap();
 
         // First chunk: 4MB
         let chunk1 = chunks.next().await.unwrap().unwrap();
@@ -320,10 +439,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_entry_file() {
         let temp_dir = create_test_dir().await;
-        fs::write(temp_dir.path().join("test.txt"), "content").await.unwrap();
+        fs::write(temp_dir.path().join("test.txt"), "content")
+            .await
+            .unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
-        let entry = source.get_entry(Path::new("/test.txt")).await.unwrap().unwrap();
+        let entry = source
+            .get_entry(Path::new("/test.txt"))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(entry, DirectoryListEntry::File(_)));
         if let DirectoryListEntry::File(f) = entry {
@@ -337,7 +462,11 @@ mod tests {
         fs::create_dir(temp_dir.path().join("subdir")).await.unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
-        let entry = source.get_entry(Path::new("/subdir")).await.unwrap().unwrap();
+        let entry = source
+            .get_entry(Path::new("/subdir"))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(entry, DirectoryListEntry::Directory(_)));
     }
@@ -364,7 +493,9 @@ mod tests {
     async fn test_nested_directory() {
         let temp_dir = create_test_dir().await;
         fs::create_dir_all(temp_dir.path().join("a/b")).await.unwrap();
-        fs::write(temp_dir.path().join("a/b/file.txt"), "nested").await.unwrap();
+        fs::write(temp_dir.path().join("a/b/file.txt"), "nested")
+            .await
+            .unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
 
@@ -393,12 +524,138 @@ mod tests {
         std::fs::set_permissions(&script_path, perms).unwrap();
 
         let source = FsFileSource::new(temp_dir.path());
-        let entry = source.get_entry(Path::new("/script.sh")).await.unwrap().unwrap();
+        let entry = source
+            .get_entry(Path::new("/script.sh"))
+            .await
+            .unwrap()
+            .unwrap();
 
         if let DirectoryListEntry::File(f) = entry {
             assert!(f.executable);
         } else {
             panic!("expected file");
+        }
+    }
+
+    // New tests for entry-based operations
+
+    #[tokio::test]
+    async fn test_dir_entry_list_directory() {
+        let temp_dir = create_test_dir().await;
+        fs::create_dir(temp_dir.path().join("subdir")).await.unwrap();
+        fs::write(temp_dir.path().join("subdir/file.txt"), "content")
+            .await
+            .unwrap();
+
+        let source = FsFileSource::new(temp_dir.path());
+
+        // Get the directory entry
+        let entry = source
+            .get_entry(Path::new("/subdir"))
+            .await
+            .unwrap()
+            .unwrap();
+        if let DirectoryListEntry::Directory(dir) = entry {
+            // Use the entry's list_directory method
+            let mut list = dir.list_directory().await.unwrap();
+            let file = list.next().await.unwrap().unwrap();
+            assert_eq!(file.name(), "file.txt");
+        } else {
+            panic!("expected directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dir_entry_get_entry() {
+        let temp_dir = create_test_dir().await;
+        fs::create_dir(temp_dir.path().join("subdir")).await.unwrap();
+        fs::write(temp_dir.path().join("subdir/file.txt"), "content")
+            .await
+            .unwrap();
+
+        let source = FsFileSource::new(temp_dir.path());
+
+        // Get the directory entry
+        let entry = source
+            .get_entry(Path::new("/subdir"))
+            .await
+            .unwrap()
+            .unwrap();
+        if let DirectoryListEntry::Directory(dir) = entry {
+            // Use the entry's get_entry method
+            let file = dir.get_entry("file.txt").await.unwrap().unwrap();
+            assert_eq!(file.name(), "file.txt");
+            assert!(matches!(file, DirectoryListEntry::File(_)));
+
+            // Missing entry returns None
+            let missing = dir.get_entry("missing.txt").await.unwrap();
+            assert!(missing.is_none());
+        } else {
+            panic!("expected directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_entry_get_chunks() {
+        let temp_dir = create_test_dir().await;
+        fs::write(temp_dir.path().join("file.txt"), "hello world")
+            .await
+            .unwrap();
+
+        let source = FsFileSource::new(temp_dir.path());
+
+        // Get the file entry
+        let entry = source
+            .get_entry(Path::new("/file.txt"))
+            .await
+            .unwrap()
+            .unwrap();
+        if let DirectoryListEntry::File(file) = entry {
+            // Use the entry's get_chunks method
+            let mut chunks = file.get_chunks().await.unwrap();
+            let chunk = chunks.next().await.unwrap().unwrap();
+            assert_eq!(chunk.data(), b"hello world");
+        } else {
+            panic!("expected file");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_traversal_from_listing() {
+        let temp_dir = create_test_dir().await;
+        fs::create_dir_all(temp_dir.path().join("dir/subdir"))
+            .await
+            .unwrap();
+        fs::write(temp_dir.path().join("dir/subdir/file.txt"), "deep content")
+            .await
+            .unwrap();
+
+        let source = FsFileSource::new(temp_dir.path());
+
+        // Start by listing root
+        let mut root_list = source.list_directory(Path::new("/")).await.unwrap();
+        let dir_entry = root_list.next().await.unwrap().unwrap();
+
+        if let DirectoryListEntry::Directory(dir) = dir_entry {
+            // List the directory
+            let mut dir_list = dir.list_directory().await.unwrap();
+            let subdir_entry = dir_list.next().await.unwrap().unwrap();
+
+            if let DirectoryListEntry::Directory(subdir) = subdir_entry {
+                // Get a specific child
+                let file = subdir.get_entry("file.txt").await.unwrap().unwrap();
+                if let DirectoryListEntry::File(f) = file {
+                    let mut chunks = f.get_chunks().await.unwrap();
+                    let chunk = chunks.next().await.unwrap().unwrap();
+                    assert_eq!(chunk.data(), b"deep content");
+                } else {
+                    panic!("expected file");
+                }
+            } else {
+                panic!("expected directory");
+            }
+        } else {
+            panic!("expected directory");
         }
     }
 }

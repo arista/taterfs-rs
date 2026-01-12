@@ -7,11 +7,13 @@
 mod chunk_sizes;
 mod fs_file_store;
 mod memory_file_store;
+mod s3_file_store;
 mod scan_ignore_helper;
 
 pub use chunk_sizes::{CHUNK_SIZES, next_chunk_size};
 pub use fs_file_store::FsFileStore;
 pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
+pub use s3_file_store::{S3FileSource, S3FileSourceConfig};
 pub use scan_ignore_helper::ScanIgnoreHelper;
 
 use async_trait::async_trait;

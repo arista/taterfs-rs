@@ -6,9 +6,11 @@
 
 mod chunk_sizes;
 mod memory_file_store;
+mod scan_ignore_helper;
 
 pub use chunk_sizes::{CHUNK_SIZES, next_chunk_size};
 pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
+pub use scan_ignore_helper::ScanIgnoreHelper;
 
 use async_trait::async_trait;
 use bytes::Bytes;

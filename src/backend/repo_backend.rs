@@ -90,9 +90,5 @@ pub trait RepoBackend: Send + Sync {
     ///
     /// It is optional for implementations to verify that the ID matches the
     /// sha-256 hash of the contents.
-    fn write_object(
-        &self,
-        id: &ObjectId,
-        data: &[u8],
-    ) -> impl Future<Output = Result<()>> + Send;
+    fn write_object(&self, id: &ObjectId, data: &[u8]) -> impl Future<Output = Result<()>> + Send;
 }

@@ -58,12 +58,10 @@ impl S3Backend {
     ///
     /// Uses the standard AWS credential chain (env vars, ~/.aws, IAM roles, etc.).
     pub async fn new(config: S3BackendConfig) -> Self {
-        let mut aws_config_loader =
-            aws_config::defaults(aws_config::BehaviorVersion::latest());
+        let mut aws_config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
 
         if let Some(region) = &config.region {
-            aws_config_loader =
-                aws_config_loader.region(aws_config::Region::new(region.clone()));
+            aws_config_loader = aws_config_loader.region(aws_config::Region::new(region.clone()));
         }
 
         if let Some(endpoint_url) = &config.endpoint_url {
@@ -97,7 +95,14 @@ impl FsLikeRepoBackend for S3Backend {
     async fn file_exists(&self, path: &str) -> Result<bool> {
         let key = self.full_key(path);
 
-        match self.client.head_object().bucket(&self.bucket).key(&key).send().await {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
             Err(err) => {
                 if is_not_found(&err) {
@@ -183,9 +188,7 @@ impl FsLikeRepoBackend for S3Backend {
                 {
                     match &first {
                         None => first = Some(name.to_string()),
-                        Some(current) if name < current.as_str() => {
-                            first = Some(name.to_string())
-                        }
+                        Some(current) if name < current.as_str() => first = Some(name.to_string()),
                         _ => {}
                     }
                 }
@@ -201,9 +204,7 @@ impl FsLikeRepoBackend for S3Backend {
                     let name = name.trim_end_matches('/');
                     match &first {
                         None => first = Some(name.to_string()),
-                        Some(current) if name < current.as_str() => {
-                            first = Some(name.to_string())
-                        }
+                        Some(current) if name < current.as_str() => first = Some(name.to_string()),
                         _ => {}
                     }
                 }

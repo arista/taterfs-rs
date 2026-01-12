@@ -65,10 +65,7 @@ impl RepoBackend for MemoryBackend {
 
     async fn read_object(&self, id: &ObjectId) -> Result<Vec<u8>> {
         let objects = self.objects.read().unwrap();
-        objects
-            .get(id)
-            .cloned()
-            .ok_or(BackendError::NotFound)
+        objects.get(id).cloned().ok_or(BackendError::NotFound)
     }
 
     async fn write_object(&self, id: &ObjectId, data: &[u8]) -> Result<()> {
@@ -113,7 +110,10 @@ mod tests {
 
         let root1 = "root1".to_string();
         backend.write_current_root(&root1).await.unwrap();
-        assert_eq!(backend.read_current_root().await.unwrap(), Some(root1.clone()));
+        assert_eq!(
+            backend.read_current_root().await.unwrap(),
+            Some(root1.clone())
+        );
 
         let root2 = "root2".to_string();
         backend.write_current_root(&root2).await.unwrap();
@@ -128,11 +128,17 @@ mod tests {
         let root1 = "root1".to_string();
         let result = backend.swap_current_root(None, &root1).await.unwrap();
         assert_eq!(result, SwapResult::Success);
-        assert_eq!(backend.read_current_root().await.unwrap(), Some(root1.clone()));
+        assert_eq!(
+            backend.read_current_root().await.unwrap(),
+            Some(root1.clone())
+        );
 
         // Swap from root1 to root2
         let root2 = "root2".to_string();
-        let result = backend.swap_current_root(Some(&root1), &root2).await.unwrap();
+        let result = backend
+            .swap_current_root(Some(&root1), &root2)
+            .await
+            .unwrap();
         assert_eq!(result, SwapResult::Success);
         assert_eq!(backend.read_current_root().await.unwrap(), Some(root2));
     }
@@ -147,7 +153,10 @@ mod tests {
         // Try to swap with wrong expected value
         let wrong_expected = "wrong".to_string();
         let root2 = "root2".to_string();
-        let result = backend.swap_current_root(Some(&wrong_expected), &root2).await.unwrap();
+        let result = backend
+            .swap_current_root(Some(&wrong_expected), &root2)
+            .await
+            .unwrap();
         assert_eq!(result, SwapResult::Mismatch(Some(root1.clone())));
 
         // Root should be unchanged

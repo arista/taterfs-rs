@@ -4,6 +4,10 @@
 //! - [`FileSource`] - allows reading/scanning directory and file data
 //! - [`FileDest`] - allows writing directory and file data
 
+mod memory_file_store;
+
+pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;

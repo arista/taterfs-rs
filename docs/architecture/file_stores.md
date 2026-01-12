@@ -189,7 +189,7 @@ The FileSource implementation for FsFileStore is relatively simple.  Note that t
 
 The FSFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
 
-The FSFileStore should use a file finger print in the following format:
+The FSFileStore should use a file fingerprint in the following format:
 
 ```
 {last modified time in millis since the epoch}:{file size}:{executable bit, either "x" or "-"}
@@ -222,6 +222,10 @@ Notes:
 - Directory pages are fetched lazily as entries are consumed (handles arbitrarily large directories)
 - File chunks are fetched lazily using S3 range requests (handles arbitrarily large files)
 - The `executable` flag is always `false` since S3 doesn't track file permissions
+
+The S3FileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
+
+The S3FileStore should use a file fingerprint that is the ETag that S3 makes available for the file.  If the ETag is greater than 128 bytes (I don't think that would ever be the case), then just set it to null.
 
 TODO: for now, the S3FileStore does not offer a FileDest implementation
 

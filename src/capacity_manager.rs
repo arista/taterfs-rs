@@ -76,16 +76,16 @@ struct Inner {
 }
 
 struct State {
-    limit: u64,
+    capacity: u64,
     used: u64,
     waiters: VecDeque<Waiter>,
 }
 
 impl Inner {
-    fn new(limit: u64) -> Self {
+    fn new(capacity: u64) -> Self {
         Self {
             state: Mutex::new(State {
-                limit,
+                capacity,
                 used: 0,
                 waiters: VecDeque::new(),
             }),
@@ -95,7 +95,7 @@ impl Inner {
     /// Try to use capacity immediately, returns None if we need to wait.
     fn try_use(&self, amount: u64) -> Option<()> {
         let mut state = self.state.lock().unwrap();
-        if state.used + amount <= state.limit {
+        if state.used < state.capacity {
             state.used += amount;
             Some(())
         } else {
@@ -118,7 +118,7 @@ impl Inner {
 
         // Try to fulfill waiting requests
         while let Some(waiter) = state.waiters.front() {
-            if state.used + waiter.amount <= state.limit {
+            if state.used < state.capacity {
                 state.used += waiter.amount;
                 let waiter = state.waiters.pop_front().unwrap();
                 // Ignore send errors - receiver may have been dropped
@@ -136,9 +136,12 @@ impl Inner {
 
 /// Manages capacity for flow control.
 ///
-/// The CapacityManager tracks usage against a configured limit. When capacity
-/// is exhausted, requests to [`use_capacity`](Self::use_capacity) will wait
+/// The CapacityManager tracks usage against a configured capacity. When usage
+/// reaches capacity, requests to [`use_capacity`](Self::use_capacity) will wait
 /// until capacity becomes available.
+///
+/// Note: Usage may temporarily exceed capacity, as requests are allowed when
+/// usage is below capacity (not when usage + request <= capacity).
 ///
 /// # Examples
 ///
@@ -146,10 +149,10 @@ impl Inner {
 /// use taterfs_rs::CapacityManager;
 ///
 /// # async fn example() {
-/// // Create a manager with limit of 100
+/// // Create a manager with capacity of 100
 /// let manager = CapacityManager::new(100);
 ///
-/// // Use some capacity - this returns immediately if under limit
+/// // Use some capacity - this returns immediately if under capacity
 /// let used = manager.use_capacity(50).await;
 /// assert_eq!(used.amount(), 50);
 ///
@@ -163,10 +166,10 @@ pub struct CapacityManager {
 }
 
 impl CapacityManager {
-    /// Create a new CapacityManager with the given limit.
-    pub fn new(limit: u64) -> Self {
+    /// Create a new CapacityManager with the given capacity.
+    pub fn new(capacity: u64) -> Self {
         Self {
-            inner: Arc::new(Inner::new(limit)),
+            inner: Arc::new(Inner::new(capacity)),
         }
     }
 
@@ -179,8 +182,8 @@ impl CapacityManager {
     ///
     /// This spawns a background task that runs until the CapacityManager and
     /// all its clones are dropped.
-    pub fn with_replenishment(limit: u64, rate: ReplenishmentRate) -> Self {
-        let manager = Self::new(limit);
+    pub fn with_replenishment(capacity: u64, rate: ReplenishmentRate) -> Self {
+        let manager = Self::new(capacity);
         let inner = Arc::clone(&manager.inner);
 
         tokio::spawn(async move {
@@ -233,9 +236,9 @@ impl CapacityManager {
         self.inner.state.lock().unwrap().used
     }
 
-    /// Returns the configured limit.
-    pub fn limit(&self) -> u64 {
-        self.inner.state.lock().unwrap().limit
+    /// Returns the configured capacity.
+    pub fn capacity(&self) -> u64 {
+        self.inner.state.lock().unwrap().capacity
     }
 
     /// Returns the number of requests currently waiting for capacity.
@@ -259,7 +262,7 @@ mod tests {
         let manager = CapacityManager::new(100);
 
         assert_eq!(manager.used(), 0);
-        assert_eq!(manager.limit(), 100);
+        assert_eq!(manager.capacity(), 100);
 
         let used = manager.use_capacity(50).await;
         assert_eq!(used.amount(), 50);
@@ -395,13 +398,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_partial_fulfillment() {
+    async fn test_exceeds_capacity_temporarily() {
         let manager = CapacityManager::new(100);
 
         // Use all capacity
         let used100 = manager.use_capacity(100).await;
 
-        // Queue requests for 60 and 50 - both must wait
+        // Queue requests for 60 and 50 - both must wait (used >= capacity)
         let m1 = manager.clone();
         let handle60 = tokio::spawn(async move { m1.use_capacity(60).await });
         sleep(Duration::from_millis(5)).await;
@@ -412,56 +415,72 @@ mod tests {
 
         assert_eq!(manager.waiting_count(), 2);
 
-        // Release 100 - only 60 can be fulfilled (used=60, 40 remaining)
-        // 50 still needs to wait because 50 > 40
+        // Release 100 - both can now be fulfilled because:
+        // - First: used=0 < capacity=100, so 60 is allowed (used becomes 60)
+        // - Second: used=60 < capacity=100, so 50 is allowed (used becomes 110)
+        // Note: usage temporarily exceeds capacity!
         drop(used100);
 
-        // Wait for 60 to complete
+        // Wait for both to complete
         let used60 = timeout(Duration::from_millis(100), handle60)
             .await
             .unwrap()
             .unwrap();
-
-        // 50 is still waiting
-        assert_eq!(manager.waiting_count(), 1);
-        assert_eq!(manager.used(), 60);
-
-        // Release 60 - now 50 can be fulfilled
-        drop(used60);
 
         let used50 = timeout(Duration::from_millis(100), handle50)
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(manager.used(), 50);
+        // Used is now 110, which exceeds capacity of 100
+        assert_eq!(manager.used(), 110);
         assert_eq!(manager.waiting_count(), 0);
 
-        // Keep used50 alive until assertion is checked
+        // But new requests will wait until used drops below capacity
+        let m3 = manager.clone();
+        let handle10 = tokio::spawn(async move { m3.use_capacity(10).await });
+        sleep(Duration::from_millis(5)).await;
+        assert_eq!(manager.waiting_count(), 1);
+
+        // Release 60 - this brings used to 50, and immediately fulfills the 10 waiter
+        // (since 50 < 100), bringing used to 60
+        drop(used60);
+
+        // The 10 request is fulfilled synchronously during replenish
+        let _used10 = timeout(Duration::from_millis(100), handle10)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(manager.used(), 60); // 50 from used50 + 10 from used10
+
         drop(used50);
     }
 
     #[tokio::test]
-    async fn test_large_request_waits_for_small_ones() {
+    async fn test_large_request_proceeds_when_under_capacity() {
         let manager = CapacityManager::new(100);
 
         // Use 60
         let used60 = manager.use_capacity(60).await;
 
-        // Queue a large request (90) - can't be fulfilled even after release
-        // because we'll need to wait for more capacity
+        // Queue a large request (90) - waits because 60 >= 100 is false, but
+        // actually 60 < 100, so it should proceed immediately!
+        // Wait no - let me reconsider. used=60, capacity=100, 60 < 100 is true,
+        // so request for 90 should proceed immediately, making used=150
         let m1 = manager.clone();
         let handle90 = tokio::spawn(async move { m1.use_capacity(90).await });
-        sleep(Duration::from_millis(5)).await;
 
-        assert_eq!(manager.waiting_count(), 1);
+        // This should complete immediately since 60 < 100
+        let used90 = timeout(Duration::from_millis(100), handle90)
+            .await
+            .unwrap()
+            .unwrap();
 
-        // Release 60 - still can't fulfill 90 (limit is 100, need 90, have 100 available)
-        // Actually 90 <= 100, so it should work!
+        // Used is now 150 (60 + 90), exceeding capacity
+        assert_eq!(manager.used(), 150);
+
         drop(used60);
-
-        let result = timeout(Duration::from_millis(100), handle90).await;
-        assert!(result.is_ok());
-        assert_eq!(manager.used(), 90);
+        drop(used90);
     }
 }

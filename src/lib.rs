@@ -4,6 +4,6 @@ pub mod file_store;
 
 pub use file_store::{
     DirEntry, DirectoryEntry, DirectoryList, Error, FileDest, FileEntry, FileSource, FileStore,
-    MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry, Result, ScanEvent, ScanEvents,
-    SourceChunk, SourceChunkContent, SourceChunks,
+    FsFileStore, MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry, Result, ScanEvent,
+    ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
 };

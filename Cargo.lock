@@ -2180,6 +2180,7 @@ dependencies = [
  "futures",
  "ignore",
  "reqwest",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

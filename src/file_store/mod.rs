@@ -4,6 +4,12 @@
 //! - [`FileSource`] - allows reading/scanning directory and file data
 //! - [`FileDest`] - allows writing directory and file data
 
+mod chunk_sizes;
+mod memory_file_store;
+
+pub use chunk_sizes::{CHUNK_SIZES, next_chunk_size};
+pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;

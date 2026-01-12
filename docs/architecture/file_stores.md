@@ -171,6 +171,10 @@ Entry types:
 - `MemoryFsEntry::repeated_executable(pattern, size)` - Executable file with repeated content
 - `MemoryFsEntry::dir()` - Empty directory (usually created implicitly)
 
+The FSFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
+
+The FSFileStore should always return a fingerprint of None.
+
 ### FsFileStore
 
 This implementation is pointed at a local filesystem path and implements both FileSource and FileDest using that path as the root.
@@ -182,6 +186,14 @@ let source = FsFileSource::new("/path/to/root");
 On Unix systems, the executable flag is determined by checking if any execute bit is set in the file permissions.
 
 The FileSource implementation for FsFileStore is relatively simple.  Note that the get_source_chunks() function should not read the entire file into memory, but should instead return SourceChunk items that open the file and retrieve a file range in response to SourceChunk.get().
+
+The FSFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
+
+The FSFileStore should use a file finger print in the following format:
+
+```
+{last modified time in millis since the epoch}:{file size}:{executable bit, either "x" or "-"}
+```
 
 TODO: The FileDest.write_file_from_chunks() implementation is more complicated, as it involves downloading multiple chunks simultaneously into a temporary location (possibly with some flow control), assembling those chunks into the final file, then moving that file into its final location.
 

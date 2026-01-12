@@ -51,10 +51,18 @@ impl FsFileStore {
     }
 
     /// Create a fingerprint from file metadata.
+    ///
+    /// Format: `{mtime_millis}:{size}:{x or -}`
     fn fingerprint(metadata: &std::fs::Metadata) -> Option<String> {
         let modified = metadata.modified().ok()?;
         let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-        Some(format!("{}:{}", duration.as_secs(), metadata.len()))
+        let millis = duration.as_millis();
+        let exec_bit = if Self::is_executable(metadata) {
+            "x"
+        } else {
+            "-"
+        };
+        Some(format!("{}:{}:{}", millis, metadata.len(), exec_bit))
     }
 }
 
@@ -70,6 +78,13 @@ struct FsSourceChunk {
     offset: u64,
     /// Size of this chunk.
     size: u64,
+}
+
+/// State for lazy chunk iteration.
+struct ChunkIterState {
+    path: PathBuf,
+    file_size: u64,
+    offset: u64,
 }
 
 #[async_trait]
@@ -141,13 +156,39 @@ impl FileSource for FsFileStore {
         }
 
         let file_size = metadata.len();
-        let chunks = compute_file_chunks(&absolute, file_size);
 
-        Ok(Some(Box::pin(stream::iter(
-            chunks
-                .into_iter()
-                .map(|c| Ok(Box::new(c) as Box<dyn SourceChunk>)),
-        ))))
+        // Create a lazy stream that computes chunks on demand
+        let chunks_stream = stream::unfold(
+            ChunkIterState {
+                path: absolute,
+                file_size,
+                offset: 0,
+            },
+            |state| async move {
+                if state.offset >= state.file_size {
+                    return None;
+                }
+
+                let remaining = state.file_size - state.offset;
+                let chunk_size = next_chunk_size(remaining);
+
+                let chunk = FsSourceChunk {
+                    path: state.path.clone(),
+                    offset: state.offset,
+                    size: chunk_size,
+                };
+
+                let next_state = ChunkIterState {
+                    path: state.path,
+                    file_size: state.file_size,
+                    offset: state.offset + chunk_size,
+                };
+
+                Some((Ok(Box::new(chunk) as Box<dyn SourceChunk>), next_state))
+            },
+        );
+
+        Ok(Some(Box::pin(chunks_stream)))
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
@@ -281,27 +322,6 @@ async fn scan_directory(
     }
 
     Ok(())
-}
-
-/// Compute chunk boundaries for a file.
-fn compute_file_chunks(path: &Path, file_size: u64) -> Vec<FsSourceChunk> {
-    let mut chunks = Vec::new();
-    let mut offset = 0u64;
-
-    while offset < file_size {
-        let remaining = file_size - offset;
-        let chunk_size = next_chunk_size(remaining);
-
-        chunks.push(FsSourceChunk {
-            path: path.to_path_buf(),
-            offset,
-            size: chunk_size,
-        });
-
-        offset += chunk_size;
-    }
-
-    chunks
 }
 
 // =============================================================================

@@ -8,7 +8,8 @@
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
       "Bash(git branch:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }

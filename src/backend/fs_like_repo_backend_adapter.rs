@@ -22,13 +22,7 @@ impl<B: FsLikeRepoBackend> FsLikeRepoBackendAdapter<B> {
     ///
     /// Path format: `objects/{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}`
     fn object_path(id: &ObjectId) -> String {
-        format!(
-            "objects/{}/{}/{}/{}",
-            &id[0..2],
-            &id[2..4],
-            &id[4..6],
-            id
-        )
+        format!("objects/{}/{}/{}/{}", &id[0..2], &id[2..4], &id[4..6], id)
     }
 
     /// Generate a reverse timestamp for root ordering.

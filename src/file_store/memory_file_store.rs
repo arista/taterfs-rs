@@ -1,9 +1,10 @@
 //! In-memory FileStore implementation for testing.
 
 use super::chunk_sizes::next_chunk_size;
+use super::scan_ignore_helper::ScanIgnoreHelper;
 use crate::file_store::{
-    DirEntry, DirectoryEntry, Error, FileEntry, FileSource, FileStore, Result, ScanEvent,
-    ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
+    DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, FileStore, Result,
+    ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -312,7 +313,20 @@ impl SourceChunk for MemorySourceChunk {
 impl FileSource for MemoryFileStore {
     async fn scan(&self) -> Result<ScanEvents> {
         let mut events = Vec::new();
-        scan_tree(&self.root, PathBuf::new(), &mut events);
+        let mut helper = ScanIgnoreHelper::new();
+
+        // Process root directory first to load top-level ignore files
+        let root_entry = DirEntry {
+            name: String::new(),
+            path: String::new(),
+        };
+        helper
+            .on_scan_event(&DirectoryScanEvent::EnterDirectory(root_entry), self)
+            .await;
+
+        // Scan the tree with ignore filtering
+        scan_tree_with_ignore(&self.root, PathBuf::new(), &mut events, &mut helper, self).await;
+
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 
@@ -399,14 +413,23 @@ impl FileStore for MemoryFileStore {
 // Helper Functions
 // =============================================================================
 
-/// Recursively scan a tree, generating scan events in depth-first, lexicographic order.
-fn scan_tree(
+/// Recursively scan a tree with ignore filtering, generating scan events in depth-first, lexicographic order.
+async fn scan_tree_with_ignore(
     children: &BTreeMap<String, TreeNode>,
     current_path: PathBuf,
     events: &mut Vec<ScanEvent>,
+    helper: &mut ScanIgnoreHelper,
+    source: &MemoryFileStore,
 ) {
     // BTreeMap iterates in sorted order
     for (name, node) in children {
+        let is_dir = matches!(node, TreeNode::Directory(_));
+
+        // Check if this entry should be ignored
+        if helper.should_ignore(name, is_dir) {
+            continue;
+        }
+
         let entry_path = if current_path.as_os_str().is_empty() {
             PathBuf::from(name)
         } else {
@@ -416,11 +439,31 @@ fn scan_tree(
 
         match node {
             TreeNode::Directory(dir_children) => {
-                events.push(ScanEvent::EnterDirectory(DirEntry {
+                let dir_entry = DirEntry {
                     name: name.clone(),
                     path: path_str,
-                }));
-                scan_tree(dir_children, entry_path, events);
+                };
+                events.push(ScanEvent::EnterDirectory(dir_entry.clone()));
+
+                // Notify helper of directory entry to load ignore files
+                helper
+                    .on_scan_event(&DirectoryScanEvent::EnterDirectory(dir_entry), source)
+                    .await;
+
+                Box::pin(scan_tree_with_ignore(
+                    dir_children,
+                    entry_path,
+                    events,
+                    helper,
+                    source,
+                ))
+                .await;
+
+                // Notify helper of directory exit
+                helper
+                    .on_scan_event(&DirectoryScanEvent::ExitDirectory, source)
+                    .await;
+
                 events.push(ScanEvent::ExitDirectory);
             }
             TreeNode::File(file) => {
@@ -695,5 +738,197 @@ mod tests {
 
         let result = store.get_file(Path::new("dir")).await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
+    }
+
+    // =========================================================================
+    // Ignore Functionality Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_scan_ignores_git_directory() {
+        let store = MemoryFileStore::builder()
+            .add(".git/config", MemoryFsEntry::file("git config"))
+            .add(".git/HEAD", MemoryFsEntry::file("ref: refs/heads/main"))
+            .add("src/main.rs", MemoryFsEntry::file("fn main() {}"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        // .git directory should not appear in scan
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::EnterDirectory(d) => Some(d.name.as_str()),
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!names.contains(&".git"));
+        assert!(names.contains(&"src"));
+        assert!(names.contains(&"main.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_ignores_tfs_directory() {
+        let store = MemoryFileStore::builder()
+            .add(".tfs/data", MemoryFsEntry::file("tfs data"))
+            .add("file.txt", MemoryFsEntry::file("content"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::EnterDirectory(d) => Some(d.name.as_str()),
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!names.contains(&".tfs"));
+        assert!(names.contains(&"file.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_respects_gitignore() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log\ntarget/"))
+            .add("app.log", MemoryFsEntry::file("log content"))
+            .add("main.rs", MemoryFsEntry::file("fn main() {}"))
+            .add("target/debug/app", MemoryFsEntry::file("binary"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::EnterDirectory(d) => Some(d.name.as_str()),
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // .gitignore itself should be visible
+        assert!(names.contains(&".gitignore"));
+        // Ignored files should not appear
+        assert!(!names.contains(&"app.log"));
+        assert!(!names.contains(&"target"));
+        // Non-ignored files should appear
+        assert!(names.contains(&"main.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_respects_tfsignore() {
+        let store = MemoryFileStore::builder()
+            .add(".tfsignore", MemoryFsEntry::file("*.tmp"))
+            .add("data.tmp", MemoryFsEntry::file("temp"))
+            .add("data.txt", MemoryFsEntry::file("permanent"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!names.contains(&"data.tmp"));
+        assert!(names.contains(&"data.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_nested_gitignore() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("src/.gitignore", MemoryFsEntry::file("*.bak"))
+            .add("root.log", MemoryFsEntry::file("ignored"))
+            .add("root.txt", MemoryFsEntry::file("visible"))
+            .add("src/file.bak", MemoryFsEntry::file("ignored"))
+            .add("src/file.rs", MemoryFsEntry::file("visible"))
+            .add("src/app.log", MemoryFsEntry::file("also ignored"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // Root level ignore
+        assert!(!names.contains(&"root.log"));
+        assert!(names.contains(&"root.txt"));
+
+        // Nested ignore (both root and nested patterns apply)
+        assert!(!names.contains(&"file.bak"));
+        assert!(!names.contains(&"app.log"));
+        assert!(names.contains(&"file.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_negation_pattern() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log\n!important.log"))
+            .add("debug.log", MemoryFsEntry::file("ignored"))
+            .add("important.log", MemoryFsEntry::file("not ignored"))
+            .build();
+
+        let events: Vec<_> = store
+            .scan()
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!names.contains(&"debug.log"));
+        assert!(names.contains(&"important.log"));
     }
 }

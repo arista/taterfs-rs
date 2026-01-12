@@ -11,7 +11,6 @@ This document describes the high-level architecture of taterfs-rs.
 * (backend storage model)[docs/architecture/backend_storage_model.md]
 * (backend interfaces)[docs/architecture/backend_interfaces.md]
 * (file stores)[docs/architecture/file_stores.md]
-* (file sources)[docs/architecture/file_sources.md]
 
 ### Entry Point
 

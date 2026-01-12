@@ -1,5 +1,6 @@
 //! In-memory FileStore implementation for testing.
 
+use super::chunk_sizes::next_chunk_size;
 use crate::file_store::{
     DirEntry, DirectoryEntry, Error, FileEntry, FileSource, FileStore, Result, ScanEvent,
     ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
@@ -11,15 +12,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-/// Chunk sizes for breaking down files (in descending order).
-const CHUNK_SIZES: &[u64] = &[
-    4_194_304, // 4 MB
-    1_048_576, // 1 MB
-    262_144,   // 256 KB
-    65_536,    // 64 KB
-    16_384,    // 16 KB
-];
 
 // =============================================================================
 // MemoryFsEntry - Builder Input Types
@@ -452,13 +444,7 @@ fn compute_chunks(file: &MemoryFile) -> Vec<MemorySourceChunk> {
 
     while offset < total_size {
         let remaining = total_size - offset;
-
-        // Find the largest chunk size that fits
-        let chunk_size = CHUNK_SIZES
-            .iter()
-            .copied()
-            .find(|&size| size <= remaining)
-            .unwrap_or(remaining);
+        let chunk_size = next_chunk_size(remaining);
 
         chunks.push(MemorySourceChunk {
             file: file.clone(),

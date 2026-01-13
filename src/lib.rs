@@ -1,7 +1,9 @@
 //! taterfs-rs - A Rust command-line utility for file storage.
 
+pub mod backend;
 pub mod caches;
 pub mod file_store;
+pub mod repo;
 pub mod repository;
 pub mod util;
 

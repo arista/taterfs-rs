@@ -1,4 +1,4 @@
-#![expect(dead_code, unused_imports, reason = "backend module not wired up yet")]
+#![allow(dead_code, unused_imports)]
 
 mod fs_backend;
 mod fs_like_repo_backend;

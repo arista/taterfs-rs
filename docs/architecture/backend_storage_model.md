@@ -35,16 +35,31 @@ interface Root {
 Branches are simply named commits
 
 ```
-// FIXME - this should also be scalable, to handle large numbers of branches
 interface Branches {
   type: "Branches"
-  branchesByName: {[name: string]: "*object id of Branch*"}
+  branches: Array<BranchListEntry>
+}
+
+enum BranchListEntry {
+  Branch(Branch)
+  BranchesEntry(BranchesEntry)
 }
 
 interface Branch {
+  type: "Branch"
+  name: "*branch name*"
   commit: "*object id of Commit*"
 }
+
+interface BranchesEntry {
+  type: "BranchesEntry"
+  firstName: string (*name of the first entry in the branches list*)
+  lastName: string (*name of the last entry in the branches list*)
+  branches: "*object id of Branches*"
+}
 ```
+
+Branches must be listed in lexicographic order.  If there is a large number of branches, then the list must be broken up into a tree of BranchesEntry objects and Branch objects.
 
 ### Commits
 
@@ -145,6 +160,11 @@ const MAX_DIRECTORY_ENTRIES = 256
 The maxmium number of entries that will be allowed in a single File object before it needs to be broken into multiple FileFileParts.
 ```
 const MAX_FILE_PARTS = 64
+```
+
+The maxmium number of BranchListEntries that will be allowed in a Branches object before the list must be broken up into mutliple Branches objects.
+```
+const MAX_BRANCH_LIST_ENTRIES = 64
 ```
 
 The table for breaking down a file into chunks.  Rather than breaking a file down into 4MB chunks and leaving the remainder as a single chunk, the remainder should be broken down into smaller and smaller parts.  This is an optimization for files that grow from their end, minimizing the changes between one version and the next.

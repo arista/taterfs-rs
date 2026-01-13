@@ -75,6 +75,14 @@ impl From<JsonError> for RepoError {
 pub type Result<T> = std::result::Result<T, RepoError>;
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/// For writes larger than this threshold, check if the object already exists
+/// in the backend before writing. This avoids redundant writes for large objects.
+pub const MAX_WRITE_WITHOUT_EXISTENCE_CHECK: u64 = 1024 * 1024; // 1 MB
+
+// =============================================================================
 // Flow Control Configuration
 // =============================================================================
 
@@ -246,7 +254,21 @@ where
     ///
     /// The object ID is the SHA-256 hash of the data.
     /// This operation is deduplicated by object ID.
+    ///
+    /// Skips the write if the object already exists (checked via cache, or
+    /// via backend for objects larger than [`MAX_WRITE_WITHOUT_EXISTENCE_CHECK`]).
     pub async fn write(&self, id: &ObjectId, data: Bytes) -> Result<()> {
+        // Check cache first - skip write if already exists
+        if let Ok(true) = self.cache.object_exists(id).await {
+            return Ok(());
+        }
+
+        // For large objects, do an actual existence check before writing
+        let size = data.len() as u64;
+        if size > MAX_WRITE_WITHOUT_EXISTENCE_CHECK && self.object_exists(id).await? {
+            return Ok(());
+        }
+
         let backend = Arc::clone(&self.backend);
         let cache = Arc::clone(&self.cache);
         let flow_control = self.flow_control.clone();
@@ -282,7 +304,7 @@ where
 
         self.dedup_read
             .call(id.clone(), || async move {
-                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
+                let (rate, concurrent) = acquire_request_capacity(&flow_control).await;
 
                 // Acquire read throughput if size is known
                 let (_pre_read, _pre_total) = if let Some(size) = expected_size {
@@ -294,8 +316,12 @@ where
                 let data = backend.read_object(&id_owned).await?;
                 let bytes = Bytes::from(data);
 
-                // Acquire read throughput after if size was unknown
+                // Acquire read throughput after if size was unknown.
+                // Drop request capacity first - we don't need to hold it while
+                // "paying back" the read throughput.
                 if expected_size.is_none() {
+                    drop(rate);
+                    drop(concurrent);
                     let size = bytes.len() as u64;
                     let _ = acquire_read_throughput(&flow_control, size).await;
                 }

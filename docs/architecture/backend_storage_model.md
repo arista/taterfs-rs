@@ -92,7 +92,7 @@ Even though a Directory may be stored as a full hierarchy of DirectoryParts, con
 ```
 interface Directory {
   type: "Directory"
-  entries: Array<"*object id of DirectoryPart*">
+  entries: Array<DirectoryPart>
 }
 
 type DirectoryPart = DirectoryEntry | PartialDirectory
@@ -130,7 +130,7 @@ For very large files, the File JSON object might itself grow unmanageably large.
 ```
 interface File {
   type: "File"
-  parts: Array<"*object id of FilePart*">
+  parts: Array<FilePart>
 }
 
 type FilePart = FileFilePart | ChunkFilePart

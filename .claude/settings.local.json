@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd repository object types for backend storage model\n\nDefine Rust types for all JSON objects in the backend storage model:\n- Root, Branches, Branch, BranchesEntry\n- Commit, CommitMetadata\n- Directory, DirectoryPart \\(FileEntry, DirEntry, PartialDirectory\\)\n- File, FilePart \\(ChunkFilePart, FileFilePart\\)\n- RepoObject enum for all id''able objects\n\nAlso includes:\n- Limit constants \\(MAX_DIRECTORY_ENTRIES, MAX_FILE_PARTS, MAX_BRANCH_LIST_ENTRIES\\)\n- JSON conversion functions using serde_json_canonicalizer for RFC 8785\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

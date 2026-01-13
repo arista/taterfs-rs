@@ -377,10 +377,13 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
                     field: "url".to_string(),
                 })?;
 
+            let no_cache = parse_bool(ini, &section_name, "no_cache", false)?;
+
             let repo_config = RepositoryConfig {
                 url,
                 settings: parse_s3_settings(ini, &section_name),
                 limits: parse_capacity_limits(ini, &section_name)?,
+                no_cache,
             };
 
             config
@@ -544,6 +547,7 @@ fn apply_repository_override(
                 max_write_bytes_per_second: Limit::Inherit,
                 max_total_bytes_per_second: Limit::Inherit,
             },
+            no_cache: false,
         });
 
     match param {
@@ -557,6 +561,10 @@ fn apply_repository_override(
         }
         "region" => {
             repo.settings.region = Some(value.to_string());
+            Ok(())
+        }
+        "no_cache" => {
+            repo.no_cache = parse_bool_value(param, value)?;
             Ok(())
         }
         _ => apply_capacity_limit_override(

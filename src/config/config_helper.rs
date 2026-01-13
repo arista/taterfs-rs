@@ -300,6 +300,7 @@ mod tests {
                             max_write_bytes_per_second: Limit::Inherit,
                             max_total_bytes_per_second: Limit::Inherit,
                         },
+                        no_cache: false,
                     },
                 );
                 map

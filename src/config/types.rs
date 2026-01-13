@@ -87,6 +87,8 @@ pub struct RepositoryConfig {
     pub url: String,
     pub settings: S3Settings,
     pub limits: CapacityLimits,
+    /// If true, disable caching for this repository (overrides global setting).
+    pub no_cache: bool,
 }
 
 /// [filestore.{name}] section - named file store configuration.

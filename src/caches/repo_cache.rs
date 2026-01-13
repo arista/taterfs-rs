@@ -79,3 +79,40 @@ pub trait RepoCaches: Send + Sync {
     /// Get or create a cache for the repository with the given UUID.
     async fn get_cache(&self, uuid: &str) -> std::result::Result<Arc<dyn RepoCache>, String>;
 }
+
+// =============================================================================
+// NoopCache
+// =============================================================================
+
+/// A no-op cache implementation that never caches anything.
+///
+/// All reads return cache misses, all writes silently succeed without storing.
+/// Use this when caching is disabled via configuration.
+pub struct NoopCache;
+
+#[async_trait]
+impl RepoCache for NoopCache {
+    async fn object_exists(&self, _id: &ObjectId) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_object_exists(&self, _id: &ObjectId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn object_fully_stored(&self, _id: &ObjectId) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_object_fully_stored(&self, _id: &ObjectId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_object(&self, _id: &ObjectId) -> Result<Option<RepoObject>> {
+        Ok(None)
+    }
+
+    async fn set_object(&self, _id: &ObjectId, _obj: &RepoObject) -> Result<()> {
+        Ok(())
+    }
+}

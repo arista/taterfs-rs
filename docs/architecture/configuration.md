@@ -15,7 +15,7 @@ The following rules are applied to find the config file:
 
 * [cache] section - configuration of the durable cache stored locally
     * path={default /tmp/tfsconfig-cache}
-    * no-cache={true|false, default false} - if true, then the caches are bypassed
+    * no_cache={true|false, default false} - if true, then the caches are bypassed
 
 * [memory] section - configuration and maximums that will be applied to operations that potentially allocate and hold memory.  "none" may be specifed, in which case no capacity manager is used for memory limits
     * max={default 100MB}
@@ -40,6 +40,7 @@ The following rules are applied to find the config file:
     * url={repository url, required}
     * endpoint_url={default unspecified}
     * region={default unspecified}
+    * no_cache={true|false, default false} - if true, then the caches are bypassed
     * max_concurrent_requests={default unspecified}
     * max_requests_per_second={default unspecified}
     * max_read_bytes_per_second={default unspecified}

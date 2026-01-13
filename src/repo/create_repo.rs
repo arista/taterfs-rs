@@ -9,7 +9,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::CapacityManagers;
-use crate::caches::RepoCaches;
+use crate::caches::{NoopCache, RepoCache, RepoCaches};
 use crate::config::ConfigHelper;
 
 // =============================================================================
@@ -301,6 +301,60 @@ impl CreateRepoContext {
     /// Parse a repository specification.
     pub fn parse_repo_spec(&self, spec: &str) -> Result<ParsedRepoSpec> {
         ParsedRepoSpec::parse(spec, Some(&self.config))
+    }
+
+    /// Check if caching is disabled globally.
+    pub fn is_cache_disabled(&self) -> bool {
+        self.config.config().cache.no_cache
+    }
+
+    /// Check if caching is disabled for a specific repository.
+    ///
+    /// Returns true if either the global `[cache] no_cache` setting is true,
+    /// or the repository-specific `[repository.{name}] no_cache` setting is true.
+    pub fn is_cache_disabled_for_repo(&self, repo_name: &str) -> bool {
+        if self.config.config().cache.no_cache {
+            return true;
+        }
+        self.config
+            .get_repository(repo_name)
+            .map(|r| r.no_cache)
+            .unwrap_or(false)
+    }
+
+    /// Get a cache for the repository with the given UUID.
+    ///
+    /// If caching is disabled in the configuration, returns a [`NoopCache`].
+    /// Otherwise, delegates to the configured [`RepoCaches`] provider.
+    pub async fn get_cache_for_uuid(&self, uuid: &str) -> Result<Arc<dyn RepoCache>> {
+        if self.config.config().cache.no_cache {
+            Ok(Arc::new(NoopCache))
+        } else {
+            self.repository_caches
+                .get_cache(uuid)
+                .await
+                .map_err(CreateRepoError::CacheError)
+        }
+    }
+
+    /// Get a cache for a named repository by its UUID.
+    ///
+    /// Checks both global and repository-specific `no_cache` settings.
+    /// If either is true, returns a [`NoopCache`].
+    /// Otherwise, delegates to the configured [`RepoCaches`] provider.
+    pub async fn get_cache_for_repo(
+        &self,
+        repo_name: &str,
+        uuid: &str,
+    ) -> Result<Arc<dyn RepoCache>> {
+        if self.is_cache_disabled_for_repo(repo_name) {
+            Ok(Arc::new(NoopCache))
+        } else {
+            self.repository_caches
+                .get_cache(uuid)
+                .await
+                .map_err(CreateRepoError::CacheError)
+        }
     }
 }
 

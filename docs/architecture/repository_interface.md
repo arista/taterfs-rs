@@ -52,24 +52,26 @@ write_throughput_limiter: Option<CapacityManager>
 total_throughput_limiter: Option<CapacityManager>
 ```
 
-It is expected that there will be a helper function for handling the limiters that can be reused by the appropriate calls.  Something like:
+It is expected that there will be helper functions for handling the limiters that can be reused by the appropriate calls.
+
+## Specifying Repos
+
+When the application runs, it will need a way to specify which Repositories to use.  Those specifications will need to have enough information to construct a Repo connected to particular backends, caches, and capacity managers.  Some of that can be provided through configuration, while also providing a mechanism to override settings.
+
+The basic way to reference a repository is through a URL:
+
 
 ```
-async with_limits<T>(use: UseSpec, f: Function<Used<T>>)->T
-
-where UseSpec is something like:
-
-write: Option<u64>
-read: Option<u64>
-
-and Used is similar:
-
-written: Option<u64>
-read: Option<u64>
-result: T
+s3://{bucket}/{prefix}
+file://{directory}
+http://...
 ```
 
-such that `with_limits` will await all of the appropriate limiters, call the given function, then drop any appropriate UsedCapacity.  It will also handle the situation where read wasn't known before the call, but is known after the call and the wait can happen at that point.
+Each of those URL's would lead to the creation of a Repo connected to an FsBackend, S3Backend, or HttpBackend.
 
+Some backend types might require additional parmeters.  The S3Backend, for example, can optionally take an endpoint_url and a region.  Those can be specified as query parameters to the URL:
 
-TODO: determine if the request deduplication function should be broken out as a separate utility component
+```
+s3://{bucket}/{prefix}?endpoint_url=...&region=...
+```
+

@@ -58,5 +58,9 @@ The following rules are applied to find the config file:
 
 ## command-line config file overrides
 
-TODO: determine how command line overrides should work
+The command line offers a few ways to override values found in the config files:
+
+* --config-file={...} - as described earlier, this specifies a config file to use
+* --config-file-overrides={...} - this points at another config file, whose entries are used to override those found in the config file
+* --config {name}={value} - allows for overriding individual configuration values (e.g., --config s3.region=us-east-1)
 

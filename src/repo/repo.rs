@@ -110,7 +110,10 @@ pub struct Repo<B, C> {
     flow_control: FlowControl,
 
     // Deduplication for various operations
+    dedup_current_root: Dedup<(), Option<ObjectId>, RepoError>,
+    dedup_write_current_root: Dedup<ObjectId, (), RepoError>,
     dedup_object_exists: Dedup<ObjectId, bool, RepoError>,
+    dedup_write: Dedup<ObjectId, (), RepoError>,
     dedup_read: Dedup<ObjectId, Bytes, RepoError>,
 }
 
@@ -125,7 +128,10 @@ where
             backend: Arc::new(backend),
             cache: Arc::new(cache),
             flow_control: FlowControl::default(),
+            dedup_current_root: Dedup::new(),
+            dedup_write_current_root: Dedup::new(),
             dedup_object_exists: Dedup::new(),
+            dedup_write: Dedup::new(),
             dedup_read: Dedup::new(),
         }
     }
@@ -136,7 +142,10 @@ where
             backend: Arc::new(backend),
             cache: Arc::new(cache),
             flow_control,
+            dedup_current_root: Dedup::new(),
+            dedup_write_current_root: Dedup::new(),
             dedup_object_exists: Dedup::new(),
+            dedup_write: Dedup::new(),
             dedup_read: Dedup::new(),
         }
     }
@@ -146,6 +155,7 @@ where
     // =========================================================================
 
     /// Acquire capacity for a request (rate + concurrency).
+    #[allow(dead_code)]
     async fn acquire_request_capacity(&self) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
         let rate = if let Some(ref limiter) = self.flow_control.request_rate_limiter {
             Some(limiter.use_capacity(1).await)
@@ -181,6 +191,7 @@ where
     }
 
     /// Acquire capacity for write throughput.
+    #[allow(dead_code)]
     async fn acquire_write_throughput(&self, size: u64) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
         let write = if let Some(ref limiter) = self.flow_control.write_throughput_limiter {
             Some(limiter.use_capacity(size).await)
@@ -201,29 +212,81 @@ where
     // Current Root Operations
     // =========================================================================
 
+    /// Internal: deduplicated read of current root.
+    async fn read_current_root_internal(&self) -> Result<Option<ObjectId>> {
+        let backend = Arc::clone(&self.backend);
+        let flow_control = self.flow_control.clone();
+
+        self.dedup_current_root
+            .call((), || async move {
+                let (_rate, _concurrent) = {
+                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                        Some(limiter.use_capacity(1).await)
+                    } else {
+                        None
+                    };
+                    let concurrent =
+                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                            Some(limiter.use_capacity(1).await)
+                        } else {
+                            None
+                        };
+                    (rate, concurrent)
+                };
+
+                let result = backend.read_current_root().await?;
+                Ok(result)
+            })
+            .await
+    }
+
     /// Check if a current root exists.
+    ///
+    /// This operation is deduplicated with `read_current_root`.
     pub async fn current_root_exists(&self) -> Result<bool> {
-        let (_rate, _concurrent) = self.acquire_request_capacity().await;
-        let result = self.backend.read_current_root().await?;
+        let result = self.read_current_root_internal().await?;
         Ok(result.is_some())
     }
 
     /// Read the current root object ID.
     ///
     /// Returns an error if no root exists.
+    /// This operation is deduplicated with `current_root_exists`.
     pub async fn read_current_root(&self) -> Result<ObjectId> {
-        let (_rate, _concurrent) = self.acquire_request_capacity().await;
-        self.backend
-            .read_current_root()
+        self.read_current_root_internal()
             .await?
             .ok_or(RepoError::NotFound)
     }
 
     /// Write a new current root object ID.
+    ///
+    /// This operation is deduplicated by root ID.
     pub async fn write_current_root(&self, root_id: &ObjectId) -> Result<()> {
-        let (_rate, _concurrent) = self.acquire_request_capacity().await;
-        self.backend.write_current_root(root_id).await?;
-        Ok(())
+        let backend = Arc::clone(&self.backend);
+        let flow_control = self.flow_control.clone();
+        let root_id_owned = root_id.clone();
+
+        self.dedup_write_current_root
+            .call(root_id.clone(), || async move {
+                let (_rate, _concurrent) = {
+                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                        Some(limiter.use_capacity(1).await)
+                    } else {
+                        None
+                    };
+                    let concurrent =
+                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                            Some(limiter.use_capacity(1).await)
+                        } else {
+                            None
+                        };
+                    (rate, concurrent)
+                };
+
+                backend.write_current_root(&root_id_owned).await?;
+                Ok(())
+            })
+            .await
     }
 
     // =========================================================================
@@ -281,18 +344,54 @@ where
     /// Write raw bytes to the repository.
     ///
     /// The object ID is the SHA-256 hash of the data.
+    /// This operation is deduplicated by object ID.
     pub async fn write(&self, id: &ObjectId, data: Bytes) -> Result<()> {
-        let size = data.len() as u64;
+        let backend = Arc::clone(&self.backend);
+        let cache = Arc::clone(&self.cache);
+        let flow_control = self.flow_control.clone();
+        let id_owned = id.clone();
 
-        let (_rate, _concurrent) = self.acquire_request_capacity().await;
-        let (_write, _total) = self.acquire_write_throughput(size).await;
+        self.dedup_write
+            .call(id.clone(), || async move {
+                let size = data.len() as u64;
 
-        self.backend.write_object(id, &data).await?;
+                let (_rate, _concurrent) = {
+                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                        Some(limiter.use_capacity(1).await)
+                    } else {
+                        None
+                    };
+                    let concurrent =
+                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                            Some(limiter.use_capacity(1).await)
+                        } else {
+                            None
+                        };
+                    (rate, concurrent)
+                };
 
-        // Mark as existing in cache
-        let _ = self.cache.set_object_exists(id).await;
+                let (_write, _total) = {
+                    let write = if let Some(ref limiter) = flow_control.write_throughput_limiter {
+                        Some(limiter.use_capacity(size).await)
+                    } else {
+                        None
+                    };
+                    let total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+                        Some(limiter.use_capacity(size).await)
+                    } else {
+                        None
+                    };
+                    (write, total)
+                };
 
-        Ok(())
+                backend.write_object(&id_owned, &data).await?;
+
+                // Mark as existing in cache
+                let _ = cache.set_object_exists(&id_owned).await;
+
+                Ok(())
+            })
+            .await
     }
 
     /// Read raw bytes from the repository.

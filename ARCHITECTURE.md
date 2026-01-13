@@ -12,6 +12,7 @@ This document describes the high-level architecture of taterfs-rs.
 * (backend interfaces)[docs/architecture/backend_interfaces.md]
 * (file stores)[docs/architecture/file_stores.md]
 * (flow control)[docs/architecture/flow_control.md]
+* (caches)[docs/architecture/caches.md]
 
 ### Entry Point
 

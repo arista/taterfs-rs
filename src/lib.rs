@@ -2,6 +2,7 @@
 
 pub mod capacity_manager;
 pub mod file_store;
+pub mod repository;
 
 pub use capacity_manager::{CapacityManager, ReplenishmentRate, UsedCapacity};
 

@@ -1,11 +1,11 @@
 //! taterfs-rs - A Rust command-line utility for file storage.
 
 pub mod caches;
-pub mod capacity_manager;
 pub mod file_store;
 pub mod repository;
+pub mod util;
 
-pub use capacity_manager::{CapacityManager, ReplenishmentRate, UsedCapacity};
+pub use util::{CapacityManager, ReplenishmentRate, UsedCapacity};
 
 pub use file_store::{
     DirEntry, DirectoryEntry, DirectoryList, Error, FileDest, FileEntry, FileSource, FileStore,

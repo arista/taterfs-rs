@@ -5,4 +5,4 @@
 
 mod repo_cache;
 
-pub use repo_cache::{CacheError, RepoCache, Result};
+pub use repo_cache::{CacheError, RepoCache, RepoCaches, Result};

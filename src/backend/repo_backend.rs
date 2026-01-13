@@ -1,5 +1,4 @@
-use std::future::Future;
-
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Object ID is a sha-256 hash represented as a lowercase hexadecimal string.
@@ -66,15 +65,16 @@ pub enum SwapResult {
 ///
 /// All operations are asynchronous. Implementations store objects (identified by
 /// their content hash) and track the current root object ID.
+#[async_trait]
 pub trait RepoBackend: Send + Sync {
     /// Get information about the repository.
-    fn get_repository_info(&self) -> impl Future<Output = Result<RepositoryInfo>> + Send;
+    async fn get_repository_info(&self) -> Result<RepositoryInfo>;
 
     /// Read the current root object ID, if one exists.
-    fn read_current_root(&self) -> impl Future<Output = Result<Option<ObjectId>>> + Send;
+    async fn read_current_root(&self) -> Result<Option<ObjectId>>;
 
     /// Write a new current root object ID.
-    fn write_current_root(&self, root_id: &ObjectId) -> impl Future<Output = Result<()>> + Send;
+    async fn write_current_root(&self, root_id: &ObjectId) -> Result<()>;
 
     /// Atomically swap the current root if it matches the expected value.
     ///
@@ -86,23 +86,23 @@ pub trait RepoBackend: Send + Sync {
     ///
     /// Backends are not required to implement this transactionally, but are
     /// encouraged to if they can.
-    fn swap_current_root(
+    async fn swap_current_root(
         &self,
         expected: Option<&ObjectId>,
         new_root: &ObjectId,
-    ) -> impl Future<Output = Result<SwapResult>> + Send;
+    ) -> Result<SwapResult>;
 
     /// Check if an object with the given ID exists.
-    fn object_exists(&self, id: &ObjectId) -> impl Future<Output = Result<bool>> + Send;
+    async fn object_exists(&self, id: &ObjectId) -> Result<bool>;
 
     /// Read an object's contents by ID.
     ///
     /// Returns `BackendError::NotFound` if the object does not exist.
-    fn read_object(&self, id: &ObjectId) -> impl Future<Output = Result<Vec<u8>>> + Send;
+    async fn read_object(&self, id: &ObjectId) -> Result<Vec<u8>>;
 
     /// Write an object with the given ID and contents.
     ///
     /// It is optional for implementations to verify that the ID matches the
     /// sha-256 hash of the contents.
-    fn write_object(&self, id: &ObjectId, data: &[u8]) -> impl Future<Output = Result<()>> + Send;
+    async fn write_object(&self, id: &ObjectId, data: &[u8]) -> Result<()>;
 }

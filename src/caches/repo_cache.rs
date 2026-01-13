@@ -1,6 +1,8 @@
 //! Repository cache trait for caching repository object metadata and content.
 
-use std::future::Future;
+use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use crate::repository::{ObjectId, RepoObject};
 
@@ -46,28 +48,34 @@ pub type Result<T> = std::result::Result<T, CacheError>;
 /// - Object existence: whether an object exists in the repository
 /// - Object fully stored: whether an object and all objects reachable from it exist
 /// - Object content: the deserialized repository object itself
+#[async_trait]
 pub trait RepoCache: Send + Sync {
     /// Check if an object exists in the repository.
-    fn object_exists(&self, id: &ObjectId) -> impl Future<Output = Result<bool>> + Send;
+    async fn object_exists(&self, id: &ObjectId) -> Result<bool>;
 
     /// Mark an object as existing in the repository.
-    fn set_object_exists(&self, id: &ObjectId) -> impl Future<Output = Result<()>> + Send;
+    async fn set_object_exists(&self, id: &ObjectId) -> Result<()>;
 
     /// Check if an object and all objects reachable from it exist in the repository.
-    fn object_fully_stored(&self, id: &ObjectId) -> impl Future<Output = Result<bool>> + Send;
+    async fn object_fully_stored(&self, id: &ObjectId) -> Result<bool>;
 
     /// Mark an object (and implicitly all objects reachable from it) as fully stored.
-    fn set_object_fully_stored(&self, id: &ObjectId) -> impl Future<Output = Result<()>> + Send;
+    async fn set_object_fully_stored(&self, id: &ObjectId) -> Result<()>;
 
     /// Retrieve a cached repository object.
     ///
     /// Returns `None` if the object is not in the cache.
-    fn get_object(&self, id: &ObjectId) -> impl Future<Output = Result<Option<RepoObject>>> + Send;
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<RepoObject>>;
 
     /// Store a repository object in the cache.
-    fn set_object(
-        &self,
-        id: &ObjectId,
-        obj: &RepoObject,
-    ) -> impl Future<Output = Result<()>> + Send;
+    async fn set_object(&self, id: &ObjectId, obj: &RepoObject) -> Result<()>;
+}
+
+/// A provider of repository caches, keyed by repository UUID.
+///
+/// Implementations manage a collection of caches, typically one per repository.
+#[async_trait]
+pub trait RepoCaches: Send + Sync {
+    /// Get or create a cache for the repository with the given UUID.
+    async fn get_cache(&self, uuid: &str) -> std::result::Result<Arc<dyn RepoCache>, String>;
 }

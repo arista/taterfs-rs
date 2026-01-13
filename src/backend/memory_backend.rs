@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use async_trait::async_trait;
+
 use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
 
 /// An in-memory implementation of `RepoBackend`, intended primarily for testing.
@@ -42,6 +44,7 @@ impl Default for MemoryBackend {
     }
 }
 
+#[async_trait]
 impl RepoBackend for MemoryBackend {
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
         Ok(RepositoryInfo {

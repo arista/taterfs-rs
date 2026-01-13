@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 
 use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
@@ -44,6 +45,7 @@ impl HttpBackend {
     }
 }
 
+#[async_trait]
 impl RepoBackend for HttpBackend {
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
         let response = self

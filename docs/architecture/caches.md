@@ -7,7 +7,7 @@ Caches are used in multiple places throughout the system.  Some caches are epehm
 ### RepositoryCache
 
 ```
-interface RepositoryCache {
+interface RepoCache {
   // Indicates if the given object already exists in the repository
   async object_exists(object_id: ObjectId) -> bool
   async set_object_exists(object_id: ObjectId)
@@ -20,9 +20,12 @@ interface RepositoryCache {
   async get_object(object_id: ObjectId) -> RepoObject | null
   async set_object(object_id: ObjectId, obj: RepoObject)
 }
-```
 
-TODO: The interface for obtaining a RepositoryCache for a given Repository, which requires defining some kind of unique identifier for Repositories
+interface RepoCaches {
+  // Returns the RepositorCache for the given uuid, creating it if not yet found
+  async get_repository_cache(repository_uuid: string) -> RepoCache
+}
+```
 
 ## Implementations
 

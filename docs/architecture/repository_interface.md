@@ -19,6 +19,8 @@ A Repo presents an interface that is slightly more ergonomic than the raw RepoBa
 The public Repo interface looks like this:
 
 ```
+async get_repository_info() -> RepositoryInfo
+
 async current_root_exists() -> bool
 async read_current_root() -> ObjectId
 async write_current_root(root: Object_id)
@@ -54,7 +56,7 @@ total_throughput_limiter: Option<CapacityManager>
 
 It is expected that there will be helper functions for handling the limiters that can be reused by the appropriate calls.
 
-## Specifying Repos
+## Specifying and Creating Repos
 
 When the application runs, it will need a way to specify which Repositories to use.  Those specifications will need to have enough information to construct a Repo connected to particular backends, caches, and capacity managers.  Some of that can be provided through configuration, while also providing a mechanism to override settings.
 
@@ -73,5 +75,33 @@ Some backend types might require additional parmeters.  The S3Backend, for examp
 
 ```
 s3://{bucket}/{prefix}?endpoint_url=...&region=...
+```
+
+Besides URL's, a repository can also be specifed by name, in which case its parameters are taken from the [repository.{name}] section of the [config file](./configuration.md), with an error if that named repository is not found.  The config file can also specify defaults for parameters like endpoint_url and region, if they haven't been specified in the url.
+
+Once the backend can be created, the next step is to locate its cache.  This is done by calling get_repository_info() on the backend, retrieving the repository's uuid, then calling get_repository_cache() from the RepositoryCaches.
+
+The capacity managers also need to be obtained.  There are potentially multiple sets of capacity managers - the ones corresponding to the [network] section of the config file, the ones corresponding to the [s3] section of the config file, then ones that might need to be created specifically for the repository.
+
+Once all of those elements are obtained, then the Repo can be created.
+
+All of this should be encapsulated in:
+
+```
+async create_repo(repo_spec: string, ctx: CreateRepoContext) -> Repo
+
+CreateRepoContext {
+  repository_caches() -> RepositoryCaches
+  network_capacity_managers() -> CapacityManagers
+  s3_capacity_managers() -> CapacityManagers
+}
+
+CapacityManagers {
+  concurrent_requests() -> CapacityManager
+  request_rate() -> CapacityManager
+  read_throughput() -> CapacityManager
+  write_throughput() -> CapacityManager
+  total_throughput() -> CapacityManager
+}
 ```
 

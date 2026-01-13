@@ -150,63 +150,6 @@ where
         }
     }
 
-    // =========================================================================
-    // Flow Control Helpers
-    // =========================================================================
-
-    /// Acquire capacity for a request (rate + concurrency).
-    #[allow(dead_code)]
-    async fn acquire_request_capacity(&self) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
-        let rate = if let Some(ref limiter) = self.flow_control.request_rate_limiter {
-            Some(limiter.use_capacity(1).await)
-        } else {
-            None
-        };
-
-        let concurrent = if let Some(ref limiter) = self.flow_control.concurrent_request_limiter {
-            Some(limiter.use_capacity(1).await)
-        } else {
-            None
-        };
-
-        (rate, concurrent)
-    }
-
-    /// Acquire capacity for read throughput.
-    #[allow(dead_code)]
-    async fn acquire_read_throughput(&self, size: u64) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
-        let read = if let Some(ref limiter) = self.flow_control.read_throughput_limiter {
-            Some(limiter.use_capacity(size).await)
-        } else {
-            None
-        };
-
-        let total = if let Some(ref limiter) = self.flow_control.total_throughput_limiter {
-            Some(limiter.use_capacity(size).await)
-        } else {
-            None
-        };
-
-        (read, total)
-    }
-
-    /// Acquire capacity for write throughput.
-    #[allow(dead_code)]
-    async fn acquire_write_throughput(&self, size: u64) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
-        let write = if let Some(ref limiter) = self.flow_control.write_throughput_limiter {
-            Some(limiter.use_capacity(size).await)
-        } else {
-            None
-        };
-
-        let total = if let Some(ref limiter) = self.flow_control.total_throughput_limiter {
-            Some(limiter.use_capacity(size).await)
-        } else {
-            None
-        };
-
-        (write, total)
-    }
 
     // =========================================================================
     // Current Root Operations
@@ -219,21 +162,7 @@ where
 
         self.dedup_current_root
             .call((), || async move {
-                let (_rate, _concurrent) = {
-                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    (rate, concurrent)
-                };
-
+                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
                 let result = backend.read_current_root().await?;
                 Ok(result)
             })
@@ -268,21 +197,7 @@ where
 
         self.dedup_write_current_root
             .call(root_id.clone(), || async move {
-                let (_rate, _concurrent) = {
-                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    (rate, concurrent)
-                };
-
+                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
                 backend.write_current_root(&root_id_owned).await?;
                 Ok(())
             })
@@ -310,21 +225,7 @@ where
 
         self.dedup_object_exists
             .call(id.clone(), || async move {
-                let (_rate, _concurrent) = {
-                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    (rate, concurrent)
-                };
-
+                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
                 let exists = backend.object_exists(&id_owned).await?;
 
                 // Update cache on success
@@ -355,34 +256,8 @@ where
             .call(id.clone(), || async move {
                 let size = data.len() as u64;
 
-                let (_rate, _concurrent) = {
-                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    (rate, concurrent)
-                };
-
-                let (_write, _total) = {
-                    let write = if let Some(ref limiter) = flow_control.write_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-                    let total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-                    (write, total)
-                };
+                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
+                let (_write, _total) = acquire_write_throughput(&flow_control, size).await;
 
                 backend.write_object(&id_owned, &data).await?;
 
@@ -407,35 +282,11 @@ where
 
         self.dedup_read
             .call(id.clone(), || async move {
-                // Acquire request capacity
-                let (_rate, _concurrent) = {
-                    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    (rate, concurrent)
-                };
+                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
 
                 // Acquire read throughput if size is known
                 let (_pre_read, _pre_total) = if let Some(size) = expected_size {
-                    let read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-                    let total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-                    (read, total)
+                    acquire_read_throughput(&flow_control, size).await
                 } else {
                     (None, None)
                 };
@@ -446,12 +297,7 @@ where
                 // Acquire read throughput after if size was unknown
                 if expected_size.is_none() {
                     let size = bytes.len() as u64;
-                    if let Some(ref limiter) = flow_control.read_throughput_limiter {
-                        let _ = limiter.use_capacity(size).await;
-                    }
-                    if let Some(ref limiter) = flow_control.total_throughput_limiter {
-                        let _ = limiter.use_capacity(size).await;
-                    }
+                    let _ = acquire_read_throughput(&flow_control, size).await;
                 }
 
                 Ok(bytes)
@@ -565,6 +411,65 @@ where
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+/// Acquire capacity for a request (rate + concurrency).
+async fn acquire_request_capacity(
+    flow_control: &FlowControl,
+) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
+    let rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+        Some(limiter.use_capacity(1).await)
+    } else {
+        None
+    };
+
+    let concurrent = if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+        Some(limiter.use_capacity(1).await)
+    } else {
+        None
+    };
+
+    (rate, concurrent)
+}
+
+/// Acquire capacity for read throughput.
+async fn acquire_read_throughput(
+    flow_control: &FlowControl,
+    size: u64,
+) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
+    let read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
+        Some(limiter.use_capacity(size).await)
+    } else {
+        None
+    };
+
+    let total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+        Some(limiter.use_capacity(size).await)
+    } else {
+        None
+    };
+
+    (read, total)
+}
+
+/// Acquire capacity for write throughput.
+async fn acquire_write_throughput(
+    flow_control: &FlowControl,
+    size: u64,
+) -> (Option<UsedCapacity>, Option<UsedCapacity>) {
+    let write = if let Some(ref limiter) = flow_control.write_throughput_limiter {
+        Some(limiter.use_capacity(size).await)
+    } else {
+        None
+    };
+
+    let total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+        Some(limiter.use_capacity(size).await)
+    } else {
+        None
+    };
+
+    (write, total)
+}
 
 /// Compute the object ID (SHA-256 hash) for the given data.
 fn compute_object_id(data: &[u8]) -> ObjectId {

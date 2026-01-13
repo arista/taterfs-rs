@@ -2195,6 +2195,7 @@ dependencies = [
  "aws-sdk-s3",
  "bytes",
  "futures",
+ "hex",
  "ignore",
  "reqwest",
  "serde",

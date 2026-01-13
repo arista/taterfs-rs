@@ -1,7 +1,18 @@
 use std::future::Future;
 
+use serde::{Deserialize, Serialize};
+
 /// Object ID is a sha-256 hash represented as a lowercase hexadecimal string.
 pub type ObjectId = String;
+
+/// Information about a repository.
+///
+/// Contains metadata about the repository, including its unique identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryInfo {
+    /// The unique identifier for this repository, assigned at creation.
+    pub uuid: String,
+}
 
 /// Error type for backend operations.
 #[derive(Debug)]
@@ -56,6 +67,9 @@ pub enum SwapResult {
 /// All operations are asynchronous. Implementations store objects (identified by
 /// their content hash) and track the current root object ID.
 pub trait RepoBackend: Send + Sync {
+    /// Get information about the repository.
+    fn get_repository_info(&self) -> impl Future<Output = Result<RepositoryInfo>> + Send;
+
     /// Read the current root object ID, if one exists.
     fn read_current_root(&self) -> impl Future<Output = Result<Option<ObjectId>>> + Send;
 

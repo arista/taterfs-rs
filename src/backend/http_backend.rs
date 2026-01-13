@@ -1,6 +1,6 @@
 use reqwest::{Client, StatusCode};
 
-use super::repo_backend::{BackendError, ObjectId, RepoBackend, Result, SwapResult};
+use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
 
 /// An HTTP-based implementation of `RepoBackend`.
 ///
@@ -27,6 +27,10 @@ impl HttpBackend {
         }
     }
 
+    fn repository_info_url(&self) -> String {
+        format!("{}/repository_info", self.base_url)
+    }
+
     fn objects_url(&self, id: &ObjectId) -> String {
         format!("{}/objects/{}", self.base_url, id)
     }
@@ -41,6 +45,30 @@ impl HttpBackend {
 }
 
 impl RepoBackend for HttpBackend {
+    async fn get_repository_info(&self) -> Result<RepositoryInfo> {
+        let response = self
+            .client
+            .get(self.repository_info_url())
+            .send()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+
+        match response.status() {
+            StatusCode::OK => {
+                let info: RepositoryInfo = response
+                    .json()
+                    .await
+                    .map_err(|e| BackendError::Other(format!("failed to parse repository info: {}", e)))?;
+                Ok(info)
+            }
+            StatusCode::NOT_FOUND => Err(BackendError::NotFound),
+            status => Err(BackendError::Other(format!(
+                "unexpected status code: {}",
+                status
+            ))),
+        }
+    }
+
     async fn read_current_root(&self) -> Result<Option<ObjectId>> {
         let response = self
             .client

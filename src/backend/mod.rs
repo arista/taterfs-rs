@@ -13,5 +13,5 @@ pub use fs_like_repo_backend::FsLikeRepoBackend;
 pub use fs_like_repo_backend_adapter::FsLikeRepoBackendAdapter;
 pub use http_backend::HttpBackend;
 pub use memory_backend::MemoryBackend;
-pub use repo_backend::{BackendError, ObjectId, RepoBackend, Result, SwapResult};
+pub use repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
 pub use s3_backend::{S3Backend, S3BackendConfig};

@@ -1,22 +1,39 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use super::repo_backend::{BackendError, ObjectId, RepoBackend, Result, SwapResult};
+use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
 
 /// An in-memory implementation of `RepoBackend`, intended primarily for testing.
 pub struct MemoryBackend {
+    uuid: String,
     objects: RwLock<HashMap<ObjectId, Vec<u8>>>,
     current_root: RwLock<Option<ObjectId>>,
 }
 
 impl MemoryBackend {
-    /// Create a new empty in-memory backend.
+    /// Create a new empty in-memory backend with a random UUID.
     pub fn new() -> Self {
+        Self::with_uuid(generate_uuid())
+    }
+
+    /// Create a new empty in-memory backend with the specified UUID.
+    pub fn with_uuid(uuid: String) -> Self {
         Self {
+            uuid,
             objects: RwLock::new(HashMap::new()),
             current_root: RwLock::new(None),
         }
     }
+}
+
+/// Generate a simple UUID-like string for testing purposes.
+fn generate_uuid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:032x}", now)
 }
 
 impl Default for MemoryBackend {
@@ -26,6 +43,12 @@ impl Default for MemoryBackend {
 }
 
 impl RepoBackend for MemoryBackend {
+    async fn get_repository_info(&self) -> Result<RepositoryInfo> {
+        Ok(RepositoryInfo {
+            uuid: self.uuid.clone(),
+        })
+    }
+
     async fn read_current_root(&self) -> Result<Option<ObjectId>> {
         let root = self.current_root.read().unwrap();
         Ok(root.clone())

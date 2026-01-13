@@ -46,7 +46,7 @@ pub type Result<T> = std::result::Result<T, CacheError>;
 /// - Object existence: whether an object exists in the repository
 /// - Object fully stored: whether an object and all objects reachable from it exist
 /// - Object content: the deserialized repository object itself
-pub trait RepositoryCache: Send + Sync {
+pub trait RepoCache: Send + Sync {
     /// Check if an object exists in the repository.
     fn object_exists(&self, id: &ObjectId) -> impl Future<Output = Result<bool>> + Send;
 

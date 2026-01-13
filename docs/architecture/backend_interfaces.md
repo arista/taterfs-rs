@@ -6,9 +6,11 @@ Taterfs is designed to allow for a variety of backend implementations built to a
 
 ### repo_backend
 
-The internal functions will assume that they operate against a basic repo_backend interface, which defines only implement a few functions:
+The internal functions will assume that they operate against a basic repo_backend interface, which defines only a few functions:
 
 ```
+get_repository_info() -> RepositoryInfo
+
 read_current_root() -> root object id | null
 write_current_root(root object id)
 swap_current_root(expected current root object id, new root object id)
@@ -22,6 +24,20 @@ write_object(id, byte array)
 The `object_exists`, `read_object` and `write_object` functions simply read or write a set of bytes associated with an id, or test if an object with the id already exists in the repository.  It is optional for a backend to verify that the id matches the contents of the object's byte array.
 
 The functions that deal with the current root simply read or write a single value.  The `swap_current_root` function will only write a new root if the current root matches what is supplied.  Backends are not required to implement this function transactionally, but are encouraged to if they can.
+
+### repository info
+
+Every repository contains basic information in a RepositoryInfo structure.  At a minimum, this contains the UUID of the repository, assigned when the repository was created:
+
+```
+RepositoryInfo {
+  uuid: string
+}
+```
+
+Eventually this might contain other global information about the repository, such as the version of the format used to store the repository's data.  It is not expected that this information will change often, if at all.
+
+Repositories may choose to store this information as they choose.
 
 ### fs_like_repo_backend
 
@@ -38,6 +54,14 @@ first_file(directory) -> filename | null
 (note - all these functions should assume they are async)
 
 The fs_like_repo_backend_adapter is a component that takes a fs_like_repo_backend interface as a property, and implements the repo_backend interface by making calls to that interface.
+
+For the get_repository_info() function, the adapter assumes that the info is stored in:
+
+```
+repository_info.json
+```
+
+It will read, parse and return that info.
 
 For the object_exists, read_object, and write_object methods, the adapter assumes that objects are stored in this structure:
 
@@ -68,6 +92,10 @@ The http_repo_backend is another implementation of repo_backend that operates ag
 The http_repo_backend expects the HTTP server to respond to these requests:
 
 ```
+GET {base url}/repository_info
+  200 - return the repository info JSON (content type application/json)
+  404 - object not found
+
 GET {base url}/objects/{object id}
   200 - return the object's bytes (content type, etc. are ignored)
   404 - object not found

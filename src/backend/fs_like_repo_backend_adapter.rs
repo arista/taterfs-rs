@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::fs_like_repo_backend::FsLikeRepoBackend;
-use super::repo_backend::{ObjectId, RepoBackend, Result, SwapResult};
+use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
+
+const REPOSITORY_INFO_PATH: &str = "repository_info.json";
 
 /// Adapter that implements `RepoBackend` using an underlying `FsLikeRepoBackend`.
 ///
@@ -81,6 +83,13 @@ impl<B: FsLikeRepoBackend> FsLikeRepoBackendAdapter<B> {
 }
 
 impl<B: FsLikeRepoBackend> RepoBackend for FsLikeRepoBackendAdapter<B> {
+    async fn get_repository_info(&self) -> Result<RepositoryInfo> {
+        let data = self.backend.read_file(REPOSITORY_INFO_PATH).await?;
+        let info: RepositoryInfo = serde_json::from_slice(&data)
+            .map_err(|e| BackendError::Other(format!("failed to parse repository info: {}", e)))?;
+        Ok(info)
+    }
+
     async fn read_current_root(&self) -> Result<Option<ObjectId>> {
         self.find_current_root().await
     }

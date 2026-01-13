@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+
 use super::fs_like_repo_backend::FsLikeRepoBackend;
 use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
 
@@ -82,6 +84,7 @@ impl<B: FsLikeRepoBackend> FsLikeRepoBackendAdapter<B> {
     }
 }
 
+#[async_trait]
 impl<B: FsLikeRepoBackend> RepoBackend for FsLikeRepoBackendAdapter<B> {
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
         let data = self.backend.read_file(REPOSITORY_INFO_PATH).await?;

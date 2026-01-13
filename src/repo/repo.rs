@@ -112,9 +112,9 @@ pub struct FlowControl {
 /// - **Caching**: Consults the cache before hitting the backend
 /// - **Deduplication**: Combines concurrent identical requests
 /// - **Flow control**: Respects capacity limits for requests and throughput
-pub struct Repo<B, C> {
-    backend: Arc<B>,
-    cache: Arc<C>,
+pub struct Repo {
+    backend: Arc<dyn RepoBackend>,
+    cache: Arc<dyn RepoCache>,
     flow_control: FlowControl,
 
     // Deduplication for various operations
@@ -125,13 +125,13 @@ pub struct Repo<B, C> {
     dedup_read: Dedup<ObjectId, Bytes, RepoError>,
 }
 
-impl<B, C> Repo<B, C>
-where
-    B: RepoBackend + 'static,
-    C: RepoCache + 'static,
-{
+impl Repo {
     /// Create a new repository with the given backend and cache.
-    pub fn new(backend: B, cache: C) -> Self {
+    pub fn new<B, C>(backend: B, cache: C) -> Self
+    where
+        B: RepoBackend + 'static,
+        C: RepoCache + 'static,
+    {
         Self {
             backend: Arc::new(backend),
             cache: Arc::new(cache),
@@ -145,10 +145,32 @@ where
     }
 
     /// Create a new repository with flow control configuration.
-    pub fn with_flow_control(backend: B, cache: C, flow_control: FlowControl) -> Self {
+    pub fn with_flow_control<B, C>(backend: B, cache: C, flow_control: FlowControl) -> Self
+    where
+        B: RepoBackend + 'static,
+        C: RepoCache + 'static,
+    {
         Self {
             backend: Arc::new(backend),
             cache: Arc::new(cache),
+            flow_control,
+            dedup_current_root: Dedup::new(),
+            dedup_write_current_root: Dedup::new(),
+            dedup_object_exists: Dedup::new(),
+            dedup_write: Dedup::new(),
+            dedup_read: Dedup::new(),
+        }
+    }
+
+    /// Create a new repository from pre-wrapped trait objects.
+    pub fn from_dyn(
+        backend: Arc<dyn RepoBackend>,
+        cache: Arc<dyn RepoCache>,
+        flow_control: FlowControl,
+    ) -> Self {
+        Self {
+            backend,
+            cache,
             flow_control,
             dedup_current_root: Dedup::new(),
             dedup_write_current_root: Dedup::new(),
@@ -508,6 +530,7 @@ fn compute_object_id(data: &[u8]) -> ObjectId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use crate::backend::MemoryBackend;
     use crate::caches::CacheError;
     use std::collections::HashMap;
@@ -528,6 +551,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl RepoCache for TestCache {
         async fn object_exists(&self, id: &ObjectId) -> std::result::Result<bool, CacheError> {
             Ok(*self.exists.lock().unwrap().get(id).unwrap_or(&false))

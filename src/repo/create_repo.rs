@@ -241,6 +241,7 @@ pub struct CreateRepoContext {
     repository_caches: Arc<dyn RepoCaches>,
     network_managers: CapacityManagers,
     s3_managers: CapacityManagers,
+    allow_uninitialized: bool,
 }
 
 impl CreateRepoContext {
@@ -256,7 +257,18 @@ impl CreateRepoContext {
             repository_caches: Arc::new(repository_caches),
             network_managers,
             s3_managers,
+            allow_uninitialized: false,
         }
+    }
+
+    /// Set whether to allow creating repositories that are not yet initialized.
+    ///
+    /// When `true`, `create_repo` will skip the repository info check and use
+    /// a no-op cache. This is useful when you need to create a `Repo` in order
+    /// to call `initialize()` on it.
+    pub fn with_allow_uninitialized(mut self, allow: bool) -> Self {
+        self.allow_uninitialized = allow;
+        self
     }
 
     /// Get the configuration helper.
@@ -369,7 +381,8 @@ impl CreateRepoContext {
     /// Parses the specification, creates the appropriate backend, retrieves
     /// the repository's cache based on its UUID, and constructs a [`Repo`].
     ///
-    /// The repository must already be initialized (have repository info set).
+    /// The repository must already be initialized (have repository info set),
+    /// unless `allow_uninitialized` is set to `true`.
     pub async fn create_repo(&self, spec: &str) -> Result<Repo> {
         let parsed = self.parse_repo_spec(spec)?;
         self.create_repo_from_spec(&parsed).await
@@ -402,14 +415,20 @@ impl CreateRepoContext {
             BackendType::Http => Arc::new(HttpBackend::new(&spec.location)),
         };
 
-        // Get repository info to find the UUID for caching
-        let repo_info = backend
-            .get_repository_info()
-            .await
-            .map_err(|e| CreateRepoError::BackendError(e.to_string()))?;
+        // Get cache - either from repository info or use NoopCache for uninitialized repos
+        let cache: Arc<dyn RepoCache> = if self.allow_uninitialized {
+            // Skip repository info check and use no-op cache
+            Arc::new(NoopCache)
+        } else {
+            // Get repository info to find the UUID for caching
+            let repo_info = backend
+                .get_repository_info()
+                .await
+                .map_err(|e| CreateRepoError::BackendError(e.to_string()))?;
 
-        // Get the cache for this repository
-        let cache = self.get_cache_for_uuid(&repo_info.uuid).await?;
+            // Get the cache for this repository
+            self.get_cache_for_uuid(&repo_info.uuid).await?
+        };
 
         // Create flow control configuration
         let managers = self.create_managers_for_spec(spec);

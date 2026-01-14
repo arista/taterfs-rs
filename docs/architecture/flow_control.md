@@ -42,6 +42,22 @@ There will likely be separate send and receive bandwidth limiters, managed globa
 
 This will be a CapacityManager with no replenisment rate, whose capacity defines the amount of memory that should be used for particular applications (such as reading and writing data).
 
+A ManagedBuffers service will use a CapacityManager to hand out ManagedBuffer objects that are returned using RAII:
+
+```
+ManagedBuffers {
+  await get_buffer(size: u64) -> ManagedBuffer
+}
+
+ManagedBuffer {
+  size: u64
+  buf: Bytes
+}
+
+ManagedBuffer implements Drop, which returns the capacity to the ManagedBuffers from whence it came.
+
+```
+
 ### Request Rate Limiter
 
 This will be a CapacityManager configured with a replenishment rate that corresponds to the desired request rate.  It will also be configured with a capacity that represents a burstable amount.  The application will generally only call use(), and will rely on the automatic replenishment.

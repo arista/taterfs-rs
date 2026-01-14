@@ -19,6 +19,9 @@ A Repo presents an interface that is slightly more ergonomic than the raw RepoBa
 The public Repo interface looks like this:
 
 ```
+async initialize(init: RepoInitialize)
+async is_initialized() -> bool
+
 async get_repository_info() -> RepositoryInfo
 
 async current_root_exists() -> bool
@@ -57,6 +60,42 @@ total_throughput_limiter: Option<CapacityManager>
 ```
 
 It is expected that there will be helper functions for handling the limiters that can be reused by the appropriate calls.
+
+## Repository Initialization
+
+The initialize() method is used once per repository to create the structures needed for a blank repository.  It must be passed an initialization structure:
+
+```
+RepoInitialize {
+  uuid: Option<string>
+  default_branch_name: string
+}
+```
+
+If the uuid is not specified, then one will be generated.
+
+It is an error to call initialize() if the repo is already initialized (as indicated by the presence of RepositoryInfo).  That is also the logic used for is_initialized().
+
+The process for initializing a repo is as follows:
+
+* Create and write an empty Directory
+* Create and write a Commit:
+    * points to the directory's id
+    * has no parents
+    * CommitMetadata:
+        * has the timestamp set
+        * has message set to "Repo initialization"
+* Create and write an empty Branch
+    * name is set by RepoInitialize
+    * points to the commit's id
+* Create and write an empty Branches
+* Create and write a Root:
+    * timestamp is set
+    * default_branch_name is set by RepoInitialize
+    * default_branch points to the branch's id
+* Wait for all of the previous operations to complete
+* Set the current root to point to the Root's id
+* Write the RepositoryInfo
 
 ## Specifying and Creating Repos
 

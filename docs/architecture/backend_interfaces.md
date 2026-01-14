@@ -9,6 +9,8 @@ Taterfs is designed to allow for a variety of backend implementations built to a
 The internal functions will assume that they operate against a basic repo_backend interface, which defines only a few functions:
 
 ```
+has_repository_info() -> bool
+set_repository_info(repository_info: RepositoryInfo)
 get_repository_info() -> RepositoryInfo
 
 read_current_root() -> root object id | null
@@ -38,6 +40,8 @@ RepositoryInfo {
 Eventually this might contain other global information about the repository, such as the version of the format used to store the repository's data.  It is not expected that this information will change often, if at all.
 
 Repositories may choose to store this information as they choose.
+
+The set_repository_info() function will return an error if the Repository already has RepositoryInfo - it should only be set once when the repository is first initialized.
 
 ### fs_like_repo_backend
 

@@ -8,4 +8,4 @@ mod create_repo;
 mod repo;
 
 pub use create_repo::{BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec};
-pub use repo::{FlowControl, Repo, RepoError, Result};
+pub use repo::{FlowControl, Repo, RepoError, RepoInitialize, Result};

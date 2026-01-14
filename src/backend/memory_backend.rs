@@ -9,21 +9,40 @@ use super::repo_backend::{
 
 /// An in-memory implementation of `RepoBackend`, intended primarily for testing.
 pub struct MemoryBackend {
-    uuid: String,
+    repository_info: RwLock<Option<RepositoryInfo>>,
     objects: RwLock<HashMap<ObjectId, Vec<u8>>>,
     current_root: RwLock<Option<ObjectId>>,
 }
 
 impl MemoryBackend {
-    /// Create a new empty in-memory backend with a random UUID.
+    /// Create a new empty in-memory backend (uninitialized).
     pub fn new() -> Self {
-        Self::with_uuid(generate_uuid())
+        Self {
+            repository_info: RwLock::new(None),
+            objects: RwLock::new(HashMap::new()),
+            current_root: RwLock::new(None),
+        }
     }
 
-    /// Create a new empty in-memory backend with the specified UUID.
-    pub fn with_uuid(uuid: String) -> Self {
+    /// Create a new in-memory backend that is already initialized with a random UUID.
+    ///
+    /// This is useful for tests that don't need to test initialization.
+    pub fn new_initialized() -> Self {
         Self {
-            uuid,
+            repository_info: RwLock::new(Some(RepositoryInfo {
+                uuid: generate_uuid(),
+            })),
+            objects: RwLock::new(HashMap::new()),
+            current_root: RwLock::new(None),
+        }
+    }
+
+    /// Create a new in-memory backend that is already initialized with the specified UUID.
+    ///
+    /// This is useful for tests that need a specific UUID.
+    pub fn new_initialized_with_uuid(uuid: String) -> Self {
+        Self {
+            repository_info: RwLock::new(Some(RepositoryInfo { uuid })),
             objects: RwLock::new(HashMap::new()),
             current_root: RwLock::new(None),
         }
@@ -48,10 +67,23 @@ impl Default for MemoryBackend {
 
 #[async_trait]
 impl RepoBackend for MemoryBackend {
+    async fn has_repository_info(&self) -> Result<bool> {
+        let info = self.repository_info.read().unwrap();
+        Ok(info.is_some())
+    }
+
+    async fn set_repository_info(&self, info: &RepositoryInfo) -> Result<()> {
+        let mut repo_info = self.repository_info.write().unwrap();
+        if repo_info.is_some() {
+            return Err(BackendError::AlreadyInitialized);
+        }
+        *repo_info = Some(info.clone());
+        Ok(())
+    }
+
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
-        Ok(RepositoryInfo {
-            uuid: self.uuid.clone(),
-        })
+        let info = self.repository_info.read().unwrap();
+        info.clone().ok_or(BackendError::NotFound)
     }
 
     async fn read_current_root(&self) -> Result<Option<ObjectId>> {
@@ -205,5 +237,81 @@ mod tests {
 
         // Root should be unchanged
         assert_eq!(backend.read_current_root().await.unwrap(), Some(root1));
+    }
+
+    #[tokio::test]
+    async fn test_repository_info_uninitialized() {
+        let backend = MemoryBackend::new();
+
+        // Uninitialized backend should not have repository info
+        assert!(!backend.has_repository_info().await.unwrap());
+
+        // Getting info should fail
+        let result = backend.get_repository_info().await;
+        assert!(matches!(result, Err(BackendError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_repository_info_set_and_get() {
+        let backend = MemoryBackend::new();
+
+        let info = RepositoryInfo {
+            uuid: "test-uuid-123".to_string(),
+        };
+
+        // Set repository info
+        backend.set_repository_info(&info).await.unwrap();
+
+        // Now it should be initialized
+        assert!(backend.has_repository_info().await.unwrap());
+
+        // Get should return the info
+        let retrieved = backend.get_repository_info().await.unwrap();
+        assert_eq!(retrieved.uuid, "test-uuid-123");
+    }
+
+    #[tokio::test]
+    async fn test_repository_info_already_initialized() {
+        let backend = MemoryBackend::new();
+
+        let info1 = RepositoryInfo {
+            uuid: "uuid-1".to_string(),
+        };
+        let info2 = RepositoryInfo {
+            uuid: "uuid-2".to_string(),
+        };
+
+        // First set should succeed
+        backend.set_repository_info(&info1).await.unwrap();
+
+        // Second set should fail
+        let result = backend.set_repository_info(&info2).await;
+        assert!(matches!(result, Err(BackendError::AlreadyInitialized)));
+
+        // Original info should be preserved
+        let retrieved = backend.get_repository_info().await.unwrap();
+        assert_eq!(retrieved.uuid, "uuid-1");
+    }
+
+    #[tokio::test]
+    async fn test_new_initialized() {
+        let backend = MemoryBackend::new_initialized();
+
+        // Should already be initialized
+        assert!(backend.has_repository_info().await.unwrap());
+
+        // Get should succeed
+        let info = backend.get_repository_info().await.unwrap();
+        assert!(!info.uuid.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_new_initialized_with_uuid() {
+        let backend = MemoryBackend::new_initialized_with_uuid("custom-uuid".to_string());
+
+        assert!(backend.has_repository_info().await.unwrap());
+
+        let info = backend.get_repository_info().await.unwrap();
+        assert_eq!(info.uuid, "custom-uuid");
     }
 }

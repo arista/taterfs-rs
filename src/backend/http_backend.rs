@@ -49,6 +49,48 @@ impl HttpBackend {
 
 #[async_trait]
 impl RepoBackend for HttpBackend {
+    async fn has_repository_info(&self) -> Result<bool> {
+        let response = self
+            .client
+            .head(self.repository_info_url())
+            .send()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+
+        match response.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_FOUND => Ok(false),
+            status => Err(BackendError::Other(format!(
+                "unexpected status code: {}",
+                status
+            ))),
+        }
+    }
+
+    async fn set_repository_info(&self, info: &RepositoryInfo) -> Result<()> {
+        // Check if already initialized first
+        if self.has_repository_info().await? {
+            return Err(BackendError::AlreadyInitialized);
+        }
+
+        let response = self
+            .client
+            .put(self.repository_info_url())
+            .json(info)
+            .send()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(BackendError::Other(format!(
+                "failed to set repository info: {}",
+                response.status()
+            )))
+        }
+    }
+
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
         let response = self
             .client

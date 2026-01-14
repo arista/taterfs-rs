@@ -29,6 +29,10 @@ pub enum CliError {
     #[error("{0}")]
     Repo(#[from] crate::repo::RepoError),
 
+    /// File store error.
+    #[error("{0}")]
+    FileStore(#[from] crate::file_store::Error),
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -64,6 +68,13 @@ pub enum Command {
         #[command(subcommand)]
         command: commands::repo::RepoCommand,
     },
+
+    /// File store operations.
+    #[command(name = "file-store")]
+    FileStore {
+        #[command(subcommand)]
+        command: commands::file_store::FileStoreCommand,
+    },
 }
 
 // =============================================================================
@@ -83,6 +94,9 @@ impl Cli {
 
         match self.command {
             Command::Repo { command } => {
+                command.run(&app, &self.global).await?;
+            }
+            Command::FileStore { command } => {
                 command.run(&app, &self.global).await?;
             }
         }

@@ -88,6 +88,22 @@ impl<B: FsLikeRepoBackend> FsLikeRepoBackendAdapter<B> {
 
 #[async_trait]
 impl<B: FsLikeRepoBackend> RepoBackend for FsLikeRepoBackendAdapter<B> {
+    async fn has_repository_info(&self) -> Result<bool> {
+        self.backend.file_exists(REPOSITORY_INFO_PATH).await
+    }
+
+    async fn set_repository_info(&self, info: &RepositoryInfo) -> Result<()> {
+        // Check if already initialized
+        if self.backend.file_exists(REPOSITORY_INFO_PATH).await? {
+            return Err(BackendError::AlreadyInitialized);
+        }
+
+        // Write the repository info
+        let data = serde_json::to_vec(info)
+            .map_err(|e| BackendError::Other(format!("failed to serialize repository info: {}", e)))?;
+        self.backend.write_file(REPOSITORY_INFO_PATH, &data).await
+    }
+
     async fn get_repository_info(&self) -> Result<RepositoryInfo> {
         let data = self.backend.read_file(REPOSITORY_INFO_PATH).await?;
         let info: RepositoryInfo = serde_json::from_slice(&data)

@@ -18,6 +18,8 @@ pub struct RepositoryInfo {
 pub enum BackendError {
     /// The object was not found.
     NotFound,
+    /// The repository is already initialized.
+    AlreadyInitialized,
     /// An I/O error occurred.
     Io(std::io::Error),
     /// A custom error message.
@@ -28,6 +30,7 @@ impl std::fmt::Display for BackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BackendError::NotFound => write!(f, "not found"),
+            BackendError::AlreadyInitialized => write!(f, "repository already initialized"),
             BackendError::Io(e) => write!(f, "I/O error: {}", e),
             BackendError::Other(msg) => write!(f, "{}", msg),
         }
@@ -67,7 +70,18 @@ pub enum SwapResult {
 /// their content hash) and track the current root object ID.
 #[async_trait]
 pub trait RepoBackend: Send + Sync {
+    /// Check if repository info exists (i.e., if the repository is initialized).
+    async fn has_repository_info(&self) -> Result<bool>;
+
+    /// Set repository info during initialization.
+    ///
+    /// This should only be called once when the repository is first initialized.
+    /// Returns `BackendError::AlreadyInitialized` if called on an already-initialized repository.
+    async fn set_repository_info(&self, info: &RepositoryInfo) -> Result<()>;
+
     /// Get information about the repository.
+    ///
+    /// Returns `BackendError::NotFound` if the repository is not initialized.
     async fn get_repository_info(&self) -> Result<RepositoryInfo>;
 
     /// Read the current root object ID, if one exists.

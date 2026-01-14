@@ -8,15 +8,18 @@
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::backend::{BackendError, RepoBackend};
+use chrono::Utc;
+
+use crate::backend::{BackendError, RepoBackend, RepositoryInfo};
 use crate::caches::RepoCache;
 use crate::repository::{
-    Branches, Commit, Directory, File, JsonError, ObjectId, RepoObject, Root, from_json,
+    Branch, BranchListEntry, Branches, BranchesType, Commit, CommitMetadata, CommitType,
+    Directory, DirectoryType, File, JsonError, ObjectId, RepoObject, Root, RootType, from_json,
     to_canonical_json,
 };
 use crate::util::{
-    CapacityManager, Complete, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete, UsedCapacity,
-    WithComplete,
+    CapacityManager, Complete, Completes, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete,
+    UsedCapacity, WithComplete,
 };
 
 // =============================================================================
@@ -28,6 +31,8 @@ use crate::util::{
 pub enum RepoError {
     /// The object was not found.
     NotFound,
+    /// The repository is already initialized.
+    AlreadyInitialized,
     /// An I/O error occurred.
     Io(String),
     /// JSON serialization/deserialization error.
@@ -45,6 +50,7 @@ impl std::fmt::Display for RepoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RepoError::NotFound => write!(f, "not found"),
+            RepoError::AlreadyInitialized => write!(f, "repository already initialized"),
             RepoError::Io(msg) => write!(f, "I/O error: {}", msg),
             RepoError::Json(msg) => write!(f, "JSON error: {}", msg),
             RepoError::TypeMismatch { expected, actual } => {
@@ -61,6 +67,7 @@ impl From<BackendError> for RepoError {
     fn from(e: BackendError) -> Self {
         match e {
             BackendError::NotFound => RepoError::NotFound,
+            BackendError::AlreadyInitialized => RepoError::AlreadyInitialized,
             BackendError::Io(io_err) => RepoError::Io(io_err.to_string()),
             BackendError::Other(msg) => RepoError::Other(msg),
         }
@@ -83,6 +90,18 @@ pub type Result<T> = std::result::Result<T, RepoError>;
 /// For writes larger than this threshold, check if the object already exists
 /// in the backend before writing. This avoids redundant writes for large objects.
 pub const MAX_WRITE_WITHOUT_EXISTENCE_CHECK: u64 = 1024 * 1024; // 1 MB
+
+// =============================================================================
+// Initialization Configuration
+// =============================================================================
+
+/// Configuration for initializing a new repository.
+pub struct RepoInitialize {
+    /// Optional UUID for the repository. If not provided, one will be generated.
+    pub uuid: Option<String>,
+    /// Name of the default branch to create.
+    pub default_branch_name: String,
+}
 
 // =============================================================================
 // Flow Control Configuration
@@ -182,6 +201,131 @@ impl Repo {
             dedup_write: Dedup::new(),
             dedup_read: Dedup::new(),
         }
+    }
+
+    // =========================================================================
+    // Initialization
+    // =========================================================================
+
+    /// Check if the repository is initialized.
+    ///
+    /// A repository is considered initialized if it has repository info set.
+    pub async fn is_initialized(&self) -> Result<bool> {
+        Ok(self.backend.has_repository_info().await?)
+    }
+
+    /// Initialize a new repository with the given configuration.
+    ///
+    /// This method creates the initial repository structure:
+    /// - An empty Directory
+    /// - A Commit pointing to that directory with "Repo initialization" message
+    /// - A Branch with the specified default branch name pointing to the commit
+    /// - An empty Branches object for other branches
+    /// - A Root pointing to all of the above
+    ///
+    /// Returns an error if the repository is already initialized.
+    pub async fn initialize(&self, init: RepoInitialize) -> Result<()> {
+        // Check if already initialized
+        if self.backend.has_repository_info().await? {
+            return Err(RepoError::AlreadyInitialized);
+        }
+
+        // Generate UUID if not provided
+        let uuid = init.uuid.unwrap_or_else(generate_uuid);
+        let timestamp = Utc::now().to_rfc3339();
+
+        // Track all write completions
+        let completes = Completes::new();
+
+        // 1. Create and write an empty Directory
+        let empty_directory = Directory {
+            type_tag: DirectoryType::Directory,
+            entries: vec![],
+        };
+        let directory_write = self
+            .write_object(&RepoObject::Directory(empty_directory))
+            .await?;
+        let directory_id = directory_write.result.clone();
+        completes.add(directory_write.complete).unwrap();
+
+        // 2. Create and write a Commit
+        let commit = Commit {
+            type_tag: CommitType::Commit,
+            directory: directory_id,
+            parents: vec![],
+            metadata: Some(CommitMetadata {
+                timestamp: Some(timestamp.clone()),
+                author: None,
+                committer: None,
+                message: Some("Repo initialization".to_string()),
+            }),
+        };
+        let commit_write = self.write_object(&RepoObject::Commit(commit)).await?;
+        let commit_id = commit_write.result.clone();
+        completes.add(commit_write.complete).unwrap();
+
+        // 3. Create the Branch (note: Branch is embedded in BranchListEntry, not written separately)
+        let default_branch = Branch {
+            name: init.default_branch_name.clone(),
+            commit: commit_id,
+        };
+
+        // 4. Create and write an empty Branches object for other branches
+        let empty_branches = Branches {
+            type_tag: BranchesType::Branches,
+            branches: vec![],
+        };
+        let other_branches_write = self
+            .write_object(&RepoObject::Branches(empty_branches))
+            .await?;
+        let other_branches_id = other_branches_write.result.clone();
+        completes.add(other_branches_write.complete).unwrap();
+
+        // 5. Create the default branch as a Branches object containing just the default branch
+        let default_branch_branches = Branches {
+            type_tag: BranchesType::Branches,
+            branches: vec![BranchListEntry::Branch(default_branch)],
+        };
+        let default_branch_write = self
+            .write_object(&RepoObject::Branches(default_branch_branches))
+            .await?;
+        let default_branch_id = default_branch_write.result.clone();
+        completes.add(default_branch_write.complete).unwrap();
+
+        // 6. Create and write a Root
+        let root = Root {
+            type_tag: RootType::Root,
+            timestamp: timestamp.clone(),
+            default_branch_name: init.default_branch_name,
+            default_branch: default_branch_id,
+            other_branches: other_branches_id,
+            previous_root: None,
+        };
+        let root_write = self.write_object(&RepoObject::Root(root)).await?;
+        let root_id = root_write.result.clone();
+        completes.add(root_write.complete).unwrap();
+
+        // 7. Wait for all writes to complete
+        completes.done();
+        completes.complete().await.map_err(|e| {
+            RepoError::Other(format!("failed to write initialization objects: {}", e))
+        })?;
+
+        // 8. Set the current root
+        self.backend.write_current_root(&root_id).await?;
+
+        // 9. Write the repository info
+        let repo_info = RepositoryInfo { uuid };
+        self.backend.set_repository_info(&repo_info).await?;
+
+        Ok(())
+    }
+
+    /// Get repository information.
+    ///
+    /// Returns an error if the repository is not initialized.
+    pub async fn get_repository_info(&self) -> Result<RepositoryInfo> {
+        Ok(self.backend.get_repository_info().await?)
     }
 
     // =========================================================================
@@ -592,6 +736,16 @@ fn compute_object_id(data: &[u8]) -> ObjectId {
     hex::encode(result)
 }
 
+/// Generate a UUID for repository initialization.
+fn generate_uuid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:032x}", now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,5 +909,87 @@ mod tests {
         // Now it exists
         assert!(repo.current_root_exists().await.unwrap());
         assert_eq!(repo.read_current_root().await.unwrap(), root_id);
+    }
+
+    #[tokio::test]
+    async fn test_is_initialized_uninitialized() {
+        let backend = MemoryBackend::new();
+        let cache = TestCache::new();
+        let repo = Repo::new(backend, cache);
+
+        // Uninitialized repo should return false
+        assert!(!repo.is_initialized().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_is_initialized_initialized() {
+        let backend = MemoryBackend::new_initialized();
+        let cache = TestCache::new();
+        let repo = Repo::new(backend, cache);
+
+        // Pre-initialized backend should return true
+        assert!(repo.is_initialized().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_creates_repo_structure() {
+        let backend = MemoryBackend::new();
+        let cache = TestCache::new();
+        let repo = Repo::new(backend, cache);
+
+        // Initialize with default branch name
+        let init = RepoInitialize {
+            uuid: Some("test-uuid-12345".to_string()),
+            default_branch_name: "main".to_string(),
+        };
+        repo.initialize(init).await.unwrap();
+
+        // Now it should be initialized
+        assert!(repo.is_initialized().await.unwrap());
+
+        // Should have a current root
+        assert!(repo.current_root_exists().await.unwrap());
+        let root_id = repo.read_current_root().await.unwrap();
+
+        // Read and verify the root
+        let root = repo.read_root(&root_id).await.unwrap();
+        assert_eq!(root.default_branch_name, "main");
+
+        // Get repository info
+        let info = repo.get_repository_info().await.unwrap();
+        assert_eq!(info.uuid, "test-uuid-12345");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_already_initialized_error() {
+        let backend = MemoryBackend::new_initialized();
+        let cache = TestCache::new();
+        let repo = Repo::new(backend, cache);
+
+        // Try to initialize an already initialized repo
+        let init = RepoInitialize {
+            uuid: None,
+            default_branch_name: "main".to_string(),
+        };
+        let result = repo.initialize(init).await;
+
+        assert!(matches!(result, Err(RepoError::AlreadyInitialized)));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_generates_uuid_if_not_provided() {
+        let backend = MemoryBackend::new();
+        let cache = TestCache::new();
+        let repo = Repo::new(backend, cache);
+
+        let init = RepoInitialize {
+            uuid: None,
+            default_branch_name: "main".to_string(),
+        };
+        repo.initialize(init).await.unwrap();
+
+        // Should have generated a UUID
+        let info = repo.get_repository_info().await.unwrap();
+        assert!(!info.uuid.is_empty());
     }
 }

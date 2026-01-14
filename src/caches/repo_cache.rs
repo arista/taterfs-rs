@@ -116,3 +116,19 @@ impl RepoCache for NoopCache {
         Ok(())
     }
 }
+
+// =============================================================================
+// NoopCaches
+// =============================================================================
+
+/// A no-op implementation of [`RepoCaches`] that always returns [`NoopCache`].
+///
+/// Use this as a placeholder when a real cache implementation is not available.
+pub struct NoopCaches;
+
+#[async_trait]
+impl RepoCaches for NoopCaches {
+    async fn get_cache(&self, _uuid: &str) -> std::result::Result<Arc<dyn RepoCache>, String> {
+        Ok(Arc::new(NoopCache))
+    }
+}

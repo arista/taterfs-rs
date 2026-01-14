@@ -49,6 +49,7 @@ struct Waiter<V, E> {
 /// ```
 #[derive(Clone)]
 pub struct Dedup<K, V, E> {
+    #[allow(clippy::type_complexity)]
     in_flight: Arc<Mutex<HashMap<K, Arc<Waiter<V, E>>>>>,
 }
 

@@ -1,6 +1,6 @@
 # List Builder
 
-There are several repository structures that conceptually represent lists of indeterminate length, but are split up into a "tree" of objects that spreads the list into more manageable units.  These structures include Branches, File, and Directory.
+There are several repository structures that conceptually represent lists of indeterminate length, but are split up into a "tree" of objects that spreads the list into more manageable units.  These structures include Branches, File, and Directory (see [backend storage model](./backend_storage_model.md)).
 
 The process for building up these structures is essentially the same.  Items are supplied sequentially, and are added to an instance of the object.  When an object "fills up", it is written to the repository, and an entry for it is added to the next higher object in the hierarchy.  If the object is already at the top of the hierarchy, then a new object is created "above" it to act as the new root of the hierarchy.
 
@@ -56,12 +56,18 @@ add(leaf: LEAF, complete: Complete)
 add_item_at_level(item: ITEM, ix: usize, complete: Complete)
 ```
 
+* ensure_space_at(ix)    
+* add item to stack[ix].items
+* add complete to stack[ix].completes
+
+
+```
+ensure_space_at(ix: usize)
+```
 * if stack_item_full_at(ix)
     * ensure_parent_of(ix)
     * rollup_stack_item_at(ix)
-    * clear_stack_level(ix)
-* force_add_item_at_level(item, ix, complete)
-
+    * clear_stack_item_at(ix)
 
 ```
 stack_item_full_at(ix: usize) -> bool
@@ -84,17 +90,10 @@ ensure_parent_of(ix: usize)
 
 
 ```
-clear_stack_level(ix: usize)
+clear_stack_item_at(ix: usize)
 ```
-* Clear out stack[ix].items
+* set stack[ix].items to []
 * set stack[ix].completes to a new Completes
-
-
-```
-force_add_item_at_level(item: ITEM, ix: usize, complete: Complete)
-```
-* add item to stack[ix].items
-* add complete to stack[ix].completes
 
 
 ```
@@ -110,7 +109,7 @@ rollup_stack_item_at(ix: usize)
 ```
 stack_item_to_object(ix: usize) -> (OBJ, hash, complete)
 ```
-* Form the stack[ix].items into the appropriate nested OBJ (Branches, Directory, File)
+* Form the stack[ix].items into the appropriate OBJ (Branches, Directory, File)
 * Write the OBJ to the repo, get its hash and complete
 * Set the complete so that it sets the cache's exists flag for the hash when it completes
 * Add the complete to stack[ix].completes

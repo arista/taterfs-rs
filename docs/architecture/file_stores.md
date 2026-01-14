@@ -121,7 +121,7 @@ A FileDest implementation should do its best to avoid leaving a partially-writte
 
 Mutliple file stores will be expected to implement the following "ignore" rules in scan():
 
-* The directories ".tfs/" and ".git/" are always ignored
+* If a global_ignores is specified in the [filestores] section of the [configuration](./configuration.md), then those entries are treated as a top-level ignore file in gitignore format.
 * If a ".gitignore" is present, then its directives are followed the same way that git works
 * If a ".tfsignore" is present, it is treated the same as ".gitignore"
 * If both ".gitignore" and ".tfsignore" are present, they are treated as concatenated with ".gitignore" patterns first

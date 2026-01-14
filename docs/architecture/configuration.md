@@ -17,6 +17,9 @@ The following rules are applied to find the config file:
     * path={default /tmp/tfsconfig-cache}
     * no_cache={true|false, default false} - if true, then the caches are bypassed
 
+* [filestores] section
+    * global_ignores={comma-separated list of gitignore-format entries to be used by FileSource.scan(), default ".git/,.tfs/"}
+
 * [memory] section - configuration and maximums that will be applied to operations that potentially allocate and hold memory.  "none" may be specifed, in which case no capacity manager is used for memory limits
     * max={default 100MB}
 

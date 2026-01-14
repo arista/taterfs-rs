@@ -8,8 +8,8 @@ use crate::file_store::{DirectoryScanEvent, FileSource};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
-/// Directories that are always ignored regardless of ignore files.
-const ALWAYS_IGNORED_DIRS: &[&str] = &[".git", ".tfs"];
+/// Default global ignore patterns if none are configured.
+const DEFAULT_GLOBAL_IGNORES: &[&str] = &[".git/", ".tfs/"];
 
 /// Helper for applying ignore rules during file scanning.
 ///
@@ -17,15 +17,44 @@ const ALWAYS_IGNORED_DIRS: &[&str] = &[".git", ".tfs"];
 /// entered and exited. It loads .gitignore and .tfsignore files from
 /// each directory and applies their rules cumulatively.
 pub struct ScanIgnoreHelper {
+    /// Matcher for global ignore patterns (from config).
+    global_matcher: Option<Gitignore>,
     /// Stack of ignore matchers, one per directory level.
     /// Each entry contains the gitignore matcher for that directory.
     stack: Vec<Option<Gitignore>>,
 }
 
 impl ScanIgnoreHelper {
-    /// Create a new ScanIgnoreHelper.
+    /// Create a new ScanIgnoreHelper with default global ignores.
     pub fn new() -> Self {
-        Self { stack: Vec::new() }
+        Self::with_global_ignores(
+            DEFAULT_GLOBAL_IGNORES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+
+    /// Create a new ScanIgnoreHelper with the specified global ignore patterns.
+    ///
+    /// The patterns are interpreted as gitignore patterns. Common patterns:
+    /// - `.git/` - ignore the .git directory
+    /// - `.tfs/` - ignore the .tfs directory
+    /// - `*.log` - ignore all .log files
+    pub fn with_global_ignores(patterns: Vec<String>) -> Self {
+        let global_matcher = if patterns.is_empty() {
+            None
+        } else {
+            let mut builder = GitignoreBuilder::new("");
+            for pattern in &patterns {
+                let _ = builder.add_line(None, pattern);
+            }
+            builder.build().ok()
+        };
+        Self {
+            global_matcher,
+            stack: Vec::new(),
+        }
     }
 
     /// Process a scan event, updating internal state.
@@ -53,9 +82,15 @@ impl ScanIgnoreHelper {
     /// The `is_dir` parameter indicates whether the entry is a directory,
     /// which affects pattern matching (e.g., patterns ending with `/`).
     pub fn should_ignore(&self, name: &str, is_dir: bool) -> bool {
-        // Always ignore .git and .tfs directories
-        if is_dir && ALWAYS_IGNORED_DIRS.contains(&name) {
-            return true;
+        // Check global ignore patterns first
+        if let Some(ref matcher) = self.global_matcher {
+            let matched = matcher.matched(Path::new(name), is_dir);
+            if matched.is_ignore() {
+                return true;
+            }
+            if matched.is_whitelist() {
+                return false;
+            }
         }
 
         // Check against all active ignore matchers (from root to current)
@@ -294,5 +329,42 @@ mod tests {
 
         assert!(helper.should_ignore("debug.log", false));
         assert!(!helper.should_ignore("important.log", false));
+    }
+
+    #[tokio::test]
+    async fn test_custom_global_ignores() {
+        // Custom ignores that don't include .git or .tfs
+        let helper = ScanIgnoreHelper::with_global_ignores(vec![
+            "node_modules/".to_string(),
+            "target/".to_string(),
+        ]);
+
+        // These should be ignored with custom patterns
+        assert!(helper.should_ignore("node_modules", true));
+        assert!(helper.should_ignore("target", true));
+
+        // .git and .tfs should NOT be ignored with custom patterns
+        assert!(!helper.should_ignore(".git", true));
+        assert!(!helper.should_ignore(".tfs", true));
+    }
+
+    #[tokio::test]
+    async fn test_empty_global_ignores() {
+        // Empty global ignores - nothing ignored by default
+        let helper = ScanIgnoreHelper::with_global_ignores(vec![]);
+
+        assert!(!helper.should_ignore(".git", true));
+        assert!(!helper.should_ignore(".tfs", true));
+        assert!(!helper.should_ignore("node_modules", true));
+    }
+
+    #[tokio::test]
+    async fn test_global_ignores_with_file_patterns() {
+        let helper =
+            ScanIgnoreHelper::with_global_ignores(vec![".git/".to_string(), "*.bak".to_string()]);
+
+        assert!(helper.should_ignore(".git", true));
+        assert!(helper.should_ignore("file.bak", false));
+        assert!(!helper.should_ignore("file.txt", false));
     }
 }

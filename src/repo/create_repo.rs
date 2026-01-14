@@ -148,10 +148,7 @@ impl ParsedRepoSpec {
 
     fn parse_file_url(url: &str) -> Result<Self> {
         // Format: file:///path/to/repo or file://path/to/repo
-        let path = url
-            .strip_prefix("file://")
-            .unwrap()
-            .to_string();
+        let path = url.strip_prefix("file://").unwrap().to_string();
 
         if path.is_empty() {
             return Err(CreateRepoError::InvalidRepoSpec(
@@ -187,9 +184,9 @@ impl ParsedRepoSpec {
             ))
         })?;
 
-        let repo_config = config.get_repository(name).ok_or_else(|| {
-            CreateRepoError::RepositoryNotFound(name.to_string())
-        })?;
+        let repo_config = config
+            .get_repository(name)
+            .ok_or_else(|| CreateRepoError::RepositoryNotFound(name.to_string()))?;
 
         // Parse the URL from the config
         let mut parsed = Self::parse(&repo_config.url, None)?;
@@ -399,10 +396,7 @@ mod tests {
         assert_eq!(spec.backend_type, BackendType::S3);
         assert_eq!(spec.location, "mybucket");
         assert_eq!(spec.prefix, Some("prefix".to_string()));
-        assert_eq!(
-            spec.endpoint_url,
-            Some("http://localhost:9000".to_string())
-        );
+        assert_eq!(spec.endpoint_url, Some("http://localhost:9000".to_string()));
         assert_eq!(spec.region, Some("us-west-2".to_string()));
     }
 

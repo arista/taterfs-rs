@@ -68,6 +68,14 @@ pub struct MemoryConfig {
     pub max: Limit<ByteSize>,
 }
 
+/// [filestores] section - global filestore settings.
+#[derive(Debug, Clone)]
+pub struct FilestoresConfig {
+    /// Global ignore patterns applied to all file store scans.
+    /// These are parsed as gitignore patterns.
+    pub global_ignores: Vec<String>,
+}
+
 /// [network] section - defaults for all network-based resources.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -108,6 +116,7 @@ pub struct FilestoreConfig {
 pub struct Config {
     pub cache: CacheConfig,
     pub memory: MemoryConfig,
+    pub filestores_config: FilestoresConfig,
     pub network: NetworkConfig,
     pub s3: S3Config,
     pub repositories: HashMap<String, RepositoryConfig>,

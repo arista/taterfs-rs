@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use super::fs_like_repo_backend::FsLikeRepoBackend;
-use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
+use super::repo_backend::{
+    BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult,
+};
 
 const REPOSITORY_INFO_PATH: &str = "repository_info.json";
 

@@ -262,9 +262,7 @@ mod tests {
         let nc = Arc::new(NotifyComplete::new());
         let nc2 = nc.clone();
 
-        let handle = tokio::spawn(async move {
-            nc2.complete().await
-        });
+        let handle = tokio::spawn(async move { nc2.complete().await });
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         nc.notify_complete();
@@ -285,9 +283,7 @@ mod tests {
         let nc = Arc::new(NotifyComplete::new());
         let nc2 = nc.clone();
 
-        let handle = tokio::spawn(async move {
-            nc2.complete().await
-        });
+        let handle = tokio::spawn(async move { nc2.complete().await });
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         nc.notify_error("operation failed");
@@ -313,9 +309,7 @@ mod tests {
         let c = Arc::new(c);
         let c2 = c.clone();
 
-        let handle = tokio::spawn(async move {
-            c2.complete().await
-        });
+        let handle = tokio::spawn(async move { c2.complete().await });
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         nc.notify_complete();

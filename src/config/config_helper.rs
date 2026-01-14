@@ -58,6 +58,15 @@ impl ConfigHelper {
     }
 
     // =========================================================================
+    // Filestore Global Settings
+    // =========================================================================
+
+    /// Get the global ignore patterns for file store scanning.
+    pub fn global_ignores(&self) -> &[String] {
+        &self.config.filestores_config.global_ignores
+    }
+
+    // =========================================================================
     // Capacity Limits Resolution
     // =========================================================================
 
@@ -89,7 +98,10 @@ impl ConfigHelper {
     /// Resolve capacity limits for a repository config.
     ///
     /// Useful when you have the config from a URL parse rather than by name.
-    pub fn resolve_repository_config_limits(&self, repo: &RepositoryConfig) -> ResolvedCapacityLimits {
+    pub fn resolve_repository_config_limits(
+        &self,
+        repo: &RepositoryConfig,
+    ) -> ResolvedCapacityLimits {
         let s3 = self.resolve_s3_limits();
         resolve_limits_with_parent(&repo.limits, &s3)
     }
@@ -106,7 +118,10 @@ impl ConfigHelper {
     /// Resolve capacity limits for a filestore config.
     ///
     /// Useful when you have the config from a URL parse rather than by name.
-    pub fn resolve_filestore_config_limits(&self, store: &FilestoreConfig) -> ResolvedCapacityLimits {
+    pub fn resolve_filestore_config_limits(
+        &self,
+        store: &FilestoreConfig,
+    ) -> ResolvedCapacityLimits {
         let s3 = self.resolve_s3_limits();
         resolve_limits_with_parent(&store.limits, &s3)
     }
@@ -133,7 +148,10 @@ impl ConfigHelper {
     }
 
     /// Resolve S3 settings for a repository config.
-    pub fn resolve_repository_config_settings(&self, repo: &RepositoryConfig) -> ResolvedS3Settings {
+    pub fn resolve_repository_config_settings(
+        &self,
+        repo: &RepositoryConfig,
+    ) -> ResolvedS3Settings {
         let s3 = self.resolve_s3_settings();
         ResolvedS3Settings {
             endpoint_url: repo.settings.endpoint_url.clone().or(s3.endpoint_url),
@@ -247,7 +265,7 @@ fn resolve_limits_with_parent(
 mod tests {
     use super::*;
     use crate::config::{
-        CacheConfig, MemoryConfig, NetworkConfig, S3Config, S3Settings,
+        CacheConfig, FilestoresConfig, MemoryConfig, NetworkConfig, S3Config, S3Settings,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -260,6 +278,9 @@ mod tests {
             },
             memory: MemoryConfig {
                 max: Limit::Value(ByteSize(100 * 1024 * 1024)),
+            },
+            filestores_config: FilestoresConfig {
+                global_ignores: vec![".git/".to_string(), ".tfs/".to_string()],
             },
             network: NetworkConfig {
                 limits: CapacityLimits {
@@ -294,8 +315,8 @@ mod tests {
                             region: Some("us-west-2".to_string()),
                         },
                         limits: CapacityLimits {
-                            max_concurrent_requests: Limit::Value(10), // Override s3
-                            max_requests_per_second: Limit::Inherit,   // Inherit from s3
+                            max_concurrent_requests: Limit::Value(10),  // Override s3
+                            max_requests_per_second: Limit::Inherit,    // Inherit from s3
                             max_read_bytes_per_second: Limit::Disabled, // Disable
                             max_write_bytes_per_second: Limit::Inherit,
                             max_total_bytes_per_second: Limit::Inherit,
@@ -347,7 +368,10 @@ mod tests {
         let settings = helper.resolve_repository_settings("main").unwrap();
 
         // endpoint_url inherited from s3
-        assert_eq!(settings.endpoint_url, Some("http://localhost:9000".to_string()));
+        assert_eq!(
+            settings.endpoint_url,
+            Some("http://localhost:9000".to_string())
+        );
         // region overridden at repo level
         assert_eq!(settings.region, Some("us-west-2".to_string()));
     }
@@ -357,5 +381,12 @@ mod tests {
         let helper = ConfigHelper::new(test_config());
         assert!(helper.resolve_repository_limits("nonexistent").is_none());
         assert!(helper.resolve_repository_settings("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_global_ignores() {
+        let helper = ConfigHelper::new(test_config());
+        let ignores = helper.global_ignores();
+        assert_eq!(ignores, &[".git/", ".tfs/"]);
     }
 }

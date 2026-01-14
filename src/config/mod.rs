@@ -5,8 +5,8 @@ mod read_config;
 mod types;
 
 pub use config_helper::{ConfigHelper, ResolvedCapacityLimits, ResolvedS3Settings};
-pub use read_config::{read_config, ConfigError, ConfigResult, ConfigSource};
+pub use read_config::{ConfigError, ConfigResult, ConfigSource, read_config};
 pub use types::{
-    ByteSize, CacheConfig, CapacityLimits, Config, FilestoreConfig, Limit, MemoryConfig,
-    NetworkConfig, RepositoryConfig, S3Config, S3Settings,
+    ByteSize, CacheConfig, CapacityLimits, Config, FilestoreConfig, FilestoresConfig, Limit,
+    MemoryConfig, NetworkConfig, RepositoryConfig, S3Config, S3Settings,
 };

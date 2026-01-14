@@ -290,11 +290,16 @@ impl CreateRepoContext {
     ///
     /// If the spec came from a named repository, uses the config limits.
     /// Otherwise, uses S3 or network defaults based on backend type.
+    ///
+    /// For file repositories, no capacity managers are used since local disk
+    /// access doesn't benefit from throughput or request rate limiting.
     pub fn create_managers_for_spec(&self, spec: &ParsedRepoSpec) -> CapacityManagers {
-        // For now, use S3 defaults for S3 backends, network defaults for others
         match spec.backend_type {
             BackendType::S3 => self.s3_managers.clone(),
-            BackendType::FileSystem | BackendType::Http => self.network_managers.clone(),
+            BackendType::Http => self.network_managers.clone(),
+            // File repositories don't use flow control - local disk access
+            // doesn't benefit from throughput or request rate limiting
+            BackendType::FileSystem => CapacityManagers::default(),
         }
     }
 

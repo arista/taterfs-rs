@@ -18,6 +18,7 @@ This document describes the high-level architecture of taterfs-rs.
 * [configuration](docs/architecture/configuration.md)
 * [completes](docs/architecture/completes.md)
 * [app](docs/architecture/app.md)
+* [cli](docs/architecture/cli.md)
 
 ### Entry Point
 

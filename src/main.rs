@@ -1,5 +1,9 @@
-mod backend;
+use taterfs_rs::cli;
 
-fn main() {
-    println!("Hello, world!");
+#[tokio::main]
+async fn main() {
+    if let Err(e) = cli::main().await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 }

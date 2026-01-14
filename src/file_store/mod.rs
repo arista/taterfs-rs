@@ -5,12 +5,17 @@
 //! - [`FileDest`] - allows writing directory and file data
 
 mod chunk_sizes;
+mod create_file_store;
 mod fs_file_store;
 mod memory_file_store;
 mod s3_file_store;
 mod scan_ignore_helper;
 
 pub use chunk_sizes::{CHUNK_SIZES, next_chunk_size};
+pub use create_file_store::{
+    CreateFileStoreContext, CreateFileStoreError, FileStoreType, ParsedFileStoreSpec,
+    create_file_store,
+};
 pub use fs_file_store::FsFileStore;
 pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
 pub use s3_file_store::{S3FileSource, S3FileSourceConfig};

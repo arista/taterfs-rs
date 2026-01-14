@@ -253,3 +253,49 @@ This implementation is pointed at an HTTP url.
 
 TODO: What HTTP API should it expect the server to implement?  Does WebDAV make sense (in which case, maybe it should be called WebDavFileSource)?  Should it try to work against a variety of HTTP api's?
 
+## Specifying and Creating FileStores
+
+When the application runs, it will need a way to specify which FileStores to use.  Those specifications will need to have enough information to construct a specific FileStore implementation, connected to particular caches, and capacity managers.  Some of that can be provided through configuration, while also providing a mechanism to override settings.
+
+The basic way to reference a file store is through a URL:
+
+
+```
+s3://{bucket}/{prefix}
+file://{directory}
+http://...
+```
+
+Each of those URL's would lead to the creation of an S3FileStore, FsFileStore, or HttpFileStore
+
+Some file store types might require additional parmeters.  The S3FileStore, for example, can optionally take an endpoint_url and a region.  Those can be specified as query parameters to the URL:
+
+```
+s3://{bucket}/{prefix}?endpoint_url=...&region=...
+```
+
+Besides URL's, a file store can also be specifed by name, in which case its parameters are taken from the [filestore.{name}] section of the [config file](./configuration.md), with an error if that named file store is not found.  The config file can also specify defaults for parameters like endpoint_url and region, if they haven't been specified in the url.
+
+The capacity managers also need to be obtained.  There are potentially multiple sets of capacity managers - the ones corresponding to the [network] section of the config file, the ones corresponding to the [s3] section of the config file, then ones that might need to be created specifically for the file store.  For an FsFileStore, no throughput or request rate capacity managers should be used.
+
+Once all of those elements are obtained, then the file store can be created.
+
+All of this should be encapsulated in:
+
+```
+async create_file_store(file_store_spec: string, ctx: CreateFileStoreContext) -> Arc<FileStore>
+
+CreateRepoContext {
+  network_capacity_managers() -> CapacityManagers
+  s3_capacity_managers() -> CapacityManagers
+}
+
+CapacityManagers {
+  concurrent_requests() -> CapacityManager
+  request_rate() -> CapacityManager
+  read_throughput() -> CapacityManager
+  write_throughput() -> CapacityManager
+  total_throughput() -> CapacityManager
+}
+```
+

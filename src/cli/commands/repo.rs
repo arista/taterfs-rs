@@ -273,7 +273,10 @@ pub struct ReadArgs {
     pub repo: RepoArgs,
 
     /// The object ID to read.
-    pub object_id: String,
+    pub object_id: Option<String>,
+
+    #[command(flatten)]
+    pub input: InputSource,
 
     #[command(flatten)]
     pub output: OutputSink,
@@ -284,7 +287,8 @@ impl ReadArgs {
         let repo_ctx = self.repo.to_create_repo_context(false);
         let repo = app.create_repo(repo_ctx).await?;
 
-        let buffer = repo.read(&self.object_id, None).await?;
+        let object_id = self.input.read(self.object_id.as_deref()).await?;
+        let buffer = repo.read(&object_id, None).await?;
         let data: &[u8] = &buffer;
 
         if global.json {

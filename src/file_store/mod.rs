@@ -119,6 +119,10 @@ pub type ScanEvents = Pin<Box<dyn futures::Stream<Item = Result<ScanEvent>> + Se
 
 /// Content retrieved from a source chunk.
 pub struct SourceChunkContent {
+    /// Offset of this chunk within the file.
+    pub offset: u64,
+    /// Size of this chunk in bytes.
+    pub size: u64,
     /// The chunk data.
     pub bytes: Arc<ManagedBuffer>,
     /// SHA-256 hash of the content in lower-case hexadecimal.
@@ -145,6 +149,10 @@ pub trait SourceChunk: Send + Sync {
 
 /// Async iterator over source chunks.
 pub type SourceChunks = Pin<Box<dyn futures::Stream<Item = Result<Box<dyn SourceChunk>>> + Send>>;
+
+/// Async iterator over source chunk contents.
+pub type SourceChunkContents =
+    Pin<Box<dyn futures::Stream<Item = Result<SourceChunkContent>> + Send>>;
 
 // =============================================================================
 // Directory Listing
@@ -174,6 +182,15 @@ pub trait FileSource: Send + Sync {
     /// Chunks are yielded lazily - content is not fetched until
     /// `SourceChunk::get()` is called.
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>>;
+
+    /// Get chunk contents for a file, given a stream of chunks.
+    ///
+    /// Similar to iterating over `get_source_chunks` and calling `get()` on each,
+    /// but allows implementations to fetch multiple chunks concurrently while
+    /// still returning them in order.
+    ///
+    /// The chunks are returned in the same order as the input stream.
+    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents>;
 
     /// Get information about a file or directory at the given path.
     ///

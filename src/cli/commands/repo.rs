@@ -70,7 +70,14 @@ pub struct InitializeArgs {
 
     /// Name of the default branch.
     #[arg(long, default_value = "main")]
-    pub default_branch: String,
+    pub default_branch_name: String,
+
+    /// Repository UUID (generated if not specified).
+    #[arg(long)]
+    pub uuid: Option<String>,
+
+    #[command(flatten)]
+    pub output: OutputSink,
 }
 
 impl InitializeArgs {
@@ -79,16 +86,21 @@ impl InitializeArgs {
         let repo = app.create_repo(repo_ctx).await?;
 
         let init = RepoInitialize {
-            uuid: None,
-            default_branch_name: self.default_branch,
+            uuid: self.uuid,
+            default_branch_name: self.default_branch_name,
         };
 
         repo.initialize(init).await?;
 
+        // Get and output the repository info
+        let info = repo.get_repository_info().await?;
+
         if global.json {
-            println!("{{\"status\": \"initialized\"}}");
+            self.output
+                .write(&RepositoryInfoOutput { uuid: info.uuid.clone() }, true)
+                .await?;
         } else {
-            println!("Repository initialized");
+            self.output.write_str(&info.uuid).await?;
         }
 
         Ok(())

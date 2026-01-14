@@ -25,8 +25,10 @@ Other common arguments:
 
 ```
 tfs repo initialize {repo spec}
+  [--default-branch-name {default branch name}]
+  [--uuid {repository uuid}]
 ```
-Initialize the given repo
+Initialize the given repo.  Once initialized, print the repository's RepositoryInfo.  If "--json" is specified, then the output will be formatted as pretty-printed JSON, otherwise it will remain the raw output.  If {output file} is specified then the generated result will be written to the given file, otherwise the generated results will be written to STDOUT.
 
 
 ```

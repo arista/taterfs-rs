@@ -26,8 +26,8 @@ async read_current_root() -> ObjectId
 async write_current_root(root: Object_id)
 async object_exists(id: ObjectId) -> bool
 
-async write(id: ObjectId, bytes: Bytes) -> WithComplete<()>
-async read(id: ObjectId, expected_size: Option<u64>) -> Bytes
+async write(id: ObjectId, bytes: Arc<ManagedBuffer>) -> WithComplete<()>
+async read(id: ObjectId, expected_size: Option<u64>) -> Arc<ManagedBuffer>
 
 async write_object(obj: RepoObject) -> WithComplete<ObjectId>
 async read_object(id: ObjectId) -> RepoObject
@@ -41,6 +41,8 @@ async read_file(id: ObjectId) -> File
 The expected_size passed to read is used when interacting with the throughput limiters.  If no expected_size is passed, then once the object is read and the expected_size is known, the throughput limiters are called at that point.  For the write calls, the size is known up front, so the size can be passed to the capacity managers.
 
 The read_{object type} functions are convenience functions that effectively call read_object and "cast" to the appropriate object, erroring if the actual object doesn't match the requested type.
+
+The write functions return WithComplete structures very quickly, but are not actually finished until their WithComplete.complete is complete.
 
 The Repo is configured with:
 

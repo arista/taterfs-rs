@@ -62,6 +62,22 @@ impl CapacityManagers {
             read_throughput_limiter: self.read_throughput.clone(),
             write_throughput_limiter: self.write_throughput.clone(),
             total_throughput_limiter: self.total_throughput.clone(),
+            managed_buffers: None,
+        }
+    }
+
+    /// Convert to FlowControl with a ManagedBuffers instance.
+    pub fn to_flow_control_with_buffers(
+        &self,
+        managed_buffers: crate::util::ManagedBuffers,
+    ) -> FlowControl {
+        FlowControl {
+            concurrent_request_limiter: self.concurrent_requests.clone(),
+            request_rate_limiter: self.request_rate.clone(),
+            read_throughput_limiter: self.read_throughput.clone(),
+            write_throughput_limiter: self.write_throughput.clone(),
+            total_throughput_limiter: self.total_throughput.clone(),
+            managed_buffers: Some(managed_buffers),
         }
     }
 }

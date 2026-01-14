@@ -17,7 +17,7 @@ This document describes the high-level architecture of taterfs-rs.
 * [repository specification](docs/architecture/repository_specification.md)
 * [configuration](docs/architecture/configuration.md)
 * [completes](docs/architecture/completes.md)
-* [cli](docs/architecture/cli.md)
+* [app](docs/architecture/app.md)
 
 ### Entry Point
 

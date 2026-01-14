@@ -6,6 +6,7 @@ use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, FileStore, Result,
     ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
 };
+use crate::util::ManagedBuffers;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream;
@@ -149,6 +150,8 @@ enum TreeNode {
 /// An in-memory FileStore implementation, primarily for testing.
 pub struct MemoryFileStore {
     root: BTreeMap<String, TreeNode>,
+    /// Buffer manager for chunk allocation.
+    managed_buffers: ManagedBuffers,
 }
 
 impl MemoryFileStore {
@@ -204,13 +207,21 @@ impl MemoryFileStore {
 /// Builder for constructing a MemoryFileStore.
 pub struct MemoryFileStoreBuilder {
     root: BTreeMap<String, TreeNode>,
+    managed_buffers: ManagedBuffers,
 }
 
 impl MemoryFileStoreBuilder {
     fn new() -> Self {
         Self {
             root: BTreeMap::new(),
+            managed_buffers: ManagedBuffers::new(),
         }
+    }
+
+    /// Set the ManagedBuffers for buffer allocation.
+    pub fn with_managed_buffers(mut self, managed_buffers: ManagedBuffers) -> Self {
+        self.managed_buffers = managed_buffers;
+        self
     }
 
     /// Add an entry at the given path.
@@ -266,7 +277,10 @@ impl MemoryFileStoreBuilder {
 
     /// Build the MemoryFileStore.
     pub fn build(self) -> MemoryFileStore {
-        MemoryFileStore { root: self.root }
+        MemoryFileStore {
+            root: self.root,
+            managed_buffers: self.managed_buffers,
+        }
     }
 }
 
@@ -279,6 +293,7 @@ struct MemorySourceChunk {
     file: MemoryFile,
     offset: u64,
     size: u64,
+    managed_buffers: ManagedBuffers,
 }
 
 #[async_trait]
@@ -298,8 +313,9 @@ impl SourceChunk for MemorySourceChunk {
             hasher.update(&data);
             format!("{:x}", hasher.finalize())
         };
+        let managed_buffer = self.managed_buffers.get_buffer_with_data(data).await;
         Ok(SourceChunkContent {
-            bytes: Bytes::from(data),
+            bytes: Arc::new(managed_buffer),
             hash,
         })
     }
@@ -343,7 +359,7 @@ impl FileSource for MemoryFileStore {
             }
         };
 
-        let chunks = compute_chunks(&file);
+        let chunks = compute_chunks(&file, self.managed_buffers.clone());
         Ok(Some(Box::pin(stream::iter(
             chunks
                 .into_iter()
@@ -480,7 +496,7 @@ async fn scan_tree_with_ignore(
 }
 
 /// Compute the chunk boundaries for a file.
-fn compute_chunks(file: &MemoryFile) -> Vec<MemorySourceChunk> {
+fn compute_chunks(file: &MemoryFile, managed_buffers: ManagedBuffers) -> Vec<MemorySourceChunk> {
     let total_size = file.size();
     let mut chunks = Vec::new();
     let mut offset = 0u64;
@@ -493,6 +509,7 @@ fn compute_chunks(file: &MemoryFile) -> Vec<MemorySourceChunk> {
             file: file.clone(),
             offset,
             size: chunk_size,
+            managed_buffers: managed_buffers.clone(),
         });
 
         offset += chunk_size;

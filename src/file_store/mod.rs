@@ -20,6 +20,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
+
+use crate::util::ManagedBuffer;
 
 /// Result type for file store operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -115,10 +118,9 @@ pub type ScanEvents = Pin<Box<dyn futures::Stream<Item = Result<ScanEvent>> + Se
 // =============================================================================
 
 /// Content retrieved from a source chunk.
-#[derive(Debug, Clone)]
 pub struct SourceChunkContent {
     /// The chunk data.
-    pub bytes: Bytes,
+    pub bytes: Arc<ManagedBuffer>,
     /// SHA-256 hash of the content in lower-case hexadecimal.
     pub hash: String,
 }

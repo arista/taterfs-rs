@@ -83,7 +83,7 @@ Besides URL's, a repository can also be specifed by name, in which case its para
 
 Once the backend can be created, the next step is to locate its cache.  This is done by calling get_repository_info() on the backend, retrieving the repository's uuid, then calling get_repository_cache() from the RepositoryCaches.
 
-The capacity managers also need to be obtained.  There are potentially multiple sets of capacity managers - the ones corresponding to the [network] section of the config file, the ones corresponding to the [s3] section of the config file, then ones that might need to be created specifically for the repository.
+The capacity managers also need to be obtained.  There are potentially multiple sets of capacity managers - the ones corresponding to the [network] section of the config file, the ones corresponding to the [s3] section of the config file, then ones that might need to be created specifically for the repository.  For a file repository, no throughput or request rate capacity managers should be used.
 
 Once all of those elements are obtained, then the Repo can be created.
 

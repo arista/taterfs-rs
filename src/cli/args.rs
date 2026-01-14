@@ -135,7 +135,7 @@ impl FileStoreArgs {
 #[derive(Args, Debug, Default)]
 pub struct InputSource {
     /// Read input from this file instead of an argument.
-    #[arg(short = 'f', long = "input-file")]
+    #[arg(id = "input_file", short = 'f', long = "input-file")]
     pub file: Option<PathBuf>,
 }
 
@@ -185,7 +185,7 @@ impl InputSource {
 #[derive(Args, Debug, Default)]
 pub struct OutputSink {
     /// Write output to this file instead of stdout.
-    #[arg(short = 'o', long = "output-file")]
+    #[arg(id = "output_file", short = 'o', long = "output-file")]
     pub file: Option<PathBuf>,
 }
 

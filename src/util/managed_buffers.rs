@@ -136,6 +136,30 @@ impl ManagedBuffers {
         }
     }
 
+    /// Wrap existing data in a managed buffer.
+    ///
+    /// If a capacity manager is configured and capacity is not available,
+    /// this will wait until sufficient capacity is available.
+    ///
+    /// The returned [`ManagedBuffer`] will automatically return its capacity
+    /// when dropped.
+    pub async fn get_buffer_with_data(&self, data: impl Into<Vec<u8>>) -> ManagedBuffer {
+        let data = data.into();
+        let size = data.len() as u64;
+
+        let used_capacity = match &self.capacity_manager {
+            Some(cm) => Some(cm.use_capacity(size).await),
+            None => None,
+        };
+
+        let buf = BytesMut::from(data.as_slice());
+
+        ManagedBuffer {
+            buf,
+            _used_capacity: used_capacity,
+        }
+    }
+
     /// Returns whether this `ManagedBuffers` has capacity limiting enabled.
     pub fn has_capacity_limit(&self) -> bool {
         self.capacity_manager.is_some()

@@ -5,7 +5,6 @@
 //! - Request deduplication for concurrent identical requests
 //! - Flow control via [`CapacityManager`] instances
 
-use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -15,7 +14,10 @@ use crate::repository::{
     from_json, to_canonical_json, Branches, Commit, Directory, File, JsonError, ObjectId,
     RepoObject, Root,
 };
-use crate::util::{CapacityManager, Complete, Dedup, NotifyComplete, UsedCapacity, WithComplete};
+use crate::util::{
+    CapacityManager, Complete, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete, UsedCapacity,
+    WithComplete,
+};
 
 // =============================================================================
 // Error Types
@@ -99,6 +101,8 @@ pub struct FlowControl {
     pub write_throughput_limiter: Option<CapacityManager>,
     /// Limits total throughput (bytes per time period).
     pub total_throughput_limiter: Option<CapacityManager>,
+    /// Manages memory buffers for read/write operations.
+    pub managed_buffers: Option<ManagedBuffers>,
 }
 
 // =============================================================================
@@ -122,7 +126,7 @@ pub struct Repo {
     dedup_write_current_root: Dedup<ObjectId, (), RepoError>,
     dedup_object_exists: Dedup<ObjectId, bool, RepoError>,
     dedup_write: Dedup<ObjectId, (), RepoError>,
-    dedup_read: Dedup<ObjectId, Bytes, RepoError>,
+    dedup_read: Dedup<ObjectId, Arc<ManagedBuffer>, RepoError>,
 }
 
 impl Repo {
@@ -279,10 +283,12 @@ impl Repo {
     ///
     /// Returns immediately with a [`WithComplete`] containing a completion handle.
     /// The actual write (including flow control) happens in the background.
+    /// On completion, the reference to the ManagedBuffer is dropped, returning
+    /// its capacity to the ManagedBuffers.
     ///
     /// Skips the write if the object already exists (checked via cache, or
     /// via backend for objects larger than [`MAX_WRITE_WITHOUT_EXISTENCE_CHECK`]).
-    pub async fn write(&self, id: &ObjectId, data: Bytes) -> Result<WithComplete<()>> {
+    pub async fn write(&self, id: &ObjectId, data: Arc<ManagedBuffer>) -> Result<WithComplete<()>> {
         // Check cache first - skip write if already exists
         if let Ok(true) = self.cache.object_exists(id).await {
             let complete = Arc::new(NotifyComplete::new());
@@ -291,7 +297,7 @@ impl Repo {
         }
 
         // For large objects, do an actual existence check before writing
-        let size = data.len() as u64;
+        let size = data.size();
         if size > MAX_WRITE_WITHOUT_EXISTENCE_CHECK && self.object_exists(id).await? {
             let complete = Arc::new(NotifyComplete::new());
             complete.notify_complete();
@@ -316,15 +322,15 @@ impl Repo {
                     let cache = Arc::clone(&cache);
                     let flow_control = flow_control.clone();
                     let id_owned = id_owned.clone();
-                    let data = data.clone();
+                    let data = Arc::clone(&data);
 
                     async move {
-                        let size = data.len() as u64;
+                        let size = data.size();
 
                         let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
                         let (_write, _total) = acquire_write_throughput(&flow_control, size).await;
 
-                        backend.write_object(&id_owned, &data).await?;
+                        backend.write_object(&id_owned, data.as_ref()).await?;
 
                         // Mark as existing in cache
                         let _ = cache.set_object_exists(&id_owned).await;
@@ -335,6 +341,7 @@ impl Repo {
                 .await;
 
             // Signal completion regardless of result
+            // The ManagedBuffer (data) is dropped here, returning capacity
             // TODO: Consider how to propagate errors to the Complete
             let _ = result;
             complete_for_task.notify_complete();
@@ -348,8 +355,11 @@ impl Repo {
     /// If `expected_size` is provided, throughput limiting happens before the read.
     /// Otherwise, it happens after the read completes.
     ///
+    /// Returns data wrapped in a [`ManagedBuffer`]. The ManagedBuffer is acquired
+    /// after other flow control handles are dropped to avoid deadlock.
+    ///
     /// This operation is deduplicated.
-    pub async fn read(&self, id: &ObjectId, expected_size: Option<u64>) -> Result<Bytes> {
+    pub async fn read(&self, id: &ObjectId, expected_size: Option<u64>) -> Result<Arc<ManagedBuffer>> {
         let backend = Arc::clone(&self.backend);
         let flow_control = self.flow_control.clone();
         let id_owned = id.clone();
@@ -359,26 +369,36 @@ impl Repo {
                 let (rate, concurrent) = acquire_request_capacity(&flow_control).await;
 
                 // Acquire read throughput if size is known
-                let (_pre_read, _pre_total) = if let Some(size) = expected_size {
+                let (pre_read, pre_total) = if let Some(size) = expected_size {
                     acquire_read_throughput(&flow_control, size).await
                 } else {
                     (None, None)
                 };
 
                 let data = backend.read_object(&id_owned).await?;
-                let bytes = Bytes::from(data);
+                let size = data.len() as u64;
 
                 // Acquire read throughput after if size was unknown.
-                // Drop request capacity first - we don't need to hold it while
-                // "paying back" the read throughput.
                 if expected_size.is_none() {
-                    drop(rate);
-                    drop(concurrent);
-                    let size = bytes.len() as u64;
                     let _ = acquire_read_throughput(&flow_control, size).await;
                 }
 
-                Ok(bytes)
+                // Drop all flow control handles BEFORE acquiring ManagedBuffer
+                // to avoid potential deadlock
+                drop(rate);
+                drop(concurrent);
+                drop(pre_read);
+                drop(pre_total);
+
+                // Wrap data in ManagedBuffer
+                let managed_buffer = if let Some(ref mb) = flow_control.managed_buffers {
+                    mb.get_buffer_with_data(data).await
+                } else {
+                    // No capacity management - create unmanaged buffer
+                    ManagedBuffers::new().get_buffer_with_data(data).await
+                };
+
+                Ok(Arc::new(managed_buffer))
             })
             .await
     }
@@ -398,7 +418,14 @@ impl Repo {
         let json = to_canonical_json(obj)?;
         let id = compute_object_id(&json);
 
-        let write_result = self.write(&id, Bytes::from(json)).await?;
+        // Wrap JSON in a ManagedBuffer
+        let managed_buffer = if let Some(ref mb) = self.flow_control.managed_buffers {
+            mb.get_buffer_with_data(json).await
+        } else {
+            ManagedBuffers::new().get_buffer_with_data(json).await
+        };
+
+        let write_result = self.write(&id, Arc::new(managed_buffer)).await?;
 
         // Cache the object immediately (this is fast, in-memory)
         let _ = self.cache.set_object(&id, obj).await;
@@ -416,8 +443,8 @@ impl Repo {
         }
 
         // Read from backend
-        let bytes = self.read(id, None).await?;
-        let obj: RepoObject = from_json(&bytes)?;
+        let buffer = self.read(id, None).await?;
+        let obj: RepoObject = from_json(buffer.as_ref())?;
 
         // Cache the result
         let _ = self.cache.set_object(id, &obj).await;

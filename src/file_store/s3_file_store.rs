@@ -9,6 +9,7 @@ use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, Result, ScanEvent,
     ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
 };
+use crate::util::ManagedBuffers;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
@@ -73,11 +74,13 @@ impl S3FileSourceConfig {
 pub struct S3FileSource {
     client: Client,
     config: S3FileSourceConfig,
+    /// Buffer manager for chunk allocation.
+    managed_buffers: ManagedBuffers,
 }
 
 impl S3FileSource {
     /// Create a new S3FileSource with the given configuration.
-    pub async fn new(config: S3FileSourceConfig) -> Self {
+    pub async fn new(config: S3FileSourceConfig, managed_buffers: ManagedBuffers) -> Self {
         let mut aws_config_loader = aws_config::defaults(BehaviorVersion::latest());
 
         if let Some(ref region) = config.region {
@@ -97,7 +100,11 @@ impl S3FileSource {
 
         let client = Client::from_conf(s3_config_builder.build());
 
-        Self { client, config }
+        Self {
+            client,
+            config,
+            managed_buffers,
+        }
     }
 
     /// Convert a relative path to an S3 key.
@@ -244,6 +251,7 @@ struct S3SourceChunk {
     key: String,
     offset: u64,
     size: u64,
+    managed_buffers: ManagedBuffers,
 }
 
 #[async_trait]
@@ -279,8 +287,13 @@ impl SourceChunk for S3SourceChunk {
             format!("{:x}", hasher.finalize())
         };
 
+        let managed_buffer = self
+            .managed_buffers
+            .get_buffer_with_data(bytes.to_vec())
+            .await;
+
         Ok(SourceChunkContent {
-            bytes: Bytes::from(bytes.to_vec()),
+            bytes: Arc::new(managed_buffer),
             hash,
         })
     }
@@ -348,6 +361,7 @@ impl FileSource for S3FileSource {
         // Create lazy stream for chunks
         let client = self.client.clone();
         let bucket = self.config.bucket.clone();
+        let managed_buffers = self.managed_buffers.clone();
 
         struct ChunkIterState {
             client: Client,
@@ -355,6 +369,7 @@ impl FileSource for S3FileSource {
             key: String,
             file_size: u64,
             offset: u64,
+            managed_buffers: ManagedBuffers,
         }
 
         let chunks_stream = stream::unfold(
@@ -364,6 +379,7 @@ impl FileSource for S3FileSource {
                 key,
                 file_size,
                 offset: 0,
+                managed_buffers,
             },
             |state| async move {
                 if state.offset >= state.file_size {
@@ -379,6 +395,7 @@ impl FileSource for S3FileSource {
                     key: state.key.clone(),
                     offset: state.offset,
                     size: chunk_size,
+                    managed_buffers: state.managed_buffers.clone(),
                 };
 
                 let next_state = ChunkIterState {
@@ -387,6 +404,7 @@ impl FileSource for S3FileSource {
                     key: state.key,
                     file_size: state.file_size,
                     offset: state.offset + chunk_size,
+                    managed_buffers: state.managed_buffers,
                 };
 
                 Some((Ok(Box::new(chunk) as Box<dyn SourceChunk>), next_state))

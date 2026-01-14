@@ -74,7 +74,7 @@ interface SourceChunk {
 }
 
 interface SourceChunkContent {
-  bytes: Bytes
+  bytes: Arc<ManagedBuffer>
   hash: "*sha-256 hash of the content in lower-case hexadecimal*"
 }
 

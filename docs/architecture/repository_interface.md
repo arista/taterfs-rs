@@ -26,10 +26,10 @@ async read_current_root() -> ObjectId
 async write_current_root(root: Object_id)
 async object_exists(id: ObjectId) -> bool
 
-async write(id: ObjectId, bytes: Bytes)
+async write(id: ObjectId, bytes: Bytes) -> WithComplete<()>
 async read(id: ObjectId, expected_size: Option<u64>) -> Bytes
 
-async write_object(obj: RepoObject) -> ObjectId
+async write_object(obj: RepoObject) -> WithComplete<ObjectId>
 async read_object(id: ObjectId) -> RepoObject
 async read_root(id: ObjectId) -> Root
 async read_branches(id: ObjectId) -> Branches

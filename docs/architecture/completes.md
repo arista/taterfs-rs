@@ -20,4 +20,10 @@ Completes {
   done()
 }
 
+// A helper struct for returning a result plus a Complete
+
+WithComplete<T> {
+  result: T
+  complete: Arc<Complete>
+}
 ```

@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::caches::RepoCache;
 use crate::repo::{Repo, RepoError};
 use crate::repository::{
     Branch, BranchListEntry, Branches, BranchesEntry, BranchesType, ChunkFilePart, DirEntry,
@@ -24,7 +23,7 @@ use crate::repository::{
     ObjectId, PartialDirectory, RepoObject, MAX_BRANCH_LIST_ENTRIES, MAX_DIRECTORY_ENTRIES,
     MAX_FILE_PARTS,
 };
-use crate::util::{Complete, Completes, NotifyComplete};
+use crate::util::{Complete, Completes};
 
 // =============================================================================
 // DirectoryLeaf
@@ -366,7 +365,7 @@ pub struct ListResult<O> {
     /// The hash/object ID of the root object.
     pub hash: ObjectId,
     /// Completion handle for the entire tree.
-    pub complete: Arc<Completes>,
+    pub complete: Arc<dyn Complete>,
 }
 
 // =============================================================================
@@ -383,17 +382,15 @@ pub struct ListResult<O> {
 /// can grow unbounded but need to be chunked into manageable sizes.
 pub struct ListBuilder<C: ListBuilderConfig> {
     repo: Arc<Repo>,
-    cache: Arc<dyn RepoCache>,
     stack: Vec<ListBuilderStackItem<C::Item>>,
     _marker: PhantomData<C>,
 }
 
 impl<C: ListBuilderConfig> ListBuilder<C> {
     /// Create a new list builder.
-    pub fn new(repo: Arc<Repo>, cache: Arc<dyn RepoCache>) -> Self {
+    pub fn new(repo: Arc<Repo>) -> Self {
         Self {
             repo,
-            cache,
             stack: vec![ListBuilderStackItem::new()],
             _marker: PhantomData,
         }
@@ -433,7 +430,7 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
         Ok(ListResult {
             object: obj,
             hash,
-            complete: Arc::new(completes),
+            complete: completes,
         })
     }
 
@@ -497,11 +494,11 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
     /// creates a tree entry referencing it, and adds that entry to
     /// the next level up.
     async fn rollup_stack_item_at(&mut self, ix: usize) -> Result<(), RepoError> {
-        let (obj, hash, completes) = self.stack_item_to_object(ix).await?;
-
-        // Get first and last names from items
+        // Get first and last names from items before taking them
         let first_name = self.items_first_name(ix);
         let last_name = self.items_last_name(ix);
+
+        let (obj, hash, completes) = self.stack_item_to_object(ix).await?;
 
         // Create tree entry
         let tree = C::make_tree(hash, first_name, last_name, &obj);
@@ -509,8 +506,7 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
 
         // Add tree item to the next level
         // Box the recursive call to avoid infinite future size
-        let complete: Arc<dyn Complete> = Arc::new(completes);
-        Box::pin(self.add_item_at_level(tree_item, ix + 1, complete)).await
+        Box::pin(self.add_item_at_level(tree_item, ix + 1, completes)).await
     }
 
     /// Convert the stack item at the given level to an object.
@@ -520,7 +516,7 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
     async fn stack_item_to_object(
         &mut self,
         ix: usize,
-    ) -> Result<(C::Object, ObjectId, Completes), RepoError> {
+    ) -> Result<(C::Object, ObjectId, Arc<dyn Complete>), RepoError> {
         // Take items from the stack item
         let items = std::mem::take(&mut self.stack[ix].items);
         let completes = std::mem::take(&mut self.stack[ix].completes);
@@ -532,73 +528,40 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
         // Write to repository
         let write_result = self.repo.write_object(&repo_obj).await?;
         let hash = write_result.result;
-
-        // Create a NotifyComplete that signals when exists flag is set
-        let exists_notify = Arc::new(NotifyComplete::new());
-
-        // Spawn task to await write completion, then set exists flag
         let write_complete = write_result.complete;
-        let cache_for_exists = Arc::clone(&self.cache);
+
+        // Spawn task to set exists flag when write completes
+        let write_complete_for_exists = Arc::clone(&write_complete);
+        let cache_for_exists = Arc::clone(self.repo.cache());
         let hash_for_exists = hash.clone();
-        let exists_notify_for_task = Arc::clone(&exists_notify);
         tokio::spawn(async move {
-            match write_complete.complete().await {
-                Ok(()) => {
-                    let result = cache_for_exists.set_object_exists(&hash_for_exists).await;
-                    if let Err(e) = result {
-                        exists_notify_for_task.notify_error(e.to_string());
-                    } else {
-                        exists_notify_for_task.notify_complete();
-                    }
-                }
-                Err(e) => {
-                    exists_notify_for_task.notify_error(e.to_string());
-                }
+            if write_complete_for_exists.complete().await.is_ok() {
+                let _ = cache_for_exists.set_object_exists(&hash_for_exists).await;
             }
         });
 
-        // Add exists_notify to completes so it tracks when exists is set
+        // Add write completion to completes
         completes
-            .add(exists_notify as Arc<dyn Complete>)
+            .add(write_complete)
             .map_err(|e| RepoError::Other(e.to_string()))?;
 
         // Mark completes as done - no more items will be added
         completes.done();
 
-        // Create a NotifyComplete that signals when fully_stored flag is set
-        let fully_stored_notify = Arc::new(NotifyComplete::new());
+        // Wrap completes in Arc for spawning and returning
+        let completes = Arc::new(completes);
 
-        // Spawn task to await all completions, then set fully_stored flag
-        let completes_arc = Arc::new(completes);
-        let cache_for_stored = Arc::clone(&self.cache);
+        // Spawn task to set fully_stored flag when all completes finish
+        let completes_for_stored = Arc::clone(&completes);
+        let cache_for_stored = Arc::clone(self.repo.cache());
         let hash_for_stored = hash.clone();
-        let fully_stored_notify_for_task = Arc::clone(&fully_stored_notify);
-        let completes_for_task = Arc::clone(&completes_arc);
         tokio::spawn(async move {
-            match completes_for_task.complete().await {
-                Ok(()) => {
-                    let result = cache_for_stored
-                        .set_object_fully_stored(&hash_for_stored)
-                        .await;
-                    if let Err(e) = result {
-                        fully_stored_notify_for_task.notify_error(e.to_string());
-                    } else {
-                        fully_stored_notify_for_task.notify_complete();
-                    }
-                }
-                Err(e) => {
-                    fully_stored_notify_for_task.notify_error(e.to_string());
-                }
+            if completes_for_stored.complete().await.is_ok() {
+                let _ = cache_for_stored.set_object_fully_stored(&hash_for_stored).await;
             }
         });
 
-        // Create result Completes that tracks when fully_stored is set
-        let result_completes = Completes::new();
-        result_completes
-            .add(fully_stored_notify as Arc<dyn Complete>)
-            .map_err(|e| RepoError::Other(e.to_string()))?;
-
-        Ok((obj, hash, result_completes))
+        Ok((obj, hash, completes))
     }
 
     /// Get the first name from items at the given level.
@@ -640,7 +603,7 @@ mod tests {
     use crate::caches::NoopCache;
     use crate::util::NotifyComplete;
 
-    async fn create_test_repo() -> Arc<Repo> {
+    fn create_test_repo() -> Arc<Repo> {
         let backend = MemoryBackend::new();
         let cache = NoopCache;
         Arc::new(Repo::new(backend, cache))
@@ -648,10 +611,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_list_builder_single_item() {
-        let repo = create_test_repo().await;
-        let cache: Arc<dyn RepoCache> = Arc::new(NoopCache);
+        let repo = create_test_repo();
 
-        let mut builder = BranchListBuilder::new(repo, cache);
+        let mut builder = BranchListBuilder::new(repo);
 
         let branch = Branch {
             name: "main".to_string(),
@@ -676,10 +638,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_list_builder_mixed_entries() {
-        let repo = create_test_repo().await;
-        let cache: Arc<dyn RepoCache> = Arc::new(NoopCache);
+        let repo = create_test_repo();
 
-        let mut builder = DirectoryListBuilder::new(repo, cache);
+        let mut builder = DirectoryListBuilder::new(repo);
 
         // Add a file
         let file_entry = FileEntry {
@@ -713,10 +674,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_list_builder_single_chunk() {
-        let repo = create_test_repo().await;
-        let cache: Arc<dyn RepoCache> = Arc::new(NoopCache);
+        let repo = create_test_repo();
 
-        let mut builder = FileListBuilder::new(repo, cache);
+        let mut builder = FileListBuilder::new(repo);
 
         let chunk = ChunkFilePart {
             size: 1024,

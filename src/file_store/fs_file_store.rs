@@ -6,12 +6,12 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::ScanIgnoreHelper;
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, FileStore, Result,
-    ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
+    ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
 };
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream;
+use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -122,6 +122,8 @@ impl SourceChunk for FsSourceChunk {
         let managed_buffer = self.managed_buffers.get_buffer_with_data(buffer).await;
 
         Ok(SourceChunkContent {
+            offset: self.offset,
+            size: self.size,
             bytes: Arc::new(managed_buffer),
             hash,
         })
@@ -204,6 +206,15 @@ impl FileSource for FsFileStore {
         );
 
         Ok(Some(Box::pin(chunks_stream)))
+    }
+
+    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
+        // Sequential implementation - no concurrency for FsFileStore
+        let contents_stream = chunks.then(|chunk_result| async move {
+            let chunk = chunk_result?;
+            chunk.get().await
+        });
+        Ok(Box::pin(contents_stream))
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {

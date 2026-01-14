@@ -28,6 +28,8 @@ interface FileSource {
   scan() -> ScanEvents
   // Yields the contents of a file, broken down into chunks of CHUNK_SIZES according to the method specified in (backend_storage_model)[./backend_storage_model.md]
   get_source_chunks(path: Path) -> SourceChunks | null
+  // Similar to get_source_chunks, except that multiple can be retrieved simultaneously but will still be returned in order
+  get_source_chunk_contents(chunks: SourceChunks) -> SourceChunkContents | null
   // Return information about one file or directory
   get_entry(path: Path) -> DirectoryEntry | null
   // Retrieve an entire file's contents, error if the path is not a File.  This should only be used when the file is expected to be relatively small
@@ -74,8 +76,14 @@ interface SourceChunk {
 }
 
 interface SourceChunkContent {
+  offset: u64
+  size: u64
   bytes: Arc<ManagedBuffer>
   hash: "*sha-256 hash of the content in lower-case hexadecimal*"
+}
+
+interface SourceChunkContents {
+  async next() -> Option<SourceChunkContent>
 }
 
 enum DirectoryEntry {
@@ -87,6 +95,8 @@ enum DirectoryEntry {
 The fingerprint is used to quickly determine if a file has changed without reading the entire file's contents.  Each FileStore will implement this differently - the FSFileStore might include the last modified time, the S3FileStore might use the ETag, etc.  The fingerprint must be less than 128 characters, and must change when a file's content, **or executable bit**, *may* have changed.  If a FileStore cannot meet these requirements, then it should just leave this null.
 
 Note that get_source_chunks iterates over a set of SourceChunk items, but doesn't actually retrieve content until SourceChunk.get() is called.  An application may call SourceChunk.get() in any order, and may even make multiple SourceChunk.get() calls simultaneously.  If a FileSource requires any kind of flow control (e.g., limiting network throughput), that is the responsibility of the FileSource implementation.
+
+get_source_chunk_contents is similar to get_source_chunks, except that it doesn't require the two-step retrieval process.  It can use get_source_chunks underneath, and may initiate multiple concurrent chunk retrievals, but it must still return the chunks in order regardless of when the retrievals complete.
 
 ### FileDest
 
@@ -171,9 +181,11 @@ Entry types:
 - `MemoryFsEntry::repeated_executable(pattern, size)` - Executable file with repeated content
 - `MemoryFsEntry::dir()` - Empty directory (usually created implicitly)
 
-The FSFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
+The FileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
 
-The FSFileStore should always return a fingerprint of None.
+The FileStore should always return a fingerprint of None.
+
+get_source_chunk_contents() should not attempt any concurrency, but should just retrieve and return the results of get_source_chunks in order
 
 ### FsFileStore
 
@@ -187,9 +199,11 @@ On Unix systems, the executable flag is determined by checking if any execute bi
 
 The FileSource implementation for FsFileStore is relatively simple.  Note that the get_source_chunks() function should not read the entire file into memory, but should instead return SourceChunk items that open the file and retrieve a file range in response to SourceChunk.get().
 
-The FSFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
+The FsFileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
 
-The FSFileStore should use a file fingerprint in the following format:
+The FsFileStore should use a file fingerprint in the following format:
+
+get_source_chunk_contents() should not attempt any concurrency, but should just retrieve and return the results of get_source_chunks in order
 
 ```
 {last modified time in millis since the epoch}:{file size}:{executable bit, either "x" or "-"}
@@ -216,6 +230,8 @@ Configuration options:
 - `endpoint_url` - Custom endpoint URL for LocalStack, MinIO, or other S3-compatible services
 - `region` - Region override (otherwise uses standard AWS credential chain)
 
+The S3FileStore should also be configured with a set of FlowControl services, similar to what is provided to Repo.  Those services should be used by get_source_chunks().
+
 Notes:
 - Uses the standard AWS credential chain (environment variables, ~/.aws, IAM roles)
 - Directory listings use `list_objects_v2` with "/" delimiter to simulate directories
@@ -226,6 +242,8 @@ Notes:
 The S3FileSource implementation should use the ScanIgnoreHelper to implement the ignore rules.
 
 The S3FileStore should use a file fingerprint that is the ETag that S3 makes available for the file.  If the ETag is greater than 128 bytes (I don't think that would ever be the case), then just set it to null.
+
+get_source_chunk_contents() should retrieve chunks concurrently, but still return them in order
 
 TODO: for now, the S3FileStore does not offer a FileDest implementation
 

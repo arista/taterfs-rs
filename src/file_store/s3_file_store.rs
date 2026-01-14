@@ -7,14 +7,15 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::ScanIgnoreHelper;
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, Result, ScanEvent,
-    ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
+    ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
 };
+use crate::repo::FlowControl;
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
-use futures::stream;
+use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
@@ -74,13 +75,19 @@ impl S3FileSourceConfig {
 pub struct S3FileSource {
     client: Client,
     config: S3FileSourceConfig,
+    /// Flow control for rate limiting and concurrency.
+    flow_control: FlowControl,
     /// Buffer manager for chunk allocation.
     managed_buffers: ManagedBuffers,
 }
 
 impl S3FileSource {
     /// Create a new S3FileSource with the given configuration.
-    pub async fn new(config: S3FileSourceConfig, managed_buffers: ManagedBuffers) -> Self {
+    pub async fn new(
+        config: S3FileSourceConfig,
+        flow_control: FlowControl,
+        managed_buffers: ManagedBuffers,
+    ) -> Self {
         let mut aws_config_loader = aws_config::defaults(BehaviorVersion::latest());
 
         if let Some(ref region) = config.region {
@@ -103,6 +110,7 @@ impl S3FileSource {
         Self {
             client,
             config,
+            flow_control,
             managed_buffers,
         }
     }
@@ -293,6 +301,8 @@ impl SourceChunk for S3SourceChunk {
             .await;
 
         Ok(SourceChunkContent {
+            offset: self.offset,
+            size: self.size,
             bytes: Arc::new(managed_buffer),
             hash,
         })
@@ -412,6 +422,56 @@ impl FileSource for S3FileSource {
         );
 
         Ok(Some(Box::pin(chunks_stream)))
+    }
+
+    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
+        // Concurrent implementation with flow control.
+        // We use buffered() to fetch chunks concurrently but yield them in order.
+        let flow_control = self.flow_control.clone();
+
+        // Default concurrency limit if not specified by flow control
+        const DEFAULT_CONCURRENCY: usize = 10;
+
+        let contents_stream = chunks
+            .map(move |chunk_result| {
+                let flow_control = flow_control.clone();
+                async move {
+                    let chunk = chunk_result?;
+
+                    // Acquire flow control capacity before fetching
+                    let _rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                        Some(limiter.use_capacity(1).await)
+                    } else {
+                        None
+                    };
+                    let _concurrent =
+                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                            Some(limiter.use_capacity(1).await)
+                        } else {
+                            None
+                        };
+
+                    let size = chunk.size();
+
+                    // Acquire read throughput capacity
+                    let _read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
+                        Some(limiter.use_capacity(size).await)
+                    } else {
+                        None
+                    };
+                    let _total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+                        Some(limiter.use_capacity(size).await)
+                    } else {
+                        None
+                    };
+
+                    // Fetch the chunk content
+                    chunk.get().await
+                }
+            })
+            .buffered(DEFAULT_CONCURRENCY);
+
+        Ok(Box::pin(contents_stream))
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
@@ -573,6 +633,15 @@ impl FileSource for ScanSourceAdapter {
     async fn get_source_chunks(&self, _path: &Path) -> Result<Option<SourceChunks>> {
         // Not used by ScanIgnoreHelper
         Ok(None)
+    }
+
+    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
+        // Not used by ScanIgnoreHelper - provide simple sequential implementation
+        let contents_stream = chunks.then(|chunk_result| async move {
+            let chunk = chunk_result?;
+            chunk.get().await
+        });
+        Ok(Box::pin(contents_stream))
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {

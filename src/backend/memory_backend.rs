@@ -3,7 +3,9 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
+use super::repo_backend::{
+    BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult,
+};
 
 /// An in-memory implementation of `RepoBackend`, intended primarily for testing.
 pub struct MemoryBackend {

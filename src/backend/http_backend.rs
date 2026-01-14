@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 
-use super::repo_backend::{BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult};
+use super::repo_backend::{
+    BackendError, ObjectId, RepoBackend, RepositoryInfo, Result, SwapResult,
+};
 
 /// An HTTP-based implementation of `RepoBackend`.
 ///
@@ -57,10 +59,9 @@ impl RepoBackend for HttpBackend {
 
         match response.status() {
             StatusCode::OK => {
-                let info: RepositoryInfo = response
-                    .json()
-                    .await
-                    .map_err(|e| BackendError::Other(format!("failed to parse repository info: {}", e)))?;
+                let info: RepositoryInfo = response.json().await.map_err(|e| {
+                    BackendError::Other(format!("failed to parse repository info: {}", e))
+                })?;
                 Ok(info)
             }
             StatusCode::NOT_FOUND => Err(BackendError::NotFound),

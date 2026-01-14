@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::backend::{BackendError, RepoBackend};
 use crate::caches::RepoCache;
 use crate::repository::{
-    from_json, to_canonical_json, Branches, Commit, Directory, File, JsonError, ObjectId,
-    RepoObject, Root,
+    Branches, Commit, Directory, File, JsonError, ObjectId, RepoObject, Root, from_json,
+    to_canonical_json,
 };
 use crate::util::{
     CapacityManager, Complete, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete, UsedCapacity,
@@ -183,7 +183,6 @@ impl Repo {
             dedup_read: Dedup::new(),
         }
     }
-
 
     // =========================================================================
     // Current Root Operations
@@ -360,7 +359,11 @@ impl Repo {
     /// after other flow control handles are dropped to avoid deadlock.
     ///
     /// This operation is deduplicated.
-    pub async fn read(&self, id: &ObjectId, expected_size: Option<u64>) -> Result<Arc<ManagedBuffer>> {
+    pub async fn read(
+        &self,
+        id: &ObjectId,
+        expected_size: Option<u64>,
+    ) -> Result<Arc<ManagedBuffer>> {
         let backend = Arc::clone(&self.backend);
         let flow_control = self.flow_control.clone();
         let id_owned = id.clone();
@@ -592,9 +595,9 @@ fn compute_object_id(data: &[u8]) -> ObjectId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::backend::MemoryBackend;
     use crate::caches::CacheError;
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
 

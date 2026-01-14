@@ -352,7 +352,6 @@ pub fn to_canonical_json_string<T: Serialize>(value: &T) -> JsonResult<String> {
     serde_json_canonicalizer::to_string(value).map_err(JsonError::Serialize)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,8 +486,7 @@ mod tests {
         let obj: RepoObject = from_json_str(root_json).unwrap();
         assert!(matches!(obj, RepoObject::Root(_)));
 
-        let commit_json =
-            r#"{"type":"Commit","directory":"abc","parents":["parent1"]}"#;
+        let commit_json = r#"{"type":"Commit","directory":"abc","parents":["parent1"]}"#;
         let obj: RepoObject = from_json_str(commit_json).unwrap();
         assert!(matches!(obj, RepoObject::Commit(_)));
     }

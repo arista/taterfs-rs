@@ -11,8 +11,8 @@ use configparser::ini::Ini;
 use thiserror::Error;
 
 use super::{
-    ByteSize, CacheConfig, CapacityLimits, Config, FilestoreConfig, Limit, MemoryConfig,
-    NetworkConfig, RepositoryConfig, S3Config, S3Settings,
+    ByteSize, CacheConfig, CapacityLimits, Config, FilestoreConfig, FilestoresConfig, Limit,
+    MemoryConfig, NetworkConfig, RepositoryConfig, S3Config, S3Settings,
 };
 
 // =============================================================================
@@ -26,6 +26,7 @@ const DEFAULT_NETWORK_MAX_CONCURRENT_REQUESTS: u32 = 40;
 const DEFAULT_NETWORK_MAX_REQUESTS_PER_SECOND: u32 = 100;
 const DEFAULT_NETWORK_MAX_READ_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_NETWORK_MAX_WRITE_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024; // 100MB
+const DEFAULT_FILESTORES_GLOBAL_IGNORES: &str = ".git/,.tfs/";
 
 const ENV_CONFIG_FILE: &str = "TFS_CONFIG_FILE";
 const DEFAULT_CONFIG_FILENAME: &str = ".tfsconfig";
@@ -106,9 +107,7 @@ impl ByteSize {
         }
 
         // Find where the numeric part ends
-        let num_end = s
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(s.len());
+        let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 
         if num_end == 0 {
             return Err(ConfigError::InvalidByteSize {
@@ -135,7 +134,7 @@ impl ByteSize {
                 return Err(ConfigError::InvalidByteSize {
                     value: s.to_string(),
                     message: format!("unknown suffix '{}'", suffix),
-                })
+                });
             }
         };
 
@@ -260,6 +259,14 @@ fn home_dir() -> Option<PathBuf> {
 // Default Config
 // =============================================================================
 
+/// Parse a comma-separated string into a Vec of trimmed strings.
+fn parse_comma_separated(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Create a Config with all default values.
 fn default_config() -> Config {
     Config {
@@ -269,6 +276,9 @@ fn default_config() -> Config {
         },
         memory: MemoryConfig {
             max: Limit::Value(ByteSize(DEFAULT_MEMORY_MAX)),
+        },
+        filestores_config: FilestoresConfig {
+            global_ignores: parse_comma_separated(DEFAULT_FILESTORES_GLOBAL_IGNORES),
         },
         network: NetworkConfig {
             limits: CapacityLimits {
@@ -351,6 +361,11 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
         }
     }
 
+    // [filestores] section
+    if let Some(global_ignores) = ini.get("filestores", "global_ignores") {
+        config.filestores_config.global_ignores = parse_comma_separated(&global_ignores);
+    }
+
     // [network] section
     let network_limits = parse_capacity_limits(ini, "network")?;
     apply_limits_if_set(&mut config.network.limits, &network_limits);
@@ -370,12 +385,12 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
     let sections: Vec<String> = ini.sections();
     for section_name in sections {
         if let Some(repo_name) = section_name.strip_prefix("repository.") {
-            let url = ini
-                .get(&section_name, "url")
-                .ok_or_else(|| ConfigError::MissingRequiredField {
-                    section: section_name.clone(),
-                    field: "url".to_string(),
-                })?;
+            let url =
+                ini.get(&section_name, "url")
+                    .ok_or_else(|| ConfigError::MissingRequiredField {
+                        section: section_name.clone(),
+                        field: "url".to_string(),
+                    })?;
 
             let no_cache = parse_bool(ini, &section_name, "no_cache", false)?;
 
@@ -392,12 +407,12 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
         }
 
         if let Some(store_name) = section_name.strip_prefix("filestore.") {
-            let url = ini
-                .get(&section_name, "url")
-                .ok_or_else(|| ConfigError::MissingRequiredField {
-                    section: section_name.clone(),
-                    field: "url".to_string(),
-                })?;
+            let url =
+                ini.get(&section_name, "url")
+                    .ok_or_else(|| ConfigError::MissingRequiredField {
+                        section: section_name.clone(),
+                        field: "url".to_string(),
+                    })?;
 
             let store_config = FilestoreConfig {
                 url,
@@ -458,6 +473,9 @@ fn apply_override(config: &mut Config, key: &str, value: &str) -> Result<()> {
         // memory.max
         ["memory", param] => apply_memory_override(config, param, value),
 
+        // filestores.global_ignores
+        ["filestores", param] => apply_filestores_override(config, param, value),
+
         // network.max_concurrent_requests, etc.
         ["network", param] => apply_network_override(config, param, value),
 
@@ -502,6 +520,19 @@ fn apply_memory_override(config: &mut Config, param: &str, value: &str) -> Resul
         }
         _ => Err(ConfigError::InvalidOverrideKey {
             key: format!("memory.{}", param),
+            message: "unknown parameter".to_string(),
+        }),
+    }
+}
+
+fn apply_filestores_override(config: &mut Config, param: &str, value: &str) -> Result<()> {
+    match param {
+        "global_ignores" => {
+            config.filestores_config.global_ignores = parse_comma_separated(value);
+            Ok(())
+        }
+        _ => Err(ConfigError::InvalidOverrideKey {
+            key: format!("filestores.{}", param),
             message: "unknown parameter".to_string(),
         }),
     }

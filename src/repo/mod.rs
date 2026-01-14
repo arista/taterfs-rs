@@ -7,5 +7,7 @@ mod create_repo;
 #[allow(clippy::module_inception)]
 mod repo;
 
-pub use create_repo::{BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec};
+pub use create_repo::{
+    create_repo, BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec,
+};
 pub use repo::{FlowControl, Repo, RepoError, RepoInitialize, Result};

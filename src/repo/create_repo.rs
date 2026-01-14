@@ -9,8 +9,13 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::CapacityManagers;
+use crate::backend::{
+    FsBackend, FsLikeRepoBackendAdapter, HttpBackend, RepoBackend, S3Backend, S3BackendConfig,
+};
 use crate::caches::{NoopCache, RepoCache, RepoCaches};
 use crate::config::ConfigHelper;
+
+use super::Repo;
 
 // =============================================================================
 // Error Types
@@ -358,6 +363,72 @@ impl CreateRepoContext {
                 .map_err(CreateRepoError::CacheError)
         }
     }
+
+    /// Create a repository from a specification string.
+    ///
+    /// Parses the specification, creates the appropriate backend, retrieves
+    /// the repository's cache based on its UUID, and constructs a [`Repo`].
+    ///
+    /// The repository must already be initialized (have repository info set).
+    pub async fn create_repo(&self, spec: &str) -> Result<Repo> {
+        let parsed = self.parse_repo_spec(spec)?;
+        self.create_repo_from_spec(&parsed).await
+    }
+
+    /// Create a repository from a parsed specification.
+    pub async fn create_repo_from_spec(&self, spec: &ParsedRepoSpec) -> Result<Repo> {
+        // Create the backend
+        let backend: Arc<dyn RepoBackend> = match spec.backend_type {
+            BackendType::S3 => {
+                let mut s3_config = S3BackendConfig::new(&spec.location);
+                if let Some(ref prefix) = spec.prefix {
+                    s3_config = s3_config.with_prefix(prefix);
+                }
+                if let Some(ref endpoint_url) = spec.endpoint_url {
+                    s3_config = s3_config.with_endpoint_url(endpoint_url);
+                }
+                if let Some(ref region) = spec.region {
+                    s3_config = s3_config.with_region(region);
+                }
+                let s3_backend = S3Backend::new(s3_config).await;
+                Arc::new(FsLikeRepoBackendAdapter::new(Arc::new(s3_backend)))
+            }
+
+            BackendType::FileSystem => {
+                let fs_backend = FsBackend::new(&spec.location);
+                Arc::new(FsLikeRepoBackendAdapter::new(Arc::new(fs_backend)))
+            }
+
+            BackendType::Http => Arc::new(HttpBackend::new(&spec.location)),
+        };
+
+        // Get repository info to find the UUID for caching
+        let repo_info = backend
+            .get_repository_info()
+            .await
+            .map_err(|e| CreateRepoError::BackendError(e.to_string()))?;
+
+        // Get the cache for this repository
+        let cache = self.get_cache_for_uuid(&repo_info.uuid).await?;
+
+        // Create flow control configuration
+        let managers = self.create_managers_for_spec(spec);
+        let flow_control = managers.to_flow_control();
+
+        // Create and return the Repo
+        Ok(Repo::from_dyn(backend, cache, flow_control))
+    }
+}
+
+// =============================================================================
+// Convenience Function
+// =============================================================================
+
+/// Create a repository from a specification string.
+///
+/// This is a convenience function that delegates to [`CreateRepoContext::create_repo`].
+pub async fn create_repo(spec: &str, ctx: &CreateRepoContext) -> Result<Repo> {
+    ctx.create_repo(spec).await
 }
 
 // =============================================================================

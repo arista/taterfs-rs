@@ -58,6 +58,8 @@ ManagedBuffer implements Drop, which returns the capacity to the ManagedBuffers 
 
 ```
 
+A ManagedBuffer is configured with an optional CapacityManager.  If no CapacityManager is provided, then it places no limits on get_buffer calls.
+
 ### Request Rate Limiter
 
 This will be a CapacityManager configured with a replenishment rate that corresponds to the desired request rate.  It will also be configured with a capacity that represents a burstable amount.  The application will generally only call use(), and will rely on the automatic replenishment.

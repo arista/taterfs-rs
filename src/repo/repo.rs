@@ -340,11 +340,12 @@ impl Repo {
                 })
                 .await;
 
-            // Signal completion regardless of result
+            // Signal completion with success or error
             // The ManagedBuffer (data) is dropped here, returning capacity
-            // TODO: Consider how to propagate errors to the Complete
-            let _ = result;
-            complete_for_task.notify_complete();
+            match result {
+                Ok(()) => complete_for_task.notify_complete(),
+                Err(e) => complete_for_task.notify_error(e.to_string()),
+            }
         });
 
         Ok(WithComplete::new((), complete as Arc<dyn Complete>))
@@ -672,7 +673,7 @@ mod tests {
         let id = write_result.result;
 
         // Wait for write to complete
-        write_result.complete.complete().await;
+        write_result.complete.complete().await.unwrap();
 
         // Read it back
         let read_obj = repo.read_object(&id).await.unwrap();
@@ -702,7 +703,7 @@ mod tests {
 
         // Write and check again
         let write_result = repo.write_object(&commit).await.unwrap();
-        write_result.complete.complete().await;
+        write_result.complete.complete().await.unwrap();
         assert!(repo.object_exists(&write_result.result).await.unwrap());
     }
 
@@ -720,7 +721,7 @@ mod tests {
         });
 
         let write_result = repo.write_object(&commit).await.unwrap();
-        write_result.complete.complete().await;
+        write_result.complete.complete().await.unwrap();
         let id = write_result.result;
 
         // Try to read as wrong type

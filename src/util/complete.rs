@@ -5,16 +5,22 @@
 //! completion tracking to their own callers.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
+
+/// Type alias for boxed errors used in completion results.
+pub type CompleteError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A trait for awaiting completion of an asynchronous operation.
 #[async_trait]
 pub trait Complete: Send + Sync {
     /// Wait for the operation to complete.
-    async fn complete(&self);
+    ///
+    /// Returns `Ok(())` if the operation completed successfully, or an error
+    /// if the operation failed.
+    async fn complete(&self) -> Result<(), CompleteError>;
 }
 
 // =============================================================================
@@ -23,9 +29,11 @@ pub trait Complete: Send + Sync {
 
 /// A completion flag that can be signaled manually.
 ///
-/// Call `notify_complete()` to signal completion, and `complete()` to wait for it.
+/// Call `notify_complete()` to signal successful completion, `notify_error()` to
+/// signal failure, and `complete()` to wait for either.
 pub struct NotifyComplete {
     completed: AtomicBool,
+    error: Mutex<Option<CompleteError>>,
     notify: Notify,
 }
 
@@ -34,14 +42,24 @@ impl NotifyComplete {
     pub fn new() -> Self {
         Self {
             completed: AtomicBool::new(false),
+            error: Mutex::new(None),
             notify: Notify::new(),
         }
     }
 
-    /// Signal that the operation has completed.
+    /// Signal that the operation has completed successfully.
     ///
-    /// Any current or future calls to `complete()` will return.
+    /// Any current or future calls to `complete()` will return `Ok(())`.
     pub fn notify_complete(&self) {
+        self.completed.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Signal that the operation has failed with an error.
+    ///
+    /// Any current or future calls to `complete()` will return the error.
+    pub fn notify_error(&self, error: impl Into<CompleteError>) {
+        *self.error.lock().unwrap() = Some(error.into());
         self.completed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
     }
@@ -55,11 +73,16 @@ impl Default for NotifyComplete {
 
 #[async_trait]
 impl Complete for NotifyComplete {
-    async fn complete(&self) {
+    async fn complete(&self) -> Result<(), CompleteError> {
         loop {
             let notified = self.notify.notified();
             if self.completed.load(Ordering::SeqCst) {
-                return;
+                // Take the error if present
+                let error = self.error.lock().unwrap().take();
+                return match error {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                };
             }
             notified.await;
         }
@@ -86,6 +109,8 @@ impl std::error::Error for AddAfterDoneError {}
 struct CompletesInner {
     counter: AtomicUsize,
     done: AtomicBool,
+    /// First error encountered from any added Complete.
+    first_error: Mutex<Option<CompleteError>>,
     notify: Notify,
 }
 
@@ -94,6 +119,9 @@ struct CompletesInner {
 /// Add `Complete` instances with `add()`, then call `done()` when finished adding.
 /// The `complete()` method will return when all added instances have completed
 /// AND `done()` has been called.
+///
+/// If any added `Complete` returns an error, `complete()` will return the first
+/// error encountered.
 pub struct Completes {
     inner: Arc<CompletesInner>,
 }
@@ -105,6 +133,7 @@ impl Completes {
             inner: Arc::new(CompletesInner {
                 counter: AtomicUsize::new(0),
                 done: AtomicBool::new(false),
+                first_error: Mutex::new(None),
                 notify: Notify::new(),
             }),
         }
@@ -125,7 +154,16 @@ impl Completes {
 
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            complete.complete().await;
+            let result = complete.complete().await;
+
+            // Store first error if this one failed
+            if let Err(e) = result {
+                let mut first_error = inner.first_error.lock().unwrap();
+                if first_error.is_none() {
+                    *first_error = Some(e);
+                }
+            }
+
             let prev = inner.counter.fetch_sub(1, Ordering::SeqCst);
             if prev == 1 && inner.done.load(Ordering::SeqCst) {
                 inner.notify.notify_waiters();
@@ -154,13 +192,18 @@ impl Default for Completes {
 
 #[async_trait]
 impl Complete for Completes {
-    async fn complete(&self) {
+    async fn complete(&self) -> Result<(), CompleteError> {
         loop {
             let notified = self.inner.notify.notified();
             if self.inner.done.load(Ordering::SeqCst)
                 && self.inner.counter.load(Ordering::SeqCst) == 0
             {
-                return;
+                // Take the first error if any
+                let error = self.inner.first_error.lock().unwrap().take();
+                return match error {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                };
             }
             notified.await;
         }
@@ -193,9 +236,12 @@ impl<T> WithComplete<T> {
     }
 
     /// Wait for the operation to fully complete and return the result.
-    pub async fn wait(self) -> T {
-        self.complete.complete().await;
-        self.result
+    ///
+    /// Returns the result if the operation completed successfully, or an error
+    /// if the background work failed.
+    pub async fn wait(self) -> Result<T, CompleteError> {
+        self.complete.complete().await?;
+        Ok(self.result)
     }
 }
 
@@ -208,7 +254,7 @@ mod tests {
     async fn notify_complete_before_wait() {
         let nc = NotifyComplete::new();
         nc.notify_complete();
-        nc.complete().await; // Should return immediately
+        nc.complete().await.unwrap(); // Should return immediately
     }
 
     #[tokio::test]
@@ -217,19 +263,43 @@ mod tests {
         let nc2 = nc.clone();
 
         let handle = tokio::spawn(async move {
-            nc2.complete().await;
+            nc2.complete().await
         });
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         nc.notify_complete();
-        handle.await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn notify_error_before_wait() {
+        let nc = NotifyComplete::new();
+        nc.notify_error("something went wrong");
+        let result = nc.complete().await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "something went wrong");
+    }
+
+    #[tokio::test]
+    async fn notify_error_after_wait() {
+        let nc = Arc::new(NotifyComplete::new());
+        let nc2 = nc.clone();
+
+        let handle = tokio::spawn(async move {
+            nc2.complete().await
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        nc.notify_error("operation failed");
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn completes_empty_done() {
         let c = Completes::new();
         c.done();
-        c.complete().await; // Should return immediately
+        c.complete().await.unwrap(); // Should return immediately
     }
 
     #[tokio::test]
@@ -244,12 +314,12 @@ mod tests {
         let c2 = c.clone();
 
         let handle = tokio::spawn(async move {
-            c2.complete().await;
+            c2.complete().await
         });
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         nc.notify_complete();
-        handle.await.unwrap();
+        handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -259,5 +329,60 @@ mod tests {
 
         let nc = Arc::new(NotifyComplete::new());
         assert!(c.add(nc).is_err());
+    }
+
+    #[tokio::test]
+    async fn completes_propagates_first_error() {
+        let nc1 = Arc::new(NotifyComplete::new());
+        let nc2 = Arc::new(NotifyComplete::new());
+        let c = Completes::new();
+
+        c.add(nc1.clone()).unwrap();
+        c.add(nc2.clone()).unwrap();
+        c.done();
+
+        // Signal error on first, success on second
+        nc1.notify_error("first error");
+        nc2.notify_complete();
+
+        let result = c.complete().await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "first error");
+    }
+
+    #[tokio::test]
+    async fn completes_all_success() {
+        let nc1 = Arc::new(NotifyComplete::new());
+        let nc2 = Arc::new(NotifyComplete::new());
+        let c = Completes::new();
+
+        c.add(nc1.clone()).unwrap();
+        c.add(nc2.clone()).unwrap();
+        c.done();
+
+        nc1.notify_complete();
+        nc2.notify_complete();
+
+        c.complete().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_complete_wait_success() {
+        let nc = Arc::new(NotifyComplete::new());
+        let wc = WithComplete::new(42, nc.clone() as Arc<dyn Complete>);
+
+        nc.notify_complete();
+        let result = wc.wait().await.unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn with_complete_wait_error() {
+        let nc = Arc::new(NotifyComplete::new());
+        let wc = WithComplete::new(42, nc.clone() as Arc<dyn Complete>);
+
+        nc.notify_error("background failed");
+        let result = wc.wait().await;
+        assert!(result.is_err());
     }
 }

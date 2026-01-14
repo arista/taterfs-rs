@@ -66,10 +66,11 @@ tfs repo exists {repo spec} {object id}
 Generates "true" or "false" depending if the given object exists in the given repo.  If "--json" is specified, then the output will be formatted as pretty-printed JSON, otherwise it will remain the raw output.  If {output file} is specified then the generated result will be written to the given file, otherwise the generated results will be written to STDOUT.
 
 ```
-tfs repo read {repo spec} {object id}
+tfs repo read {repo spec} [{object id}]
+  [--input-file / -f {input file}]
   [--output-file / -o {output file}]
 ```
-Reads the object at the given id, with an error if it doesn't exist.  If "--json" is specified, then the output will be formatted as pretty-printed JSON, otherwise it will remain the raw output.  If {output file} is specified then the contents will be written to the given file, otherwise the contents will be written to STDOUT.
+Reads the object at the given id, with an error if it doesn't exist.  If --input-file/-f is specified, then the object id will be read from that file.  It is an error for both -f and {object id} to be specified.  If neither is specified, then the object id will be read from STDIN.  If "--json" is specified, then the output will be formatted as pretty-printed JSON, otherwise it will remain the raw output.  If {output file} is specified then the contents will be written to the given file, otherwise the contents will be written to STDOUT.
 
 ```
 tfs repo write {repo spec} [{contents}]

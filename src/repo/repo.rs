@@ -738,12 +738,7 @@ fn compute_object_id(data: &[u8]) -> ObjectId {
 
 /// Generate a UUID for repository initialization.
 fn generate_uuid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("{:032x}", now)
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]

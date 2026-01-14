@@ -15,7 +15,7 @@ use crate::repository::{
     from_json, to_canonical_json, Branches, Commit, Directory, File, JsonError, ObjectId,
     RepoObject, Root,
 };
-use crate::util::{CapacityManager, Dedup, UsedCapacity};
+use crate::util::{CapacityManager, Complete, Dedup, NotifyComplete, UsedCapacity, WithComplete};
 
 // =============================================================================
 // Error Types
@@ -277,40 +277,70 @@ impl Repo {
     /// The object ID is the SHA-256 hash of the data.
     /// This operation is deduplicated by object ID.
     ///
+    /// Returns immediately with a [`WithComplete`] containing a completion handle.
+    /// The actual write (including flow control) happens in the background.
+    ///
     /// Skips the write if the object already exists (checked via cache, or
     /// via backend for objects larger than [`MAX_WRITE_WITHOUT_EXISTENCE_CHECK`]).
-    pub async fn write(&self, id: &ObjectId, data: Bytes) -> Result<()> {
+    pub async fn write(&self, id: &ObjectId, data: Bytes) -> Result<WithComplete<()>> {
         // Check cache first - skip write if already exists
         if let Ok(true) = self.cache.object_exists(id).await {
-            return Ok(());
+            let complete = Arc::new(NotifyComplete::new());
+            complete.notify_complete();
+            return Ok(WithComplete::new((), complete));
         }
 
         // For large objects, do an actual existence check before writing
         let size = data.len() as u64;
         if size > MAX_WRITE_WITHOUT_EXISTENCE_CHECK && self.object_exists(id).await? {
-            return Ok(());
+            let complete = Arc::new(NotifyComplete::new());
+            complete.notify_complete();
+            return Ok(WithComplete::new((), complete));
         }
+
+        // Create completion handle
+        let complete = Arc::new(NotifyComplete::new());
+        let complete_for_task = Arc::clone(&complete);
 
         let backend = Arc::clone(&self.backend);
         let cache = Arc::clone(&self.cache);
         let flow_control = self.flow_control.clone();
         let id_owned = id.clone();
+        let dedup = self.dedup_write.clone();
 
-        self.dedup_write
-            .call(id.clone(), || async move {
-                let size = data.len() as u64;
+        // Spawn the write operation in the background
+        tokio::spawn(async move {
+            let result = dedup
+                .call(id_owned.clone(), || {
+                    let backend = Arc::clone(&backend);
+                    let cache = Arc::clone(&cache);
+                    let flow_control = flow_control.clone();
+                    let id_owned = id_owned.clone();
+                    let data = data.clone();
 
-                let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
-                let (_write, _total) = acquire_write_throughput(&flow_control, size).await;
+                    async move {
+                        let size = data.len() as u64;
 
-                backend.write_object(&id_owned, &data).await?;
+                        let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
+                        let (_write, _total) = acquire_write_throughput(&flow_control, size).await;
 
-                // Mark as existing in cache
-                let _ = cache.set_object_exists(&id_owned).await;
+                        backend.write_object(&id_owned, &data).await?;
 
-                Ok(())
-            })
-            .await
+                        // Mark as existing in cache
+                        let _ = cache.set_object_exists(&id_owned).await;
+
+                        Ok(())
+                    }
+                })
+                .await;
+
+            // Signal completion regardless of result
+            // TODO: Consider how to propagate errors to the Complete
+            let _ = result;
+            complete_for_task.notify_complete();
+        });
+
+        Ok(WithComplete::new((), complete as Arc<dyn Complete>))
     }
 
     /// Read raw bytes from the repository.
@@ -360,16 +390,20 @@ impl Repo {
     /// Write a repository object and return its ID.
     ///
     /// The object is serialized to canonical JSON and its SHA-256 hash becomes the ID.
-    pub async fn write_object(&self, obj: &RepoObject) -> Result<ObjectId> {
+    ///
+    /// Returns immediately with a [`WithComplete`] containing the object ID and
+    /// a completion handle. The actual write (including flow control) happens
+    /// in the background.
+    pub async fn write_object(&self, obj: &RepoObject) -> Result<WithComplete<ObjectId>> {
         let json = to_canonical_json(obj)?;
         let id = compute_object_id(&json);
 
-        self.write(&id, Bytes::from(json)).await?;
+        let write_result = self.write(&id, Bytes::from(json)).await?;
 
-        // Cache the object
+        // Cache the object immediately (this is fast, in-memory)
         let _ = self.cache.set_object(&id, obj).await;
 
-        Ok(id)
+        Ok(WithComplete::new(id, write_result.complete))
     }
 
     /// Read and parse a repository object.
@@ -607,7 +641,11 @@ mod tests {
         };
 
         let obj = RepoObject::Commit(commit.clone());
-        let id = repo.write_object(&obj).await.unwrap();
+        let write_result = repo.write_object(&obj).await.unwrap();
+        let id = write_result.result;
+
+        // Wait for write to complete
+        write_result.complete.complete().await;
 
         // Read it back
         let read_obj = repo.read_object(&id).await.unwrap();
@@ -636,8 +674,9 @@ mod tests {
         assert!(!repo.object_exists(&id).await.unwrap());
 
         // Write and check again
-        let id = repo.write_object(&commit).await.unwrap();
-        assert!(repo.object_exists(&id).await.unwrap());
+        let write_result = repo.write_object(&commit).await.unwrap();
+        write_result.complete.complete().await;
+        assert!(repo.object_exists(&write_result.result).await.unwrap());
     }
 
     #[tokio::test]
@@ -653,7 +692,9 @@ mod tests {
             metadata: None,
         });
 
-        let id = repo.write_object(&commit).await.unwrap();
+        let write_result = repo.write_object(&commit).await.unwrap();
+        write_result.complete.complete().await;
+        let id = write_result.result;
 
         // Try to read as wrong type
         let result = repo.read_root(&id).await;

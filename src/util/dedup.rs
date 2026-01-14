@@ -47,8 +47,9 @@ struct Waiter<V, E> {
 ///     Ok(vec![1, 2, 3])
 /// }).await;
 /// ```
+#[derive(Clone)]
 pub struct Dedup<K, V, E> {
-    in_flight: Mutex<HashMap<K, Arc<Waiter<V, E>>>>,
+    in_flight: Arc<Mutex<HashMap<K, Arc<Waiter<V, E>>>>>,
 }
 
 impl<K, V, E> Dedup<K, V, E>
@@ -60,7 +61,7 @@ where
     /// Create a new `Dedup` instance.
     pub fn new() -> Self {
         Self {
-            in_flight: Mutex::new(HashMap::new()),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

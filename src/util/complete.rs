@@ -167,6 +167,38 @@ impl Complete for Completes {
     }
 }
 
+// =============================================================================
+// WithComplete
+// =============================================================================
+
+/// A result paired with a completion handle.
+///
+/// This struct is returned by operations that complete in two phases:
+/// 1. The result is available immediately
+/// 2. Background work (like flow control, I/O) completes later
+///
+/// Callers can use the result immediately and optionally wait for full
+/// completion via the `complete` handle.
+pub struct WithComplete<T> {
+    /// The result of the operation.
+    pub result: T,
+    /// Handle to wait for the operation to fully complete.
+    pub complete: Arc<dyn Complete>,
+}
+
+impl<T> WithComplete<T> {
+    /// Create a new `WithComplete` with the given result and completion handle.
+    pub fn new(result: T, complete: Arc<dyn Complete>) -> Self {
+        Self { result, complete }
+    }
+
+    /// Wait for the operation to fully complete and return the result.
+    pub async fn wait(self) -> T {
+        self.complete.complete().await;
+        self.result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::app::CapacityManagers;
 use crate::caches::NoopCaches;
 use crate::config::{read_config, ConfigHelper, ConfigSource};
 use crate::file_store::{
@@ -96,6 +97,8 @@ impl AppCreateFileStoreContext {
 pub struct App {
     config: ConfigHelper,
     managed_buffers: ManagedBuffers,
+    network_managers: CapacityManagers,
+    s3_managers: CapacityManagers,
 }
 
 impl App {
@@ -107,9 +110,16 @@ impl App {
         let config = ConfigHelper::new(config_result.config);
         let managed_buffers = ManagedBuffers::new();
 
+        // Create global capacity managers
+        let network_managers =
+            CapacityManagers::from_resolved_limits(&config.resolve_network_limits());
+        let s3_managers = CapacityManagers::from_resolved_limits(&config.resolve_s3_limits());
+
         Ok(Self {
             config,
             managed_buffers,
+            network_managers,
+            s3_managers,
         })
     }
 
@@ -121,8 +131,13 @@ impl App {
     /// Create a repository from a specification.
     pub async fn create_repo(&self, ctx: AppCreateRepoContext) -> Result<Arc<Repo>> {
         // TODO: Use a real cache implementation when available
-        let repo_ctx = CreateRepoContext::new(self.config.clone(), NoopCaches)
-            .with_allow_uninitialized(ctx.allow_uninitialized);
+        let repo_ctx = CreateRepoContext::new(
+            self.config.clone(),
+            NoopCaches,
+            self.network_managers.clone(),
+            self.s3_managers.clone(),
+        )
+        .with_allow_uninitialized(ctx.allow_uninitialized);
 
         let repo = create_repo(&ctx.spec, &repo_ctx).await?;
         Ok(Arc::new(repo))
@@ -145,8 +160,8 @@ impl App {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_app_creation() {
+    #[tokio::test]
+    async fn test_app_creation() {
         let ctx = AppContext::default();
         let app = App::new(ctx).unwrap();
         assert!(app.config().config().cache.no_cache == false);

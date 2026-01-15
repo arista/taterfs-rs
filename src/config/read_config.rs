@@ -21,6 +21,10 @@ use super::{
 
 const DEFAULT_CACHE_PATH: &str = "/tmp/tfsconfig-cache";
 const DEFAULT_CACHE_NO_CACHE: bool = false;
+const DEFAULT_CACHE_PENDING_WRITES_FLUSH_PERIOD_MS: u64 = 500;
+const DEFAULT_CACHE_PENDING_WRITES_MAX_COUNT: usize = 10_000;
+const DEFAULT_CACHE_PENDING_WRITES_MAX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const DEFAULT_CACHE_MAX_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_MEMORY_MAX: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_NETWORK_MAX_CONCURRENT_REQUESTS: u32 = 40;
 const DEFAULT_NETWORK_MAX_REQUESTS_PER_SECOND: u32 = 100;
@@ -273,6 +277,10 @@ fn default_config() -> Config {
         cache: CacheConfig {
             path: PathBuf::from(DEFAULT_CACHE_PATH),
             no_cache: DEFAULT_CACHE_NO_CACHE,
+            pending_writes_flush_period_ms: DEFAULT_CACHE_PENDING_WRITES_FLUSH_PERIOD_MS,
+            pending_writes_max_count: DEFAULT_CACHE_PENDING_WRITES_MAX_COUNT,
+            pending_writes_max_size: ByteSize(DEFAULT_CACHE_PENDING_WRITES_MAX_SIZE),
+            max_memory_size: ByteSize(DEFAULT_CACHE_MAX_MEMORY_SIZE),
         },
         memory: MemoryConfig {
             max: Limit::Value(ByteSize(DEFAULT_MEMORY_MAX)),
@@ -345,11 +353,31 @@ fn parse_s3_settings(ini: &Ini, section: &str) -> S3Settings {
 /// Apply an INI file's contents to a Config, layering on top of existing values.
 fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
     // [cache] section
-    if ini.get("cache", "path").is_some() || ini.get("cache", "no-cache").is_some() {
-        if let Some(path) = ini.get("cache", "path") {
-            config.cache.path = PathBuf::from(path);
-        }
-        config.cache.no_cache = parse_bool(ini, "cache", "no-cache", config.cache.no_cache)?;
+    if let Some(path) = ini.get("cache", "path") {
+        config.cache.path = PathBuf::from(path);
+    }
+    config.cache.no_cache = parse_bool(ini, "cache", "no-cache", config.cache.no_cache)?;
+    if let Some(val) = ini.get("cache", "pending_writes_flush_period_ms") {
+        config.cache.pending_writes_flush_period_ms = val.parse().map_err(|e| {
+            ConfigError::InvalidInteger {
+                value: val.clone(),
+                source: e,
+            }
+        })?;
+    }
+    if let Some(val) = ini.get("cache", "pending_writes_max_count") {
+        config.cache.pending_writes_max_count = val.parse().map_err(|e| {
+            ConfigError::InvalidInteger {
+                value: val.clone(),
+                source: e,
+            }
+        })?;
+    }
+    if let Some(val) = ini.get("cache", "pending_writes_max_size") {
+        config.cache.pending_writes_max_size = ByteSize::parse(&val)?;
+    }
+    if let Some(val) = ini.get("cache", "max_memory_size") {
+        config.cache.max_memory_size = ByteSize::parse(&val)?;
     }
 
     // [memory] section
@@ -503,6 +531,30 @@ fn apply_cache_override(config: &mut Config, param: &str, value: &str) -> Result
         }
         "no_cache" | "no-cache" => {
             config.cache.no_cache = parse_bool_value(param, value)?;
+            Ok(())
+        }
+        "pending_writes_flush_period_ms" => {
+            config.cache.pending_writes_flush_period_ms =
+                value.parse().map_err(|e| ConfigError::InvalidInteger {
+                    value: value.to_string(),
+                    source: e,
+                })?;
+            Ok(())
+        }
+        "pending_writes_max_count" => {
+            config.cache.pending_writes_max_count =
+                value.parse().map_err(|e| ConfigError::InvalidInteger {
+                    value: value.to_string(),
+                    source: e,
+                })?;
+            Ok(())
+        }
+        "pending_writes_max_size" => {
+            config.cache.pending_writes_max_size = ByteSize::parse(value)?;
+            Ok(())
+        }
+        "max_memory_size" => {
+            config.cache.max_memory_size = ByteSize::parse(value)?;
             Ok(())
         }
         _ => Err(ConfigError::InvalidOverrideKey {

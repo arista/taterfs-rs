@@ -58,8 +58,18 @@ pub struct S3Settings {
 /// [cache] section - local durable cache configuration.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Path to the cache database directory.
     pub path: PathBuf,
+    /// If true, caching is disabled entirely.
     pub no_cache: bool,
+    /// How often to flush pending writes to disk (milliseconds).
+    pub pending_writes_flush_period_ms: u64,
+    /// Maximum number of pending writes before forcing a flush.
+    pub pending_writes_max_count: usize,
+    /// Maximum total size of pending writes before forcing a flush.
+    pub pending_writes_max_size: ByteSize,
+    /// Maximum memory for the read cache.
+    pub max_memory_size: ByteSize,
 }
 
 /// [memory] section - memory usage limits.

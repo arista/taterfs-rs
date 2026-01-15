@@ -7,7 +7,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::CapacityManagers;
-use crate::caches::NoopCaches;
+use crate::caches::{
+    CacheDb, CachingConfig, CachingKeyValueDb, DbFileStoreCaches, DbRepoCaches, FileStoreCaches,
+    LmdbKeyValueDb, NoopCaches, NoopFileStoreCaches, RepoCaches,
+};
 use crate::config::{read_config, ConfigHelper, ConfigSource};
 use crate::file_store::{
     create_file_store, CreateFileStoreContext, CreateFileStoreError, FileStore,
@@ -25,6 +28,10 @@ pub enum AppError {
     /// Configuration error.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Cache initialization error.
+    #[error("failed to initialize cache: {0}")]
+    CacheInit(String),
 
     /// Repository creation error.
     #[error("failed to create repository: {0}")]
@@ -99,6 +106,8 @@ pub struct App {
     managed_buffers: ManagedBuffers,
     network_managers: CapacityManagers,
     s3_managers: CapacityManagers,
+    repo_caches: Arc<dyn RepoCaches>,
+    file_store_caches: Arc<dyn FileStoreCaches>,
 }
 
 impl App {
@@ -115,11 +124,40 @@ impl App {
             CapacityManagers::from_resolved_limits(&config.resolve_network_limits());
         let s3_managers = CapacityManagers::from_resolved_limits(&config.resolve_s3_limits());
 
+        // Create cache infrastructure
+        let cache_config = config.config().cache.clone();
+        let (repo_caches, file_store_caches): (Arc<dyn RepoCaches>, Arc<dyn FileStoreCaches>) =
+            if cache_config.no_cache {
+                // Caching disabled - use no-op implementations
+                (Arc::new(NoopCaches), Arc::new(NoopFileStoreCaches))
+            } else {
+                // Create LMDB-backed cache
+                let lmdb = LmdbKeyValueDb::new(&cache_config.path)
+                    .map_err(|e| AppError::CacheInit(e.to_string()))?;
+
+                let caching_config = CachingConfig {
+                    flush_period_ms: cache_config.pending_writes_flush_period_ms,
+                    max_pending_count: cache_config.pending_writes_max_count,
+                    max_pending_size: cache_config.pending_writes_max_size.0 as usize,
+                    max_cache_size: cache_config.max_memory_size.0 as usize,
+                };
+
+                let caching_db = CachingKeyValueDb::new(Arc::new(lmdb), caching_config);
+                let cache_db = Arc::new(CacheDb::new(Arc::new(caching_db)));
+
+                (
+                    Arc::new(DbRepoCaches::new(cache_db.clone())),
+                    Arc::new(DbFileStoreCaches::new(cache_db)),
+                )
+            };
+
         Ok(Self {
             config,
             managed_buffers,
             network_managers,
             s3_managers,
+            repo_caches,
+            file_store_caches,
         })
     }
 
@@ -130,10 +168,9 @@ impl App {
 
     /// Create a repository from a specification.
     pub async fn create_repo(&self, ctx: AppCreateRepoContext) -> Result<Arc<Repo>> {
-        // TODO: Use a real cache implementation when available
         let repo_ctx = CreateRepoContext::new(
             self.config.clone(),
-            NoopCaches,
+            self.repo_caches.clone(),
             self.network_managers.clone(),
             self.s3_managers.clone(),
         )

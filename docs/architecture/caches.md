@@ -105,6 +105,7 @@ This is an even more fundamental interface to an underlying key/value database t
 KeyValueDb {
   async exists(key: bytes) -> bool
   async get(key: bytes) -> Option<bytes>
+  async list_entries(prefix: bytes) -> KeyValueEntries
   async transaction() -> KeyValueDbTransaction
   async write() -> KeyValueDbWrites
 }
@@ -119,6 +120,18 @@ KeyValueDbTransaction {
 KeyValueDbWrites {
   async set(key: bytes, val: bytes)
   async del(key: bytes)
+}
+
+KeyValueEntries {
+  async get() -> KeyValueEntry
+}
+
+KeyValueEntry {
+  key: bytes
+  value: bytes
+  
+  key_string() -> string
+  value_string() -> string
 }
 ```
 

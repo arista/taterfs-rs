@@ -46,21 +46,40 @@ impl Default for CachingConfig {
 // CacheEntry
 // =============================================================================
 
-/// A cached value with its size.
+/// A cached value with its size (including key size for memory accounting).
 #[derive(Clone)]
-enum CacheEntry {
-    /// Value exists with this data.
-    Present(Vec<u8>),
-    /// Value is known to not exist.
-    Absent,
+struct CacheEntry {
+    /// The cached value, or None if known to not exist.
+    value: Option<Vec<u8>>,
+    /// Size of the key (for accurate memory accounting).
+    key_len: usize,
 }
 
 impl CacheEntry {
-    fn size(&self) -> usize {
-        match self {
-            CacheEntry::Present(v) => v.len(),
-            CacheEntry::Absent => 0,
+    /// Create an entry for a present value.
+    fn present(key_len: usize, value: Vec<u8>) -> Self {
+        Self {
+            value: Some(value),
+            key_len,
         }
+    }
+
+    /// Create an entry for an absent (non-existent) key.
+    fn absent(key_len: usize) -> Self {
+        Self {
+            value: None,
+            key_len,
+        }
+    }
+
+    /// Total memory size of this entry (key + value).
+    fn size(&self) -> usize {
+        self.key_len + self.value.as_ref().map_or(0, |v| v.len())
+    }
+
+    /// Whether this entry represents an existing value.
+    fn is_present(&self) -> bool {
+        self.value.is_some()
     }
 }
 
@@ -142,45 +161,51 @@ impl CachingKeyValueDb {
             std::mem::take(&mut state.pending)
         };
 
-        // Write all pending operations
+        // Write all pending operations to underlying database
         let mut txn = self.inner.transaction().await?;
-        for (_, op) in pending {
+        for op in pending.values() {
             match op {
-                WriteOp::Set { key, value } => txn.set(key, value),
-                WriteOp::Del { key } => txn.del(key),
+                WriteOp::Set { key, value } => txn.set(key.clone(), value.clone()),
+                WriteOp::Del { key } => txn.del(key.clone()),
             }
         }
         txn.commit().await?;
+
+        // Now that writes are committed, add them to the cache
+        {
+            let mut state = self.state.lock().await;
+            for (key, op) in pending {
+                let entry = match op {
+                    WriteOp::Set { value, .. } => CacheEntry::present(key.len(), value),
+                    WriteOp::Del { .. } => CacheEntry::absent(key.len()),
+                };
+                Self::add_to_cache(&mut state, key, entry, self.config.max_cache_size);
+            }
+        }
 
         Ok(())
     }
 
     /// Add an entry to the cache, evicting old entries if needed.
+    ///
+    /// Note: Pending writes are NOT stored in the cache, so eviction is safe.
     fn add_to_cache(state: &mut CacheState, key: Vec<u8>, entry: CacheEntry, max_size: usize) {
-        let entry_size = key.len() + entry.size();
+        let entry_size = entry.size();
 
         // Remove old entry if it exists
         if let Some((_, old_entry)) = state.cache.pop_entry(&key) {
-            state.cache_size = state.cache_size.saturating_sub(key.len() + old_entry.size());
+            state.cache_size = state.cache_size.saturating_sub(old_entry.size());
         }
 
         // Evict entries until we have room
         while state.cache_size + entry_size > max_size && !state.cache.is_empty() {
-            if let Some((old_key, old_entry)) = state.cache.pop_lru() {
-                // Don't evict pending writes
-                if state.pending.contains_key(&old_key) {
-                    // Put it back and try another
-                    state.cache.put(old_key, old_entry);
-                    break;
-                }
-                state.cache_size = state
-                    .cache_size
-                    .saturating_sub(old_key.len() + old_entry.size());
+            if let Some((_, old_entry)) = state.cache.pop_lru() {
+                state.cache_size = state.cache_size.saturating_sub(old_entry.size());
             }
         }
 
-        state.cache.put(key, entry);
         state.cache_size += entry_size;
+        state.cache.put(key, entry);
     }
 }
 
@@ -191,31 +216,33 @@ impl KeyValueDb for CachingKeyValueDb {
         {
             let mut state = self.state.lock().await;
 
-            // Check pending writes
+            // Check pending writes first (they are not in the cache)
             if let Some(op) = state.pending.get(key) {
                 return Ok(matches!(op, WriteOp::Set { .. }));
             }
 
             // Check read cache
             if let Some(entry) = state.cache.get(key) {
-                return Ok(matches!(entry, CacheEntry::Present(_)));
+                return Ok(entry.is_present());
             }
         }
 
         // Query underlying database
         let exists = self.inner.exists(key).await?;
 
-        // Cache the result
+        // Cache the result (but not if there's a pending write for this key)
         {
             let mut state = self.state.lock().await;
-            let entry = if exists {
-                // We don't have the value, just mark as present
-                // A subsequent get() will fetch the actual value
-                CacheEntry::Present(Vec::new())
-            } else {
-                CacheEntry::Absent
-            };
-            Self::add_to_cache(&mut state, key.to_vec(), entry, self.config.max_cache_size);
+            if !state.pending.contains_key(key) {
+                let entry = if exists {
+                    // We don't have the value, just mark as present with empty value
+                    // A subsequent get() will fetch the actual value
+                    CacheEntry::present(key.len(), Vec::new())
+                } else {
+                    CacheEntry::absent(key.len())
+                };
+                Self::add_to_cache(&mut state, key.to_vec(), entry, self.config.max_cache_size);
+            }
         }
 
         Ok(exists)
@@ -226,7 +253,7 @@ impl KeyValueDb for CachingKeyValueDb {
         {
             let mut state = self.state.lock().await;
 
-            // Check pending writes
+            // Check pending writes first (they are not in the cache)
             if let Some(op) = state.pending.get(key) {
                 return match op {
                     WriteOp::Set { value, .. } => Ok(Some(value.clone())),
@@ -236,13 +263,13 @@ impl KeyValueDb for CachingKeyValueDb {
 
             // Check read cache
             if let Some(entry) = state.cache.get(key) {
-                match entry {
-                    CacheEntry::Present(v) if !v.is_empty() => return Ok(Some(v.clone())),
-                    CacheEntry::Present(_) => {
+                match &entry.value {
+                    Some(v) if !v.is_empty() => return Ok(Some(v.clone())),
+                    Some(_) => {
                         // We know it exists but don't have the value cached
                         // Fall through to fetch it
                     }
-                    CacheEntry::Absent => return Ok(None),
+                    None => return Ok(None),
                 }
             }
         }
@@ -250,14 +277,16 @@ impl KeyValueDb for CachingKeyValueDb {
         // Query underlying database
         let value = self.inner.get(key).await?;
 
-        // Cache the result
+        // Cache the result (but not if there's a pending write for this key)
         {
             let mut state = self.state.lock().await;
-            let entry = match &value {
-                Some(v) => CacheEntry::Present(v.clone()),
-                None => CacheEntry::Absent,
-            };
-            Self::add_to_cache(&mut state, key.to_vec(), entry, self.config.max_cache_size);
+            if !state.pending.contains_key(key) {
+                let entry = match &value {
+                    Some(v) => CacheEntry::present(key.len(), v.clone()),
+                    None => CacheEntry::absent(key.len()),
+                };
+                Self::add_to_cache(&mut state, key.to_vec(), entry, self.config.max_cache_size);
+            }
         }
 
         Ok(value)
@@ -279,7 +308,6 @@ impl KeyValueDb for CachingKeyValueDb {
 
         Ok(Box::new(CachingWrites {
             state: self.state.clone(),
-            config: self.config.clone(),
             local_pending: Vec::new(),
         }))
     }
@@ -382,7 +410,6 @@ impl KeyValueDbTransaction for CachingTransaction {
 
 struct CachingWrites {
     state: Arc<Mutex<CacheState>>,
-    config: CachingConfig,
     local_pending: Vec<WriteOp>,
 }
 
@@ -402,7 +429,7 @@ impl KeyValueDbWrites for CachingWrites {
             return Ok(());
         }
 
-        // Add to shared pending state
+        // Add to shared pending state (NOT to the cache - pending entries are separate)
         let mut state = self.state.lock().await;
         for op in self.local_pending {
             let size = op.size();
@@ -413,17 +440,10 @@ impl KeyValueDbWrites for CachingWrites {
                 state.pending_size = state.pending_size.saturating_sub(old_op.size());
             }
 
-            // Update cache with new value
-            let entry = match &op {
-                WriteOp::Set { value, .. } => CacheEntry::Present(value.clone()),
-                WriteOp::Del { .. } => CacheEntry::Absent,
-            };
-            CachingKeyValueDb::add_to_cache(
-                &mut state,
-                key.clone(),
-                entry,
-                self.config.max_cache_size,
-            );
+            // Remove from cache if present (pending entries are not cached)
+            if let Some((_, old_entry)) = state.cache.pop_entry(&key) {
+                state.cache_size = state.cache_size.saturating_sub(old_entry.size());
+            }
 
             state.pending.insert(key, op);
             state.pending_size += size;

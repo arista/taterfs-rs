@@ -16,6 +16,10 @@ The following rules are applied to find the config file:
 * [cache] section - configuration of the durable cache stored locally
     * path={default /tmp/tfsconfig-cache}
     * no_cache={true|false, default false} - if true, then the caches are bypassed
+    * pending_writes_flush_period_ms={default 500} - the interval at which the underlying pending cache writes are flushed
+    * pending_writes_max_count={default 10000} - length of the pending writes list before flushing
+    * pending_writes_max_size={default 10000000} - size of the pending writes list before flushing
+    * max_memory_size={default 10000000} - maximum amount of memory usage for the cache
 
 * [filestores] section
     * global_ignores={comma-separated list of gitignore-format entries to be used by FileSource.scan(), default ".git/,.tfs/"}

@@ -27,12 +27,175 @@ interface RepoCaches {
 }
 ```
 
+### FileStoreCache
+
+```
+interface FileStoreCache {
+  async get_fingerprinted_file_info(path) -> Option<FingerprintedFileInfo>
+  async set_fingerprinted_file_info(path, FingerprintedFileInfo)
+}
+
+interface FileStoreCaches {
+  // Returns the FileStoreCache for the given url, creating it if not yet found
+  async get_filestore_cache(filestore_url: string) -> FileStoreCache
+}
+
+FingerprintedFileInfo {
+  fingerprint: string
+  object_id: string
+}
+
+```
+
+### CacheDb
+
+The above interfaces are built against an underlying CacheDb service (all methods async)
+
+```
+DbId = u64
+
+CacheDb {
+  get_next_id() -> Option<DbId>
+  set_next_id(id: DbId)
+  generate_next_id() -> DbId
+
+  get_repository_id(uuid) -> Option<DbId>
+  set_repository_id(uuid, id: DbId)
+  get_or_create_repository_id(uuid) -> DbId
+  get_exists(repo_id: DbId, object_id: ObjectId) -> bool
+  set_exists(repo_id: DbId, object_id: ObjectId)
+  get_fully_stored(repo_id: DbId, object_id: ObjectId) -> bool
+  set_fully_stored(repo_id: DbId, object_id: ObjectId)
+
+  get_object(object_id: ObjectId) -> RepoObject | null
+  set_object(object_id: ObjectId, obj: RepoObject)
+
+  get_filestore_id(filestore_url) -> Option<DbId>
+  set_filestore_id(filestore_url, id: DbId)
+  get_or_create_filestore_id(filestore_url) -> DbId
+  get_fingerprinted_file_info(filetore_id: DbId, path_id: DbId) -> Option<FingerprintedFileInfo>
+  set_fingerprinted_file_info(filetore_id: DbId, path_id: DbId, info: FingerprintedFileInfo)
+  get_name_id(filestore_id: DbId, name: string) -> Option<DbId>
+  set_name_id(filestore_id: DbId, name: string, id: DbId)
+  get_or_create_name_id(filestore_id: DbId, name: string) -> DbId
+  get_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId) -> Option<DbId>
+  set_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId, path_id: DbId)
+  get_or_create_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: string) -> DbId
+  get_path_id(path: string) -> DbId
+}
+```
+
+The RepositoryCache and FileStoreCache are thin wrappers around this service, which each store a DbId obtained from get_repository_id or get_filestore_id, and pass that id in as appropriate.
+
+As will be described later, these calls map to a key/value database in a straightforward way.  The get/set calls map nearly directly.  Some of the functions are convenience methods built on top of that:
+
+* generate_next_id() -> get_next_id(), set_next_id(incremented id), return the retrieved id
+* get_or_create_repository_id does a get_repository_id/[next_id/set_repository_id] sequence
+* get_or_create_filestore_id does a get_filestore_id/[next_id/set_filestore_id] sequence
+* get_or_create_name_id does a get_name_id/[next_id/set_name_id] sequence
+* get_or_create_path_entry_id does a get_path_entry_id/[next_id/set_path_entry_id] sequence
+
+The path functions are all intended to allow paths to be used in keys (for get_fingerprinted_file_info, for example) while cutting down on key size.  Each component of a path is mapped to a name id, and the path hierarchy is represented by "path entry" mappings from a [parent path, name] combo to a new path id.  The get_path_id() function is a convenience function that goes through that logic.
+
+### KeyValueDb
+
+This is an even more fundamental interface to an underlying key/value database that will be used to implement CacheDb.
+
+```
+KeyValueDb {
+  async exists(key: bytes) -> bool
+  async get(key: bytes) -> Option<bytes>
+  async transaction() -> KeyValueDbTransaction
+  async write() -> KeyValueDbWrites
+}
+
+KeyValueDbTransaction {
+  async exists(key: bytes) -> bool
+  async get(key: bytes) -> Option<bytes>
+  async set(key: bytes, val: bytes)
+  async del(key: bytes)
+}
+
+KeyValueDbWrites {
+  async set(key: bytes, val: bytes)
+  async del(key: bytes)
+}
+```
+
+(there is some flexibility in this depending on the implementation of key/value database used)
+
+The difference between write() and transaction() is just that transaction() indicates that the writes are intended to be written transactionally (committed when the KeyValueDbWrites is dropped), whereas write() just indicates that the writes may be written at any time.  Some implementations may just have both do the same thing.
+
 ## Implementations
 
-### KeyValueCacheDB
+### CacheDb on KeyValueDb
 
-TODO: define an interface for a generic key/value cache database, select a key/value cache implementation.  Also define an implementation for an in-memory implementation that preloads from the db, and buffers changes to the db
+The CacheDb functions map to KeyValueDb using the following mappings
 
-### CacheDBRepositoryCache
+A Key/Value database is used to store the cache.  The database is organized as follows:
 
-TODO: define the cache implementation, implemented on top of a KeyValueCacheDB
+Some notes:
+
+* **dbid** refers to a u64 id allocated in the database using next-id.
+* "encoded" means that a string is encoded using the equivalent of JS encodeURIComponent
+
+
+```
+next-id -> {the next dbid to be generated}
+
+repository-id-by-uuid/{encoded uuid} -> {repository dbid} - implements get/set_repository_id
+ex/{repository dbid}/{object id} -> {empty value} - implements get/set_exists
+fs/{repository dbid}/{object id} -> {empty value} - implements get/set_fully_stored
+
+ro/{object id} -> "RepoObject JSON in canonical form" - implements get/set_object
+
+filestore-id-by-url/{filestore url, uri-component-encoded} -> implements get/set_filestore_id
+na/{filestore dbid}/{encoded name} -> {name id} - implements get/set_name_id
+pa/{filestore dbid}/{path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id
+fi/{filestore dbid}/{path dbid} -> {file info, of the form "{fingerprint}|{file hash}"} - implements get/set_fingerprinted_file_info
+```
+#### Memory Caching and Write Backs
+
+The system makes the following assumptions that affect the design:
+
+* Multiple processes may be using the same cache files simultaneously
+* Transactional writes will get expensive at high frequency
+* Most writes to the database are not critical - it's ok if the system goes down without storing a set of edits (except for some cases)
+* It is not critical (in most cases) for one process to "see" the writes from another process in a timely mannger
+* "Preloading" many entries at once may improve lookup speed
+
+The design addresses these in the following ways:
+
+* Generating a DbId in its get/set cycle does need to be fully transactional.  To cut down on transactions, the system should retrieve a "block" of id's into memory (i.e., increment the next_id counter by say, 100), then hand out those id's until the block is exhausted and only then go back through the transactional get/set cycle again.
+* The same is true for the get_or_create_repository_id and get_or_create_filestore_id calls.
+* All other writes need to be buffered into a pending list that is periodically "flushed" in a single transaction.  The flushing logic is:
+    * Every 500ms
+    * When the number of items in the list exceeds 10k
+    * At shutdown (best effort)
+* All of the read methods must take into account any pending writes.
+
+This implies that a full in-memory cache will be needed to handle the write-back behavior.  There are two ways this could happen:
+
+* Implement the caching behavior at the KeyValueDb level.  Simpler implementation, but might be at some cost to performance, since the CacheDb still needs to convert rust values to and from key/value structures
+* Implement the caching behavior at the CacheDb level.  This would be most efficient, since rust objects can be stored in memory, but is most complex since each type of cached object effectively needs its own cache.
+
+To start with, go with caching at the KeyValueDb level (described below), and move to the other approach if the performance cost warrants it.
+
+### LmdbKeyValueDb
+
+Explore implementing KeyValueDb with LMDB, with the heed crate.  Determine if this is a low-cost mapping.
+
+Implement this without any caching.  The write() and transaction() calls both do the same thing.
+
+### CachingKeyValueDb
+
+This takes a KeyValueDb and implements a write-back caching layer on top of it.  Its transaction() call allows for direct transactions on the underlying KeyValueDb (needed for generate_next_id).  Its write() call however, writes to a pending list.
+
+The pending writes are stored in the memory cache, so that reads of pending writes are correct.  Pending writes are flushed to the underlying KeyValueDb (using transaction()) on these conditions (some specified by [configuration](./configuration.md).
+
+* Every "pending_writes_flush_period_ms" (from [cache] config section)
+* If the number of items in the pending_writes_is more than "pending_writes_max_count" (from [cache] config section)
+* If the approximate size of items in the pending_writes_is more than "pending_writes_max_size" (from [cache] config section)
+* At shutdown (best effort)
+
+The cache should also limit the use of its non-pending entries to "max_memory_size" (from [cache] config section), evicting entries in using an LRU algorithm.

@@ -11,6 +11,19 @@ use crate::repository::RepoObject;
 
 use super::key_value_db::{KeyValueDb, KeyValueDbError, Result};
 
+// =============================================================================
+// FingerprintedFileInfo
+// =============================================================================
+
+/// Information about a file identified by its fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintedFileInfo {
+    /// The fingerprint that identifies this version of the file.
+    pub fingerprint: String,
+    /// The object ID of the file in the repository.
+    pub object_id: String,
+}
+
 /// Database ID type (u64).
 pub type DbId = u64;
 
@@ -383,7 +396,7 @@ impl CacheDb {
         &self,
         filestore_id: DbId,
         path_id: DbId,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<FingerprintedFileInfo>> {
         let key = file_info_key(filestore_id, path_id);
         match self.db.get(&key).await? {
             Some(bytes) => {
@@ -391,7 +404,10 @@ impl CacheDb {
                     .map_err(|e| KeyValueDbError::Encoding(e.to_string()))?;
                 let parts: Vec<&str> = s.splitn(2, '|').collect();
                 if parts.len() == 2 {
-                    Ok(Some((parts[0].to_string(), parts[1].to_string())))
+                    Ok(Some(FingerprintedFileInfo {
+                        fingerprint: parts[0].to_string(),
+                        object_id: parts[1].to_string(),
+                    }))
                 } else {
                     Ok(None)
                 }
@@ -405,11 +421,10 @@ impl CacheDb {
         &self,
         filestore_id: DbId,
         path_id: DbId,
-        fingerprint: &str,
-        object_id: &str,
+        info: &FingerprintedFileInfo,
     ) -> Result<()> {
         let key = file_info_key(filestore_id, path_id);
-        let value = format!("{}|{}", fingerprint, object_id);
+        let value = format!("{}|{}", info.fingerprint, info.object_id);
         let mut writes = self.db.write().await?;
         writes.set(key, value.into_bytes());
         writes.flush().await
@@ -601,17 +616,20 @@ mod tests {
             .is_none());
 
         // Set it
-        db.set_fingerprinted_file_info(fs_id, path_id, "12345:100:-", "objectid123")
+        let info = FingerprintedFileInfo {
+            fingerprint: "12345:100:-".to_string(),
+            object_id: "objectid123".to_string(),
+        };
+        db.set_fingerprinted_file_info(fs_id, path_id, &info)
             .await
             .unwrap();
 
         // Get it back
-        let info = db
+        let retrieved = db
             .get_fingerprinted_file_info(fs_id, path_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(info.0, "12345:100:-");
-        assert_eq!(info.1, "objectid123");
+        assert_eq!(retrieved, info);
     }
 }

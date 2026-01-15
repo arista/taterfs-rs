@@ -53,18 +53,8 @@ impl From<KeyValueDbError> for FileStoreCacheError {
 /// Result type for file store cache operations.
 pub type Result<T> = std::result::Result<T, FileStoreCacheError>;
 
-// =============================================================================
-// FingerprintedFileInfo
-// =============================================================================
-
-/// Information about a file identified by its fingerprint.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FingerprintedFileInfo {
-    /// The fingerprint that identifies this version of the file.
-    pub fingerprint: String,
-    /// The object ID of the file in the repository.
-    pub object_id: String,
-}
+// Re-export FingerprintedFileInfo for convenience
+pub use super::cache_db::FingerprintedFileInfo;
 
 // =============================================================================
 // FileStoreCache Trait
@@ -170,17 +160,10 @@ impl FileStoreCache for DbFileStoreCache {
         };
 
         // Get the cached info
-        match self
+        Ok(self
             .cache_db
             .get_fingerprinted_file_info(self.filestore_id, path_id)
-            .await?
-        {
-            Some((fingerprint, object_id)) => Ok(Some(FingerprintedFileInfo {
-                fingerprint,
-                object_id,
-            })),
-            None => Ok(None),
-        }
+            .await?)
     }
 
     async fn set_fingerprinted_file_info(
@@ -193,12 +176,7 @@ impl FileStoreCache for DbFileStoreCache {
 
         // Set the cached info
         self.cache_db
-            .set_fingerprinted_file_info(
-                self.filestore_id,
-                path_id,
-                &info.fingerprint,
-                &info.object_id,
-            )
+            .set_fingerprinted_file_info(self.filestore_id, path_id, info)
             .await?;
 
         Ok(())

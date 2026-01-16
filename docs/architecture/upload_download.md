@@ -53,8 +53,12 @@ async upload_directory_from_scan_events(store: FileStore, repo: Repo, path: Path
         * Add its Directory/complete result to the DirectoryListBuilder
     * File
         * Call get_fingerprinted_file_info from the FileStore's cache
-            * If the cached fingerprint matches the fingerprint, then add a FileEntry with the corresponding hash to the DirectoryListBuilder, and a NoopComplete
-            * Otherwise:
+            * If:
+                * The cached fingerprint matches the fingerprint, AND
+                * The repo's cache says the corresponding hash has been fully stored
+            * Then
+                * Add a FileEntry with the corresponding hash to the DirectoryListBuilder, and a NoopComplete
+            * Else:
                 * Call upload_file
                 * add a FileEntry with the corresponding File and complete
                 * Call set_fingerprinted_file_info on the FileStore's cache

@@ -61,10 +61,6 @@ pub enum UploadError {
     /// Path not found.
     #[error("path not found: {0}")]
     NotFound(String),
-
-    /// Unexpected end of scan events.
-    #[error("unexpected end of scan events")]
-    UnexpectedEndOfScan,
 }
 
 /// Result type for upload operations.
@@ -202,11 +198,19 @@ async fn upload_directory_from_scan_events(
     let mut builder = DirectoryListBuilder::new(repo.clone());
 
     loop {
-        let event = scan_events
-            .next()
-            .await
-            .transpose()?
-            .ok_or(UploadError::UnexpectedEndOfScan)?;
+        let event = match scan_events.next().await.transpose()? {
+            Some(event) => event,
+            None => {
+                // End of stream - finish this directory (happens for root directory)
+                let result = builder.finish().await?;
+                let upload_result = UploadDirectoryResult {
+                    directory: result.object,
+                    hash: result.hash,
+                };
+                let with_complete = WithComplete::new(upload_result, result.complete);
+                return Ok((with_complete, scan_events));
+            }
+        };
 
         match event {
             ScanEvent::ExitDirectory => {

@@ -165,8 +165,8 @@ impl CachingKeyValueDb {
         let mut txn = self.inner.transaction().await?;
         for op in pending.values() {
             match op {
-                WriteOp::Set { key, value } => txn.set(key.clone(), value.clone()),
-                WriteOp::Del { key } => txn.del(key.clone()),
+                WriteOp::Set { key, value } => txn.set(key.clone(), value.clone()).await,
+                WriteOp::Del { key } => txn.del(key.clone()).await,
             }
         }
         txn.commit().await?;
@@ -375,16 +375,17 @@ impl KeyValueDbTransaction for CachingTransaction {
         self.inner.lock().await.get(key).await
     }
 
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
-        // This is called with &mut self, so we can use blocking lock
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
         self.local_pending
-            .blocking_lock()
+            .lock()
+            .await
             .push(WriteOp::Set { key, value: val });
     }
 
-    fn del(&mut self, key: Vec<u8>) {
+    async fn del(&mut self, key: Vec<u8>) {
         self.local_pending
-            .blocking_lock()
+            .lock()
+            .await
             .push(WriteOp::Del { key });
     }
 
@@ -396,8 +397,8 @@ impl KeyValueDbTransaction for CachingTransaction {
         // Apply local pending to inner transaction
         for op in local_pending {
             match op {
-                WriteOp::Set { key, value } => inner.set(key, value),
-                WriteOp::Del { key } => inner.del(key),
+                WriteOp::Set { key, value } => inner.set(key, value).await,
+                WriteOp::Del { key } => inner.del(key).await,
             }
         }
         inner.commit().await
@@ -415,12 +416,12 @@ struct CachingWrites {
 
 #[async_trait]
 impl KeyValueDbWrites for CachingWrites {
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
         self.local_pending
             .push(WriteOp::Set { key, value: val });
     }
 
-    fn del(&mut self, key: Vec<u8>) {
+    async fn del(&mut self, key: Vec<u8>) {
         self.local_pending.push(WriteOp::Del { key });
     }
 
@@ -471,7 +472,7 @@ mod tests {
 
         // Write through cache
         let mut writes = db.write().await.unwrap();
-        writes.set(b"key1".to_vec(), b"value1".to_vec());
+        writes.set(b"key1".to_vec(), b"value1".to_vec()).await;
         writes.flush().await.unwrap();
 
         // Read from cache
@@ -487,7 +488,7 @@ mod tests {
 
         // Write to pending
         let mut writes = db.write().await.unwrap();
-        writes.set(b"key1".to_vec(), b"value1".to_vec());
+        writes.set(b"key1".to_vec(), b"value1".to_vec()).await;
         writes.flush().await.unwrap();
 
         // Should be visible even before flush to underlying db
@@ -508,7 +509,7 @@ mod tests {
 
         // Write to pending (not yet flushed to underlying)
         let mut writes = db.write().await.unwrap();
-        writes.set(b"key1".to_vec(), b"value1".to_vec());
+        writes.set(b"key1".to_vec(), b"value1".to_vec()).await;
         writes.flush().await.unwrap();
 
         // Transaction should see pending writes

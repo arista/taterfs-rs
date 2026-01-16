@@ -315,7 +315,42 @@ impl SourceChunk for S3SourceChunk {
 
 #[async_trait]
 impl FileSource for S3FileSource {
-    async fn scan(&self) -> Result<ScanEvents> {
+    async fn scan(&self, path: Option<&Path>) -> Result<ScanEvents> {
+        // Determine the starting prefix
+        let start_prefix = match path {
+            Some(p) => {
+                let path_str = p.to_string_lossy();
+                if path_str.is_empty() {
+                    String::new()
+                } else {
+                    // Check if the path is a directory by listing with prefix
+                    let check_prefix = match &self.config.prefix {
+                        Some(pfx) => format!("{}/{}/", pfx, path_str),
+                        None => format!("{}/", path_str),
+                    };
+                    let response = self
+                        .client
+                        .list_objects_v2()
+                        .bucket(&self.config.bucket)
+                        .prefix(&check_prefix)
+                        .max_keys(1)
+                        .send()
+                        .await
+                        .map_err(|e| Error::Other(e.to_string()))?;
+
+                    let has_contents =
+                        !response.contents().is_empty() || !response.common_prefixes().is_empty();
+
+                    if !has_contents {
+                        // Path doesn't exist as a directory in S3
+                        return Err(Error::NotADirectory(path_str.into_owned()));
+                    }
+                    path_str.into_owned()
+                }
+            }
+            None => String::new(),
+        };
+
         let source = Arc::new(ScanSourceAdapter {
             client: self.client.clone(),
             config: self.config.clone(),
@@ -324,20 +359,12 @@ impl FileSource for S3FileSource {
         let mut events = Vec::new();
         let mut helper = ScanIgnoreHelper::new();
 
-        // Process root to load top-level ignore files
-        let root_entry = DirEntry {
-            name: String::new(),
-            path: String::new(),
-        };
-        helper
-            .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(root_entry),
-                source.as_ref(),
-            )
-            .await;
+        // Initialize helper by walking from root to the target path,
+        // loading ignore files along the way
+        helper.initialize_to_path(path, source.as_ref()).await;
 
-        // Start scanning from root
-        self.scan_directory("", &mut events, &mut helper, source.as_ref())
+        // Start scanning from the specified prefix
+        self.scan_directory(&start_prefix, &mut events, &mut helper, source.as_ref())
             .await?;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
@@ -625,7 +652,7 @@ struct ScanSourceAdapter {
 
 #[async_trait]
 impl FileSource for ScanSourceAdapter {
-    async fn scan(&self) -> Result<ScanEvents> {
+    async fn scan(&self, _path: Option<&Path>) -> Result<ScanEvents> {
         // Not used by ScanIgnoreHelper
         Ok(Box::pin(stream::empty()))
     }

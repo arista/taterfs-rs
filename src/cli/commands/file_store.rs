@@ -44,6 +44,9 @@ pub struct ScanArgs {
     #[command(flatten)]
     pub file_store: FileStoreArgs,
 
+    /// Optional path to scan from within the file store.
+    pub path: Option<String>,
+
     #[command(flatten)]
     pub output: OutputSink,
 }
@@ -57,7 +60,11 @@ impl ScanArgs {
             .get_source()
             .ok_or_else(|| CliError::Other("file store does not support reading".to_string()))?;
 
-        let mut events = source.scan().await.map_err(|e| CliError::Other(e.to_string()))?;
+        let scan_path = self.path.as_ref().map(Path::new);
+        let mut events = source
+            .scan(scan_path)
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
 
         let mut output = String::new();
         let mut indent = 0usize;

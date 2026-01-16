@@ -24,8 +24,8 @@ A FileSource's main purpose is to allow scanning through directories and files. 
 
 ```
 interface FileSource {
-  // Walks depth-first through a directory structure yielding directory and file events in lexicographic order
-  scan() -> ScanEvents
+  // Walks depth-first through a directory structure yielding directory and file events in lexicographic order.  The scan starts at the given path, which must be a directory.  The resulting ScanEvents are yielded relative to the path.  If path is None, then scan through the entire FileStore
+  scan(Option<path>) -> ScanEvents
   // Yields the contents of a file, broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md)
   get_source_chunks(path: Path) -> SourceChunks | null
   // Similar to get_source_chunks, except that multiple can be retrieved simultaneously but will still be returned in order

@@ -329,21 +329,35 @@ impl SourceChunk for MemorySourceChunk {
 
 #[async_trait]
 impl FileSource for MemoryFileStore {
-    async fn scan(&self) -> Result<ScanEvents> {
+    async fn scan(&self, path: Option<&Path>) -> Result<ScanEvents> {
+        // Determine the starting point
+        let (start_children, start_path) = match path {
+            Some(p) if !Self::is_root_path(p) => {
+                // Navigate to the specified path
+                match self.get_node(p) {
+                    Some(TreeNode::Directory(children)) => {
+                        (children, p.to_path_buf())
+                    }
+                    Some(TreeNode::File(_)) => {
+                        return Err(Error::NotADirectory(Self::path_to_string(p)));
+                    }
+                    None => {
+                        return Err(Error::NotFound(Self::path_to_string(p)));
+                    }
+                }
+            }
+            _ => (&self.root, PathBuf::new()),
+        };
+
         let mut events = Vec::new();
         let mut helper = ScanIgnoreHelper::new();
 
-        // Process root directory first to load top-level ignore files
-        let root_entry = DirEntry {
-            name: String::new(),
-            path: String::new(),
-        };
-        helper
-            .on_scan_event(&DirectoryScanEvent::EnterDirectory(root_entry), self)
-            .await;
+        // Initialize helper by walking from root to the target path,
+        // loading ignore files along the way
+        helper.initialize_to_path(path, self).await;
 
         // Scan the tree with ignore filtering
-        scan_tree_with_ignore(&self.root, PathBuf::new(), &mut events, &mut helper, self).await;
+        scan_tree_with_ignore(start_children, start_path, &mut events, &mut helper, self).await;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -543,7 +557,7 @@ mod tests {
         let store = MemoryFileStore::builder().build();
 
         // Scan should yield no events
-        let mut events = store.scan().await.unwrap();
+        let mut events = store.scan(None).await.unwrap();
         assert!(events.next().await.is_none());
 
         // Root should exist
@@ -578,7 +592,7 @@ mod tests {
 
         // Scan
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -605,7 +619,7 @@ mod tests {
 
         // Scan should be depth-first, lexicographic
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -716,7 +730,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -781,7 +795,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -811,7 +825,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -841,7 +855,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -875,7 +889,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -907,7 +921,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -941,7 +955,7 @@ mod tests {
             .build();
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())

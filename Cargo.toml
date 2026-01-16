@@ -22,6 +22,9 @@ tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt-mu
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4.3"
 configparser = "3"
+heed = "0.22"
+lru = "0.12"
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

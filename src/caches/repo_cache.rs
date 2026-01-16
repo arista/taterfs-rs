@@ -6,6 +6,9 @@ use async_trait::async_trait;
 
 use crate::repository::{ObjectId, RepoObject};
 
+use super::cache_db::{CacheDb, DbId};
+use super::key_value_db::KeyValueDbError;
+
 /// Error type for cache operations.
 #[derive(Debug)]
 pub enum CacheError {
@@ -36,6 +39,12 @@ impl std::error::Error for CacheError {
 impl From<std::io::Error> for CacheError {
     fn from(e: std::io::Error) -> Self {
         CacheError::Io(e)
+    }
+}
+
+impl From<KeyValueDbError> for CacheError {
+    fn from(e: KeyValueDbError) -> Self {
+        CacheError::Other(e.to_string())
     }
 }
 
@@ -130,5 +139,88 @@ pub struct NoopCaches;
 impl RepoCaches for NoopCaches {
     async fn get_cache(&self, _uuid: &str) -> std::result::Result<Arc<dyn RepoCache>, String> {
         Ok(Arc::new(NoopCache))
+    }
+}
+
+// =============================================================================
+// DbRepoCache
+// =============================================================================
+
+/// A repository cache backed by [`CacheDb`].
+pub struct DbRepoCache {
+    cache_db: Arc<CacheDb>,
+    repo_id: DbId,
+}
+
+impl DbRepoCache {
+    /// Create a new database-backed repository cache.
+    pub fn new(cache_db: Arc<CacheDb>, repo_id: DbId) -> Self {
+        Self { cache_db, repo_id }
+    }
+}
+
+#[async_trait]
+impl RepoCache for DbRepoCache {
+    async fn object_exists(&self, id: &ObjectId) -> Result<bool> {
+        Ok(self.cache_db.get_exists(self.repo_id, &id.to_string()).await?)
+    }
+
+    async fn set_object_exists(&self, id: &ObjectId) -> Result<()> {
+        self.cache_db
+            .set_exists(self.repo_id, &id.to_string())
+            .await?;
+        Ok(())
+    }
+
+    async fn object_fully_stored(&self, id: &ObjectId) -> Result<bool> {
+        Ok(self
+            .cache_db
+            .get_fully_stored(self.repo_id, &id.to_string())
+            .await?)
+    }
+
+    async fn set_object_fully_stored(&self, id: &ObjectId) -> Result<()> {
+        self.cache_db
+            .set_fully_stored(self.repo_id, &id.to_string())
+            .await?;
+        Ok(())
+    }
+
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<RepoObject>> {
+        Ok(self.cache_db.get_object(&id.to_string()).await?)
+    }
+
+    async fn set_object(&self, id: &ObjectId, obj: &RepoObject) -> Result<()> {
+        self.cache_db.set_object(&id.to_string(), obj).await?;
+        Ok(())
+    }
+}
+
+// =============================================================================
+// DbRepoCaches
+// =============================================================================
+
+/// A provider of database-backed repository caches.
+pub struct DbRepoCaches {
+    cache_db: Arc<CacheDb>,
+}
+
+impl DbRepoCaches {
+    /// Create a new provider backed by the given cache database.
+    pub fn new(cache_db: Arc<CacheDb>) -> Self {
+        Self { cache_db }
+    }
+}
+
+#[async_trait]
+impl RepoCaches for DbRepoCaches {
+    async fn get_cache(&self, uuid: &str) -> std::result::Result<Arc<dyn RepoCache>, String> {
+        let repo_id = self
+            .cache_db
+            .get_or_create_repository_id(uuid)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(Arc::new(DbRepoCache::new(self.cache_db.clone(), repo_id)))
     }
 }

@@ -28,5 +28,12 @@ AppCreateFileStoreContext {
 }
 ```
 
-Upon creation, the AppContext will create the global owned structures that it needs: cache, capacity managers, etc.
+Upon creation, the AppContext will create the global owned structures that it needs: cache, capacity managers, etc:
 
+* ConfigResult (from read_config.rs)
+* LmdbKeyValueDb (see [caches](./caches.md))
+* CachingKeyValueDb (see [caches](./caches.md))
+* CacheDb (see [caches](./caches.md))
+* ManagedBuffers
+* Network CapacityManagers
+* S3 CapacityManagers

@@ -250,15 +250,15 @@ impl CreateRepoContext {
     /// The capacity managers should be created by the App and passed here.
     /// These are the global network and S3 capacity managers that will be
     /// shared across all repositories (cloned for each repo).
-    pub fn new<R: RepoCaches + 'static>(
+    pub fn new(
         config: ConfigHelper,
-        repository_caches: R,
+        repository_caches: Arc<dyn RepoCaches>,
         network_managers: CapacityManagers,
         s3_managers: CapacityManagers,
     ) -> Self {
         Self {
             config: Arc::new(config),
-            repository_caches: Arc::new(repository_caches),
+            repository_caches,
             network_managers,
             s3_managers,
             allow_uninitialized: false,

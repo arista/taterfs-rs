@@ -2,6 +2,7 @@
 
 use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::ScanIgnoreHelper;
+use crate::caches::{FileStoreCache, NoopFileStoreCache};
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, FileStore, Result,
     ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
@@ -152,6 +153,8 @@ pub struct MemoryFileStore {
     root: BTreeMap<String, TreeNode>,
     /// Buffer manager for chunk allocation.
     managed_buffers: ManagedBuffers,
+    /// Cache for this file store.
+    cache: Arc<dyn FileStoreCache>,
 }
 
 impl MemoryFileStore {
@@ -208,6 +211,7 @@ impl MemoryFileStore {
 pub struct MemoryFileStoreBuilder {
     root: BTreeMap<String, TreeNode>,
     managed_buffers: ManagedBuffers,
+    cache: Option<Arc<dyn FileStoreCache>>,
 }
 
 impl MemoryFileStoreBuilder {
@@ -215,12 +219,19 @@ impl MemoryFileStoreBuilder {
         Self {
             root: BTreeMap::new(),
             managed_buffers: ManagedBuffers::new(),
+            cache: None,
         }
     }
 
     /// Set the ManagedBuffers for buffer allocation.
     pub fn with_managed_buffers(mut self, managed_buffers: ManagedBuffers) -> Self {
         self.managed_buffers = managed_buffers;
+        self
+    }
+
+    /// Set the cache for this file store.
+    pub fn with_cache(mut self, cache: Arc<dyn FileStoreCache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -280,6 +291,7 @@ impl MemoryFileStoreBuilder {
         MemoryFileStore {
             root: self.root,
             managed_buffers: self.managed_buffers,
+            cache: self.cache.unwrap_or_else(|| Arc::new(NoopFileStoreCache)),
         }
     }
 }
@@ -449,9 +461,8 @@ impl FileStore for MemoryFileStore {
         None // Not implemented yet
     }
 
-    fn cache_url(&self) -> &str {
-        // Memory file stores use a constant URL since they're ephemeral
-        "memory://"
+    fn get_cache(&self) -> Arc<dyn FileStoreCache> {
+        self.cache.clone()
     }
 }
 

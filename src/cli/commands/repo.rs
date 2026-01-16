@@ -479,12 +479,8 @@ impl UploadDirectoryArgs {
         let fs_ctx = self.file_store.to_create_file_store_context();
         let file_store = app.create_file_store(fs_ctx).await?;
 
-        // Get the cache for this file store
-        let cache = app
-            .file_store_caches()
-            .get_cache(file_store.cache_url())
-            .await
-            .map_err(CliError::Other)?;
+        // Get the cache from the file store
+        let cache = file_store.get_cache();
 
         let path = self.path.as_deref().map(Path::new);
         let result = upload_directory(file_store.as_ref(), repo, cache, path)

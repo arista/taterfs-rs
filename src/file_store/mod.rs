@@ -27,6 +27,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::caches::FileStoreCache;
 use crate::util::ManagedBuffer;
 
 /// Result type for file store operations.
@@ -267,8 +268,6 @@ pub trait FileStore: Send + Sync {
     /// Get the FileDest interface, if supported.
     fn get_dest(&self) -> Option<&dyn FileDest>;
 
-    /// Get the cache URL for this file store.
-    ///
-    /// This URL is used as a key for looking up the file store's cache.
-    fn cache_url(&self) -> &str;
+    /// Get the cache for this file store.
+    fn get_cache(&self) -> Arc<dyn FileStoreCache>;
 }

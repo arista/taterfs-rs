@@ -190,8 +190,11 @@ impl App {
         &self,
         ctx: AppCreateFileStoreContext,
     ) -> Result<Arc<dyn FileStore>> {
-        let file_store_ctx =
-            CreateFileStoreContext::new(self.config.clone(), self.managed_buffers.clone());
+        let file_store_ctx = CreateFileStoreContext::new(
+            self.config.clone(),
+            self.managed_buffers.clone(),
+            self.file_store_caches.clone(),
+        );
 
         let store = create_file_store(&ctx.spec, &file_store_ctx).await?;
         Ok(store)

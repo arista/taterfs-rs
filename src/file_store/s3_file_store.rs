@@ -359,17 +359,9 @@ impl FileSource for S3FileSource {
         let mut events = Vec::new();
         let mut helper = ScanIgnoreHelper::new();
 
-        // Process root to load top-level ignore files
-        let root_entry = DirEntry {
-            name: String::new(),
-            path: String::new(),
-        };
-        helper
-            .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(root_entry),
-                source.as_ref(),
-            )
-            .await;
+        // Initialize helper by walking from root to the target path,
+        // loading ignore files along the way
+        helper.initialize_to_path(path, source.as_ref()).await;
 
         // Start scanning from the specified prefix
         self.scan_directory(&start_prefix, &mut events, &mut helper, source.as_ref())

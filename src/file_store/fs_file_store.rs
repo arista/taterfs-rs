@@ -159,14 +159,9 @@ impl FileSource for FsFileStore {
         let mut events = Vec::new();
         let mut helper = ScanIgnoreHelper::new();
 
-        // Process root directory first to load top-level ignore files
-        let root_entry = DirEntry {
-            name: String::new(),
-            path: String::new(),
-        };
-        helper
-            .on_scan_event(&DirectoryScanEvent::EnterDirectory(root_entry), self)
-            .await;
+        // Initialize helper by walking from root to the target path,
+        // loading ignore files along the way
+        helper.initialize_to_path(path, self).await;
 
         // Scan the tree with ignore filtering
         scan_directory(&start_path, &start_path, &mut events, &mut helper, self).await?;

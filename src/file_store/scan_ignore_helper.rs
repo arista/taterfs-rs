@@ -57,6 +57,51 @@ impl ScanIgnoreHelper {
         }
     }
 
+    /// Initialize the helper by walking from root to the given path.
+    ///
+    /// This loads ignore files from the root directory and each directory
+    /// along the path to the target. Call this before scanning from a
+    /// subdirectory to ensure parent ignore rules are applied.
+    ///
+    /// If `path` is `None` or empty, only the root directory's ignore files
+    /// are loaded.
+    pub async fn initialize_to_path<S: FileSource + ?Sized>(
+        &mut self,
+        path: Option<&Path>,
+        source: &S,
+    ) {
+        use crate::file_store::DirEntry;
+
+        // Always enter root first
+        let root_entry = DirEntry {
+            name: String::new(),
+            path: String::new(),
+        };
+        self.on_scan_event(&DirectoryScanEvent::EnterDirectory(root_entry), source)
+            .await;
+
+        // If there's a path, walk through each component
+        if let Some(p) = path {
+            let mut accumulated = String::new();
+            for component in p.components() {
+                if let std::path::Component::Normal(name) = component {
+                    let name_str = name.to_string_lossy().into_owned();
+                    if accumulated.is_empty() {
+                        accumulated = name_str.clone();
+                    } else {
+                        accumulated = format!("{}/{}", accumulated, name_str);
+                    }
+                    let dir_entry = DirEntry {
+                        name: name_str,
+                        path: accumulated.clone(),
+                    };
+                    self.on_scan_event(&DirectoryScanEvent::EnterDirectory(dir_entry), source)
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Process a scan event, updating internal state.
     ///
     /// Call this for each EnterDirectory and ExitDirectory event during scanning.
@@ -366,5 +411,61 @@ mod tests {
         assert!(helper.should_ignore(".git", true));
         assert!(helper.should_ignore("file.bak", false));
         assert!(!helper.should_ignore("file.txt", false));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_to_path_loads_parent_ignores() {
+        // Create a store with ignore files at root and in a subdirectory
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("foo/.gitignore", MemoryFsEntry::file("*.tmp"))
+            .add("foo/bar/.gitignore", MemoryFsEntry::file("*.bak"))
+            .add("foo/bar/file.txt", MemoryFsEntry::file("content"))
+            .build();
+
+        let mut helper = ScanIgnoreHelper::new();
+
+        // Initialize to foo/bar - should load ignores from root, foo, and foo/bar
+        helper
+            .initialize_to_path(Some(Path::new("foo/bar")), &store)
+            .await;
+
+        // All three ignore patterns should be active
+        assert!(helper.should_ignore("debug.log", false)); // from root
+        assert!(helper.should_ignore("cache.tmp", false)); // from foo
+        assert!(helper.should_ignore("backup.bak", false)); // from foo/bar
+        assert!(!helper.should_ignore("file.txt", false)); // not ignored
+    }
+
+    #[tokio::test]
+    async fn test_initialize_to_path_none_loads_root_only() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("foo/.gitignore", MemoryFsEntry::file("*.tmp"))
+            .build();
+
+        let mut helper = ScanIgnoreHelper::new();
+
+        // Initialize with None - should only load root ignores
+        helper.initialize_to_path(None, &store).await;
+
+        assert!(helper.should_ignore("debug.log", false)); // from root
+        assert!(!helper.should_ignore("cache.tmp", false)); // foo's ignore not loaded
+    }
+
+    #[tokio::test]
+    async fn test_initialize_to_path_empty_loads_root_only() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("foo/.gitignore", MemoryFsEntry::file("*.tmp"))
+            .build();
+
+        let mut helper = ScanIgnoreHelper::new();
+
+        // Initialize with empty path - should only load root ignores
+        helper.initialize_to_path(Some(Path::new("")), &store).await;
+
+        assert!(helper.should_ignore("debug.log", false)); // from root
+        assert!(!helper.should_ignore("cache.tmp", false)); // foo's ignore not loaded
     }
 }

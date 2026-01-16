@@ -44,8 +44,15 @@ impl FsFileStore {
         }
     }
 
-    /// Convert a relative path to an absolute filesystem path.
-    fn to_absolute(&self, relative: &Path) -> PathBuf {
+    /// Convert a path to an absolute filesystem path.
+    ///
+    /// The path is always interpreted relative to the file store's root,
+    /// even if it appears to be absolute (starts with `/`).
+    fn to_absolute(&self, path: &Path) -> PathBuf {
+        // Strip leading "/" or root component to ensure path is treated as relative
+        let relative = path
+            .strip_prefix("/")
+            .unwrap_or(path);
         self.root.join(relative)
     }
 
@@ -651,6 +658,27 @@ mod tests {
 
         let entry = store.get_entry(Path::new("")).await.unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
+    }
+
+    #[tokio::test]
+    async fn test_absolute_path_treated_as_relative() {
+        let temp = create_test_dir();
+
+        // Create a file
+        File::create(temp.path().join("hello.txt"))
+            .unwrap()
+            .write_all(b"Hello")
+            .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+
+        // Even with an absolute path, it should be relative to the store root
+        let entry = store.get_entry(Path::new("/hello.txt")).await.unwrap();
+        assert!(matches!(entry, Some(DirectoryEntry::File(_))));
+
+        // Also test with get_file
+        let contents = store.get_file(Path::new("/hello.txt")).await.unwrap();
+        assert_eq!(&contents[..], b"Hello");
     }
 
     #[cfg(unix)]

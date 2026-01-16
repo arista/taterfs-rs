@@ -107,7 +107,7 @@ impl CacheDb {
 
         // Reserve a block
         let new_next = current + ID_BLOCK_SIZE;
-        txn.set(KEY_NEXT_ID.to_vec(), new_next.to_string().into_bytes());
+        txn.set(KEY_NEXT_ID.to_vec(), new_next.to_string().into_bytes()).await;
         txn.commit().await?;
 
         // Update local allocator
@@ -134,7 +134,7 @@ impl CacheDb {
     pub async fn set_repository_id(&self, uuid: &str, id: DbId) -> Result<()> {
         let key = repo_id_key(uuid);
         let mut writes = self.db.write().await?;
-        writes.set(key, id.to_string().into_bytes());
+        writes.set(key, id.to_string().into_bytes()).await;
         writes.flush().await
     }
 
@@ -155,7 +155,7 @@ impl CacheDb {
         }
 
         let id = self.generate_next_id().await?;
-        txn.set(key, id.to_string().into_bytes());
+        txn.set(key, id.to_string().into_bytes()).await;
         txn.commit().await?;
 
         Ok(id)
@@ -175,7 +175,7 @@ impl CacheDb {
     pub async fn set_exists(&self, repo_id: DbId, object_id: &str) -> Result<()> {
         let key = exists_key(repo_id, object_id);
         let mut writes = self.db.write().await?;
-        writes.set(key, Vec::new());
+        writes.set(key, Vec::new()).await;
         writes.flush().await
     }
 
@@ -193,7 +193,7 @@ impl CacheDb {
     pub async fn set_fully_stored(&self, repo_id: DbId, object_id: &str) -> Result<()> {
         let key = fully_stored_key(repo_id, object_id);
         let mut writes = self.db.write().await?;
-        writes.set(key, Vec::new());
+        writes.set(key, Vec::new()).await;
         writes.flush().await
     }
 
@@ -222,7 +222,7 @@ impl CacheDb {
         let json = serde_json::to_string(obj)
             .map_err(|e| KeyValueDbError::Encoding(e.to_string()))?;
         let mut writes = self.db.write().await?;
-        writes.set(key, json.into_bytes());
+        writes.set(key, json.into_bytes()).await;
         writes.flush().await
     }
 
@@ -243,7 +243,7 @@ impl CacheDb {
     pub async fn set_filestore_id(&self, url: &str, id: DbId) -> Result<()> {
         let key = filestore_id_key(url);
         let mut writes = self.db.write().await?;
-        writes.set(key, id.to_string().into_bytes());
+        writes.set(key, id.to_string().into_bytes()).await;
         writes.flush().await
     }
 
@@ -263,7 +263,7 @@ impl CacheDb {
         }
 
         let id = self.generate_next_id().await?;
-        txn.set(key, id.to_string().into_bytes());
+        txn.set(key, id.to_string().into_bytes()).await;
         txn.commit().await?;
 
         Ok(id)
@@ -286,7 +286,7 @@ impl CacheDb {
     pub async fn set_name_id(&self, filestore_id: DbId, name: &str, id: DbId) -> Result<()> {
         let key = name_id_key(filestore_id, name);
         let mut writes = self.db.write().await?;
-        writes.set(key, id.to_string().into_bytes());
+        writes.set(key, id.to_string().into_bytes()).await;
         writes.flush().await
     }
 
@@ -304,7 +304,7 @@ impl CacheDb {
         }
 
         let id = self.generate_next_id().await?;
-        txn.set(key, id.to_string().into_bytes());
+        txn.set(key, id.to_string().into_bytes()).await;
         txn.commit().await?;
 
         Ok(id)
@@ -338,7 +338,7 @@ impl CacheDb {
     ) -> Result<()> {
         let key = path_entry_key(filestore_id, parent, name_id);
         let mut writes = self.db.write().await?;
-        writes.set(key, path_id.to_string().into_bytes());
+        writes.set(key, path_id.to_string().into_bytes()).await;
         writes.flush().await
     }
 
@@ -361,7 +361,7 @@ impl CacheDb {
         }
 
         let id = self.generate_next_id().await?;
-        txn.set(key, id.to_string().into_bytes());
+        txn.set(key, id.to_string().into_bytes()).await;
         txn.commit().await?;
 
         Ok(id)
@@ -426,7 +426,7 @@ impl CacheDb {
         let key = file_info_key(filestore_id, path_id);
         let value = format!("{}|{}", info.fingerprint, info.object_id);
         let mut writes = self.db.write().await?;
-        writes.set(key, value.into_bytes());
+        writes.set(key, value.into_bytes()).await;
         writes.flush().await
     }
 

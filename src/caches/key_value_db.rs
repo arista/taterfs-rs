@@ -95,10 +95,10 @@ pub trait KeyValueDbTransaction: Send {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
     /// Set a key-value pair (buffered until commit).
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>);
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>);
 
     /// Delete a key (buffered until commit).
-    fn del(&mut self, key: Vec<u8>);
+    async fn del(&mut self, key: Vec<u8>);
 
     /// Commit all buffered writes atomically.
     async fn commit(self: Box<Self>) -> Result<()>;
@@ -114,10 +114,10 @@ pub trait KeyValueDbTransaction: Send {
 #[async_trait]
 pub trait KeyValueDbWrites: Send {
     /// Set a key-value pair (buffered).
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>);
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>);
 
     /// Delete a key (buffered).
-    fn del(&mut self, key: Vec<u8>);
+    async fn del(&mut self, key: Vec<u8>);
 
     /// Flush all buffered writes to the database.
     async fn flush(self: Box<Self>) -> Result<()>;

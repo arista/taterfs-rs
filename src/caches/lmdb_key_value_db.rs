@@ -188,11 +188,11 @@ impl KeyValueDbTransaction for LmdbTransaction {
         .map_err(|e| KeyValueDbError::Database(e.to_string()))?
     }
 
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
         self.pending.push(WriteOp::Set { key, value: val });
     }
 
-    fn del(&mut self, key: Vec<u8>) {
+    async fn del(&mut self, key: Vec<u8>) {
         self.pending.push(WriteOp::Del { key });
     }
 
@@ -244,11 +244,11 @@ struct LmdbWrites {
 
 #[async_trait]
 impl KeyValueDbWrites for LmdbWrites {
-    fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
+    async fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
         self.pending.push(WriteOp::Set { key, value: val });
     }
 
-    fn del(&mut self, key: Vec<u8>) {
+    async fn del(&mut self, key: Vec<u8>) {
         self.pending.push(WriteOp::Del { key });
     }
 
@@ -308,7 +308,7 @@ mod tests {
 
         // Write a value
         let mut writes = db.write().await.unwrap();
-        writes.set(b"key1".to_vec(), b"value1".to_vec());
+        writes.set(b"key1".to_vec(), b"value1".to_vec()).await;
         writes.flush().await.unwrap();
 
         // Now it exists
@@ -323,8 +323,8 @@ mod tests {
 
         // Use a transaction
         let mut txn = db.transaction().await.unwrap();
-        txn.set(b"key1".to_vec(), b"value1".to_vec());
-        txn.set(b"key2".to_vec(), b"value2".to_vec());
+        txn.set(b"key1".to_vec(), b"value1".to_vec()).await;
+        txn.set(b"key2".to_vec(), b"value2".to_vec()).await;
 
         // Within transaction, we can see pending writes
         assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
@@ -343,14 +343,14 @@ mod tests {
 
         // Write a value
         let mut writes = db.write().await.unwrap();
-        writes.set(b"key1".to_vec(), b"value1".to_vec());
+        writes.set(b"key1".to_vec(), b"value1".to_vec()).await;
         writes.flush().await.unwrap();
 
         assert!(db.exists(b"key1").await.unwrap());
 
         // Delete it
         let mut writes = db.write().await.unwrap();
-        writes.del(b"key1".to_vec());
+        writes.del(b"key1".to_vec()).await;
         writes.flush().await.unwrap();
 
         assert!(!db.exists(b"key1").await.unwrap());

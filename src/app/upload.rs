@@ -143,19 +143,14 @@ pub async fn upload_directory(
     let scan_events = source.scan(path).await?;
 
     // Determine the starting cache path ID
+    // get_path_id returns None for empty/root paths
     let cache_path_id = match path {
         Some(p) => {
             let path_str = p.to_string_lossy();
-            if path_str.is_empty() {
-                None
-            } else {
-                Some(
-                    cache
-                        .get_path_id(&path_str)
-                        .await
-                        .map_err(|e| UploadError::Cache(e.to_string()))?,
-                )
-            }
+            cache
+                .get_path_id(&path_str)
+                .await
+                .map_err(|e| UploadError::Cache(e.to_string()))?
         }
         None => None,
     };

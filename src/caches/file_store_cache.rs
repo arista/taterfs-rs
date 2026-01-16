@@ -69,7 +69,8 @@ pub trait FileStoreCache: Send + Sync {
     /// Get or create a path ID for a full path string.
     ///
     /// Creates intermediate path entries as needed.
-    async fn get_path_id(&self, path: &str) -> Result<DbId>;
+    /// Returns `None` for empty/root paths (e.g., "" or "/").
+    async fn get_path_id(&self, path: &str) -> Result<Option<DbId>>;
 
     /// Get or create a path ID for a path entry (parent + name).
     ///
@@ -112,9 +113,9 @@ pub struct NoopFileStoreCache;
 
 #[async_trait]
 impl FileStoreCache for NoopFileStoreCache {
-    async fn get_path_id(&self, _path: &str) -> Result<DbId> {
+    async fn get_path_id(&self, _path: &str) -> Result<Option<DbId>> {
         // Return a dummy ID - this cache doesn't actually store anything
-        Ok(0)
+        Ok(Some(0))
     }
 
     async fn get_path_entry_id(&self, _parent: Option<DbId>, _name: &str) -> Result<DbId> {
@@ -174,7 +175,7 @@ impl DbFileStoreCache {
 
 #[async_trait]
 impl FileStoreCache for DbFileStoreCache {
-    async fn get_path_id(&self, path: &str) -> Result<DbId> {
+    async fn get_path_id(&self, path: &str) -> Result<Option<DbId>> {
         // CacheDb.get_path_id internally calls get_or_create_* methods
         Ok(self.cache_db.get_path_id(self.filestore_id, path).await?)
     }
@@ -271,11 +272,11 @@ mod tests {
         let cache = caches.get_cache("file:///test/store").await.unwrap();
 
         // Get path ID (creates it)
-        let path_id = cache.get_path_id("foo/bar.txt").await.unwrap();
+        let path_id = cache.get_path_id("foo/bar.txt").await.unwrap().unwrap();
         assert!(path_id > 0);
 
         // Same path should return same ID
-        let path_id2 = cache.get_path_id("foo/bar.txt").await.unwrap();
+        let path_id2 = cache.get_path_id("foo/bar.txt").await.unwrap().unwrap();
         assert_eq!(path_id, path_id2);
 
         // Initially not cached
@@ -321,8 +322,8 @@ mod tests {
         };
 
         // Same path, different stores - get path IDs first
-        let path_id1 = cache1.get_path_id("test.txt").await.unwrap();
-        let path_id2 = cache2.get_path_id("test.txt").await.unwrap();
+        let path_id1 = cache1.get_path_id("test.txt").await.unwrap().unwrap();
+        let path_id2 = cache2.get_path_id("test.txt").await.unwrap().unwrap();
 
         cache1
             .set_fingerprinted_file_info(path_id1, &info1)
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(bar_id, bar_id2);
 
         // The full path should give us the same final ID
-        let full_path_id = cache.get_path_id("foo/bar/baz.txt").await.unwrap();
+        let full_path_id = cache.get_path_id("foo/bar/baz.txt").await.unwrap().unwrap();
         assert_eq!(baz_id, full_path_id);
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::CapacityManagers;
+use crate::caches::{FileStoreCache, FileStoreCaches};
 use crate::config::ConfigHelper;
 use crate::file_store::{FileStore, FsFileStore, S3FileSource, S3FileSourceConfig};
 use crate::util::ManagedBuffers;
@@ -199,6 +200,20 @@ impl ParsedFileStoreSpec {
 
         Ok(parsed)
     }
+
+    /// Generate the cache URL for this file store specification.
+    ///
+    /// This URL is used as a key for looking up the file store's cache.
+    pub fn cache_url(&self) -> String {
+        match self.store_type {
+            FileStoreType::S3 => match &self.prefix {
+                Some(prefix) => format!("s3://{}/{}", self.location, prefix),
+                None => format!("s3://{}", self.location),
+            },
+            FileStoreType::FileSystem => format!("file://{}", self.location),
+            FileStoreType::Http => self.location.clone(),
+        }
+    }
 }
 
 /// Parse a query string into key-value pairs.
@@ -227,17 +242,22 @@ fn parse_query_string(query: &str) -> HashMap<String, String> {
 
 /// Context for creating file stores.
 ///
-/// Provides access to configuration and shared capacity managers.
+/// Provides access to configuration, shared capacity managers, and caches.
 pub struct CreateFileStoreContext {
     config: Arc<ConfigHelper>,
     network_managers: CapacityManagers,
     s3_managers: CapacityManagers,
     managed_buffers: ManagedBuffers,
+    file_store_caches: Arc<dyn FileStoreCaches>,
 }
 
 impl CreateFileStoreContext {
     /// Create a new context.
-    pub fn new(config: ConfigHelper, managed_buffers: ManagedBuffers) -> Self {
+    pub fn new(
+        config: ConfigHelper,
+        managed_buffers: ManagedBuffers,
+        file_store_caches: Arc<dyn FileStoreCaches>,
+    ) -> Self {
         let config = Arc::new(config);
         let network_managers =
             CapacityManagers::from_resolved_limits(&config.resolve_network_limits());
@@ -248,6 +268,7 @@ impl CreateFileStoreContext {
             network_managers,
             s3_managers,
             managed_buffers,
+            file_store_caches,
         }
     }
 
@@ -317,6 +338,14 @@ impl CreateFileStoreContext {
         let managers = self.create_managers_for_spec(spec);
         let flow_control = managers.to_flow_control_with_buffers(self.managed_buffers.clone());
 
+        // Get the cache for this file store
+        let cache_url = spec.cache_url();
+        let cache = self
+            .file_store_caches
+            .get_cache(&cache_url)
+            .await
+            .map_err(CreateFileStoreError::CreationError)?;
+
         match spec.store_type {
             FileStoreType::S3 => {
                 let mut s3_config = S3FileSourceConfig::new(&spec.location);
@@ -333,11 +362,11 @@ impl CreateFileStoreContext {
                 let source =
                     S3FileSource::new(s3_config, flow_control, self.managed_buffers.clone()).await;
 
-                Ok(Arc::new(S3FileStoreWrapper(source)))
+                Ok(Arc::new(S3FileStoreWrapper::new(source, cache)))
             }
 
             FileStoreType::FileSystem => {
-                let store = FsFileStore::new(&spec.location, self.managed_buffers.clone());
+                let store = FsFileStore::new(&spec.location, self.managed_buffers.clone(), cache);
                 Ok(Arc::new(store))
             }
 
@@ -358,15 +387,28 @@ impl CreateFileStoreContext {
 /// Wrapper to make S3FileSource implement FileStore.
 ///
 /// S3FileSource only implements FileSource, not FileDest.
-struct S3FileStoreWrapper(S3FileSource);
+struct S3FileStoreWrapper {
+    source: S3FileSource,
+    cache: Arc<dyn FileStoreCache>,
+}
+
+impl S3FileStoreWrapper {
+    fn new(source: S3FileSource, cache: Arc<dyn FileStoreCache>) -> Self {
+        Self { source, cache }
+    }
+}
 
 impl FileStore for S3FileStoreWrapper {
     fn get_source(&self) -> Option<&dyn crate::file_store::FileSource> {
-        Some(&self.0)
+        Some(&self.source)
     }
 
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
         None // S3FileStore doesn't support FileDest yet
+    }
+
+    fn get_cache(&self) -> Arc<dyn FileStoreCache> {
+        self.cache.clone()
     }
 }
 
@@ -462,12 +504,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_fs_file_store() {
+        use crate::caches::NoopFileStoreCaches;
         use crate::config::{ConfigHelper, ConfigSource, read_config};
 
         let source = ConfigSource::default();
         let result = read_config(&source).unwrap();
         let config = ConfigHelper::new(result.config);
-        let ctx = CreateFileStoreContext::new(config, ManagedBuffers::new());
+        let file_store_caches = Arc::new(NoopFileStoreCaches);
+        let ctx = CreateFileStoreContext::new(config, ManagedBuffers::new(), file_store_caches);
 
         let store = ctx.create_file_store("file:///tmp").await.unwrap();
         assert!(store.get_source().is_some());

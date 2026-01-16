@@ -166,6 +166,11 @@ impl App {
         &self.config
     }
 
+    /// Get the file store caches.
+    pub fn file_store_caches(&self) -> &Arc<dyn FileStoreCaches> {
+        &self.file_store_caches
+    }
+
     /// Create a repository from a specification.
     pub async fn create_repo(&self, ctx: AppCreateRepoContext) -> Result<Arc<Repo>> {
         let repo_ctx = CreateRepoContext::new(
@@ -185,8 +190,11 @@ impl App {
         &self,
         ctx: AppCreateFileStoreContext,
     ) -> Result<Arc<dyn FileStore>> {
-        let file_store_ctx =
-            CreateFileStoreContext::new(self.config.clone(), self.managed_buffers.clone());
+        let file_store_ctx = CreateFileStoreContext::new(
+            self.config.clone(),
+            self.managed_buffers.clone(),
+            self.file_store_caches.clone(),
+        );
 
         let store = create_file_store(&ctx.spec, &file_store_ctx).await?;
         Ok(store)

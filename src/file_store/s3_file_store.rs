@@ -65,6 +65,14 @@ impl S3FileSourceConfig {
         self.region = Some(region.into());
         self
     }
+
+    /// Generate the cache URL for this configuration.
+    pub fn cache_url(&self) -> String {
+        match &self.prefix {
+            Some(prefix) => format!("s3://{}/{}", self.bucket, prefix),
+            None => format!("s3://{}", self.bucket),
+        }
+    }
 }
 
 // =============================================================================
@@ -113,6 +121,11 @@ impl S3FileSource {
             flow_control,
             managed_buffers,
         }
+    }
+
+    /// Get the cache URL for this file source.
+    pub fn cache_url(&self) -> String {
+        self.config.cache_url()
     }
 
     /// Convert a relative path to an S3 key.

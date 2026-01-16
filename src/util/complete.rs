@@ -90,6 +90,36 @@ impl Complete for NotifyComplete {
 }
 
 // =============================================================================
+// NoopComplete
+// =============================================================================
+
+/// A completion flag that is already complete.
+///
+/// Use this for operations that don't need to wait for any background work,
+/// such as cache hits where the result is already available.
+pub struct NoopComplete;
+
+impl NoopComplete {
+    /// Create a new already-complete `NoopComplete`.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoopComplete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Complete for NoopComplete {
+    async fn complete(&self) -> Result<(), CompleteError> {
+        Ok(())
+    }
+}
+
+// =============================================================================
 // Completes
 // =============================================================================
 

@@ -7,7 +7,8 @@ pub mod managed_buffers;
 
 pub use capacity_manager::{CapacityManager, ReplenishmentRate, UsedCapacity};
 pub use complete::{
-    AddAfterDoneError, Complete, CompleteError, Completes, NotifyComplete, WithComplete,
+    AddAfterDoneError, Complete, CompleteError, Completes, NoopComplete, NotifyComplete,
+    WithComplete,
 };
 pub use dedup::Dedup;
 pub use managed_buffers::{ManagedBuffer, ManagedBuffers};

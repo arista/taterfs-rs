@@ -270,40 +270,51 @@ async fn upload_directory_from_scan_events(
                     .await
                     .map_err(|e| UploadError::Cache(e.to_string()))?;
 
-                let (file_hash, file_complete): (String, Arc<dyn Complete>) =
-                    match (&cached_info, &file_entry.fingerprint) {
-                        (Some(info), Some(fingerprint)) if &info.fingerprint == fingerprint => {
-                            // Cache hit - use the cached object ID
-                            (info.object_id.clone(), Arc::new(NoopComplete::new()))
-                        }
-                        _ => {
-                            // Cache miss - upload the file
-                            let file_path = if path.as_os_str().is_empty() {
-                                PathBuf::from(&file_entry.name)
-                            } else {
-                                path.join(&file_entry.name)
-                            };
+                // Check if we can skip uploading:
+                // 1. Fingerprint must match the cached fingerprint
+                // 2. Repo cache must confirm the object is fully stored
+                let can_skip = match (&cached_info, &file_entry.fingerprint) {
+                    (Some(info), Some(fingerprint)) if &info.fingerprint == fingerprint => {
+                        // Fingerprint matches - check if repo has it fully stored
+                        repo.cache()
+                            .object_fully_stored(&info.object_id)
+                            .await
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
 
-                            let upload_result =
-                                upload_file(store, repo.clone(), &file_path).await?;
-
-                            let file_hash = upload_result.result.hash.clone();
-                            let complete = upload_result.complete;
-
-                            // Update the cache if we have a fingerprint
-                            if let Some(fingerprint) = &file_entry.fingerprint {
-                                let info = FingerprintedFileInfo {
-                                    fingerprint: fingerprint.clone(),
-                                    object_id: file_hash.clone(),
-                                };
-                                let _ = cache
-                                    .set_fingerprinted_file_info(file_cache_path_id, &info)
-                                    .await;
-                            }
-
-                            (file_hash, complete)
-                        }
+                let (file_hash, file_complete): (String, Arc<dyn Complete>) = if can_skip {
+                    // Cache hit and fully stored - use the cached object ID
+                    let info = cached_info.as_ref().unwrap();
+                    (info.object_id.clone(), Arc::new(NoopComplete::new()))
+                } else {
+                    // Cache miss or not fully stored - upload the file
+                    let file_path = if path.as_os_str().is_empty() {
+                        PathBuf::from(&file_entry.name)
+                    } else {
+                        path.join(&file_entry.name)
                     };
+
+                    let upload_result =
+                        upload_file(store, repo.clone(), &file_path).await?;
+
+                    let file_hash = upload_result.result.hash.clone();
+                    let complete = upload_result.complete;
+
+                    // Update the cache if we have a fingerprint
+                    if let Some(fingerprint) = &file_entry.fingerprint {
+                        let info = FingerprintedFileInfo {
+                            fingerprint: fingerprint.clone(),
+                            object_id: file_hash.clone(),
+                        };
+                        let _ = cache
+                            .set_fingerprinted_file_info(file_cache_path_id, &info)
+                            .await;
+                    }
+
+                    (file_hash, complete)
+                };
 
                 // Create the FileEntry
                 let entry = FileEntry {

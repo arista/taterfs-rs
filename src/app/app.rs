@@ -2,6 +2,8 @@
 //!
 //! The [`App`] owns all global services and is the root for the application's functionality.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -9,7 +11,7 @@ use thiserror::Error;
 use crate::app::CapacityManagers;
 use crate::caches::{
     CacheDb, CachingConfig, CachingKeyValueDb, DbFileStoreCaches, DbRepoCaches, FileStoreCaches,
-    LmdbKeyValueDb, NoopCaches, NoopFileStoreCaches, RepoCaches,
+    KeyValueDb, LmdbKeyValueDb, NoopCaches, NoopFileStoreCaches, RepoCaches,
 };
 use crate::config::{read_config, ConfigHelper, ConfigSource};
 use crate::file_store::{
@@ -101,6 +103,9 @@ impl AppCreateFileStoreContext {
 ///
 /// Owns all global services including configuration, caches, and capacity managers.
 /// Provides methods for creating repositories and file stores.
+///
+/// **Important**: Call [`App::shutdown`] before dropping to ensure pending cache
+/// writes are flushed to disk.
 pub struct App {
     config: ConfigHelper,
     managed_buffers: ManagedBuffers,
@@ -108,11 +113,47 @@ pub struct App {
     s3_managers: CapacityManagers,
     repo_caches: Arc<dyn RepoCaches>,
     file_store_caches: Arc<dyn FileStoreCaches>,
+    /// Reference to the caching layer for shutdown flushing.
+    /// None if caching is disabled.
+    caching_db: Option<Arc<CachingKeyValueDb>>,
 }
 
 impl App {
+    /// Run a function with a new App, ensuring proper shutdown.
+    ///
+    /// This is the preferred way to use App. It creates the App, runs the
+    /// provided async function, then shuts down the App (flushing caches)
+    /// before returning. This ensures cleanup happens even if the function
+    /// returns an error.
+    ///
+    /// The error type `E` must implement `From<AppError>` so that App creation
+    /// and shutdown errors can be propagated.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// App::with_app(AppContext::default(), |app| Box::pin(async move {
+    ///     let repo = app.create_repo(ctx).await?;
+    ///     // ... use repo ...
+    ///     Ok(())
+    /// })).await?;
+    /// ```
+    pub async fn with_app<F, T, E>(ctx: AppContext, f: F) -> std::result::Result<T, E>
+    where
+        F: for<'a> FnOnce(&'a App) -> Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>,
+        E: From<AppError>,
+    {
+        let app = Self::new(ctx)?;
+        let result = f(&app).await;
+        // Always flush cache, even if the function failed
+        app.shutdown().await?;
+        result
+    }
+
     /// Create a new App with the given context.
-    pub fn new(ctx: AppContext) -> Result<Self> {
+    ///
+    /// Prefer using [`App::with_app`] instead, which ensures proper shutdown.
+    fn new(ctx: AppContext) -> Result<Self> {
         let config_result =
             read_config(&ctx.config_source).map_err(|e| AppError::Config(e.to_string()))?;
 
@@ -126,30 +167,31 @@ impl App {
 
         // Create cache infrastructure
         let cache_config = config.config().cache.clone();
-        let (repo_caches, file_store_caches): (Arc<dyn RepoCaches>, Arc<dyn FileStoreCaches>) =
-            if cache_config.no_cache {
-                // Caching disabled - use no-op implementations
-                (Arc::new(NoopCaches), Arc::new(NoopFileStoreCaches))
-            } else {
-                // Create LMDB-backed cache
-                let lmdb = LmdbKeyValueDb::new(&cache_config.path)
-                    .map_err(|e| AppError::CacheInit(e.to_string()))?;
+        let (repo_caches, file_store_caches, caching_db) = if cache_config.no_cache {
+            // Caching disabled - use no-op implementations
+            let repo_caches: Arc<dyn RepoCaches> = Arc::new(NoopCaches);
+            let file_store_caches: Arc<dyn FileStoreCaches> = Arc::new(NoopFileStoreCaches);
+            (repo_caches, file_store_caches, None)
+        } else {
+            // Create LMDB-backed cache
+            let lmdb = LmdbKeyValueDb::new(&cache_config.path)
+                .map_err(|e| AppError::CacheInit(e.to_string()))?;
 
-                let caching_config = CachingConfig {
-                    flush_period_ms: cache_config.pending_writes_flush_period_ms,
-                    max_pending_count: cache_config.pending_writes_max_count,
-                    max_pending_size: cache_config.pending_writes_max_size.0 as usize,
-                    max_cache_size: cache_config.max_memory_size.0 as usize,
-                };
-
-                let caching_db = CachingKeyValueDb::new(Arc::new(lmdb), caching_config);
-                let cache_db = Arc::new(CacheDb::new(Arc::new(caching_db)));
-
-                (
-                    Arc::new(DbRepoCaches::new(cache_db.clone())),
-                    Arc::new(DbFileStoreCaches::new(cache_db)),
-                )
+            let caching_config = CachingConfig {
+                flush_period_ms: cache_config.pending_writes_flush_period_ms,
+                max_pending_count: cache_config.pending_writes_max_count,
+                max_pending_size: cache_config.pending_writes_max_size.0 as usize,
+                max_cache_size: cache_config.max_memory_size.0 as usize,
             };
+
+            let caching_db = Arc::new(CachingKeyValueDb::new(Arc::new(lmdb), caching_config));
+            let cache_db = Arc::new(CacheDb::new(caching_db.clone() as Arc<dyn KeyValueDb>));
+
+            let repo_caches: Arc<dyn RepoCaches> = Arc::new(DbRepoCaches::new(cache_db.clone()));
+            let file_store_caches: Arc<dyn FileStoreCaches> =
+                Arc::new(DbFileStoreCaches::new(cache_db));
+            (repo_caches, file_store_caches, Some(caching_db))
+        };
 
         Ok(Self {
             config,
@@ -158,6 +200,7 @@ impl App {
             s3_managers,
             repo_caches,
             file_store_caches,
+            caching_db,
         })
     }
 
@@ -169,6 +212,19 @@ impl App {
     /// Get the file store caches.
     pub fn file_store_caches(&self) -> &Arc<dyn FileStoreCaches> {
         &self.file_store_caches
+    }
+
+    /// Flush pending cache writes.
+    ///
+    /// Called automatically by [`App::with_app`].
+    async fn shutdown(&self) -> Result<()> {
+        if let Some(caching_db) = &self.caching_db {
+            caching_db
+                .flush()
+                .await
+                .map_err(|e| AppError::CacheInit(format!("failed to flush cache: {}", e)))?;
+        }
+        Ok(())
     }
 
     /// Create a repository from a specification.

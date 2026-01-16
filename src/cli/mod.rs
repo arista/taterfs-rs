@@ -89,19 +89,18 @@ impl Cli {
 
     /// Run the CLI command.
     pub async fn run(self) -> Result<()> {
-        // Create the App from global arguments
-        let app = App::new(self.global.to_app_context())?;
+        let global = self.global;
+        let command = self.command;
 
-        match self.command {
-            Command::Repo { command } => {
-                command.run(&app, &self.global).await?;
-            }
-            Command::FileStore { command } => {
-                command.run(&app, &self.global).await?;
-            }
-        }
-
-        Ok(())
+        App::with_app(global.to_app_context(), |app| {
+            Box::pin(async move {
+                match command {
+                    Command::Repo { command } => command.run(app, &global).await,
+                    Command::FileStore { command } => command.run(app, &global).await,
+                }
+            })
+        })
+        .await
     }
 }
 

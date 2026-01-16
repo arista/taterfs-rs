@@ -339,12 +339,10 @@ impl FileSource for MemoryFileStore {
                         (children, p.to_path_buf())
                     }
                     Some(TreeNode::File(_)) => {
-                        // Not a directory, return empty stream
-                        return Ok(Box::pin(stream::empty()));
+                        return Err(Error::NotADirectory(Self::path_to_string(p)));
                     }
                     None => {
-                        // Path not found, return empty stream
-                        return Ok(Box::pin(stream::empty()));
+                        return Err(Error::NotFound(Self::path_to_string(p)));
                     }
                 }
             }

@@ -342,8 +342,8 @@ impl FileSource for S3FileSource {
                         !response.contents().is_empty() || !response.common_prefixes().is_empty();
 
                     if !has_contents {
-                        // Not a directory, return empty stream
-                        return Ok(Box::pin(stream::empty()));
+                        // Path doesn't exist as a directory in S3
+                        return Err(Error::NotADirectory(path_str.into_owned()));
                     }
                     path_str.into_owned()
                 }

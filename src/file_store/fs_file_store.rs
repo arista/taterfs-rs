@@ -143,15 +143,16 @@ impl FileSource for FsFileStore {
             None => self.root.clone(),
         };
 
-        // Check if start_path is a directory, return empty if not
+        // Check if start_path is a directory, return error if not
         match tokio::fs::metadata(&start_path).await {
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => {
-                // Not a directory, return empty stream
-                return Ok(Box::pin(stream::empty()));
+                let path_str = path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                return Err(Error::NotADirectory(path_str));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Box::pin(stream::empty()));
+                let path_str = path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                return Err(Error::NotFound(path_str));
             }
             Err(e) => return Err(e.into()),
         }

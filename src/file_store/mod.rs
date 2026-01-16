@@ -176,9 +176,10 @@ pub trait FileSource: Send + Sync {
     /// Walks depth-first through the directory structure yielding events
     /// in lexicographic order.
     ///
-    /// The scan starts at the given path, ending immediately if the path is not
-    /// a directory. The resulting ScanEvents are yielded relative to the path.
-    /// If path is None, then scan through the entire FileStore.
+    /// The scan starts at the given path. Returns an error if the path does
+    /// not exist or is not a directory. The resulting ScanEvents are yielded
+    /// relative to the path. If path is None, then scan through the entire
+    /// FileStore.
     ///
     /// Events are: EnterDirectory, File, ExitDirectory
     async fn scan(&self, path: Option<&Path>) -> Result<ScanEvents>;

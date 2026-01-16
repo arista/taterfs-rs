@@ -82,7 +82,7 @@ Writes the given contents to the given repo and generates the resulting hash as 
 ### tfs file-store
 
 ```
-tfs file-store scan {filestore spec}
+tfs file-store scan {filestore spec} [{path}]
   [--output-file / -o {output file}]
 ```
 Calls scan() on the filestore and prints the results to STDOUT, or the given output file.  For each ScanEvent:

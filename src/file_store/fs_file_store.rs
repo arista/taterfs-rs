@@ -136,7 +136,26 @@ impl SourceChunk for FsSourceChunk {
 
 #[async_trait]
 impl FileSource for FsFileStore {
-    async fn scan(&self) -> Result<ScanEvents> {
+    async fn scan(&self, path: Option<&Path>) -> Result<ScanEvents> {
+        // Determine the starting directory
+        let start_path = match path {
+            Some(p) => self.to_absolute(p),
+            None => self.root.clone(),
+        };
+
+        // Check if start_path is a directory, return empty if not
+        match tokio::fs::metadata(&start_path).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                // Not a directory, return empty stream
+                return Ok(Box::pin(stream::empty()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Box::pin(stream::empty()));
+            }
+            Err(e) => return Err(e.into()),
+        }
+
         let mut events = Vec::new();
         let mut helper = ScanIgnoreHelper::new();
 
@@ -150,7 +169,7 @@ impl FileSource for FsFileStore {
             .await;
 
         // Scan the tree with ignore filtering
-        scan_directory(&self.root, &self.root, &mut events, &mut helper, self).await?;
+        scan_directory(&start_path, &start_path, &mut events, &mut helper, self).await?;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -372,7 +391,7 @@ mod tests {
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new());
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -408,7 +427,7 @@ mod tests {
 
         // Test scan
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -434,7 +453,7 @@ mod tests {
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new());
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -515,7 +534,7 @@ mod tests {
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new());
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -554,7 +573,7 @@ mod tests {
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new());
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())
@@ -584,7 +603,7 @@ mod tests {
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new());
 
         let events: Vec<_> = store
-            .scan()
+            .scan(None)
             .await
             .unwrap()
             .map(|r| r.unwrap())

@@ -31,8 +31,10 @@ interface RepoCaches {
 
 ```
 interface FileStoreCache {
-  async get_fingerprinted_file_info(path) -> Option<FingerprintedFileInfo>
-  async set_fingerprinted_file_info(path, FingerprintedFileInfo)
+  async get_path_id(path: Path) -> DbId
+  async get_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  async get_fingerprinted_file_info(path_id: DbId) -> Option<FingerprintedFileInfo>
+  async set_fingerprinted_file_info(path_id: DbId, FingerprintedFileInfo)
 }
 
 interface FileStoreCaches {

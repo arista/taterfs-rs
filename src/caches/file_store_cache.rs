@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::cache_db::{CacheDb, DbId};
+use super::cache_db::CacheDb;
 use super::key_value_db::KeyValueDbError;
 
 // =============================================================================
@@ -53,8 +53,8 @@ impl From<KeyValueDbError> for FileStoreCacheError {
 /// Result type for file store cache operations.
 pub type Result<T> = std::result::Result<T, FileStoreCacheError>;
 
-// Re-export FingerprintedFileInfo for convenience
-pub use super::cache_db::FingerprintedFileInfo;
+// Re-export types for convenience
+pub use super::cache_db::{DbId, FingerprintedFileInfo};
 
 // =============================================================================
 // FileStoreCache Trait
@@ -66,15 +66,28 @@ pub use super::cache_db::FingerprintedFileInfo;
 /// enabling quick change detection without reading file contents.
 #[async_trait]
 pub trait FileStoreCache: Send + Sync {
-    /// Get cached fingerprint info for a file path.
+    /// Get or create a path ID for a full path string.
     ///
-    /// Returns `None` if the path is not in the cache.
-    async fn get_fingerprinted_file_info(&self, path: &str) -> Result<Option<FingerprintedFileInfo>>;
+    /// Creates intermediate path entries as needed.
+    async fn get_path_id(&self, path: &str) -> Result<DbId>;
 
-    /// Cache fingerprint info for a file path.
+    /// Get or create a path ID for a path entry (parent + name).
+    ///
+    /// If `parent` is `None`, this is a root-level entry.
+    async fn get_path_entry_id(&self, parent: Option<DbId>, name: &str) -> Result<DbId>;
+
+    /// Get cached fingerprint info for a path ID.
+    ///
+    /// Returns `None` if the path ID is not in the cache.
+    async fn get_fingerprinted_file_info(
+        &self,
+        path_id: DbId,
+    ) -> Result<Option<FingerprintedFileInfo>>;
+
+    /// Cache fingerprint info for a path ID.
     async fn set_fingerprinted_file_info(
         &self,
-        path: &str,
+        path_id: DbId,
         info: &FingerprintedFileInfo,
     ) -> Result<()>;
 }
@@ -93,20 +106,32 @@ pub trait FileStoreCaches: Send + Sync {
 // =============================================================================
 
 /// A no-op file store cache that never caches anything.
+///
+/// This implementation returns dummy path IDs and never stores fingerprint info.
 pub struct NoopFileStoreCache;
 
 #[async_trait]
 impl FileStoreCache for NoopFileStoreCache {
+    async fn get_path_id(&self, _path: &str) -> Result<DbId> {
+        // Return a dummy ID - this cache doesn't actually store anything
+        Ok(0)
+    }
+
+    async fn get_path_entry_id(&self, _parent: Option<DbId>, _name: &str) -> Result<DbId> {
+        // Return a dummy ID - this cache doesn't actually store anything
+        Ok(0)
+    }
+
     async fn get_fingerprinted_file_info(
         &self,
-        _path: &str,
+        _path_id: DbId,
     ) -> Result<Option<FingerprintedFileInfo>> {
         Ok(None)
     }
 
     async fn set_fingerprinted_file_info(
         &self,
-        _path: &str,
+        _path_id: DbId,
         _info: &FingerprintedFileInfo,
     ) -> Result<()> {
         Ok(())
@@ -149,17 +174,28 @@ impl DbFileStoreCache {
 
 #[async_trait]
 impl FileStoreCache for DbFileStoreCache {
+    async fn get_path_id(&self, path: &str) -> Result<DbId> {
+        // CacheDb.get_path_id internally calls get_or_create_* methods
+        Ok(self.cache_db.get_path_id(self.filestore_id, path).await?)
+    }
+
+    async fn get_path_entry_id(&self, parent: Option<DbId>, name: &str) -> Result<DbId> {
+        // First get or create the name ID
+        let name_id = self
+            .cache_db
+            .get_or_create_name_id(self.filestore_id, name)
+            .await?;
+        // Then get or create the path entry ID
+        Ok(self
+            .cache_db
+            .get_or_create_path_entry_id(self.filestore_id, parent, name_id)
+            .await?)
+    }
+
     async fn get_fingerprinted_file_info(
         &self,
-        path: &str,
+        path_id: DbId,
     ) -> Result<Option<FingerprintedFileInfo>> {
-        // Get the path ID (this creates intermediate entries if needed)
-        let path_id = match self.cache_db.get_path_id(self.filestore_id, path).await {
-            Ok(id) => id,
-            Err(_) => return Ok(None), // Path not in cache
-        };
-
-        // Get the cached info
         Ok(self
             .cache_db
             .get_fingerprinted_file_info(self.filestore_id, path_id)
@@ -168,17 +204,12 @@ impl FileStoreCache for DbFileStoreCache {
 
     async fn set_fingerprinted_file_info(
         &self,
-        path: &str,
+        path_id: DbId,
         info: &FingerprintedFileInfo,
     ) -> Result<()> {
-        // Get or create the path ID
-        let path_id = self.cache_db.get_path_id(self.filestore_id, path).await?;
-
-        // Set the cached info
         self.cache_db
             .set_fingerprinted_file_info(self.filestore_id, path_id, info)
             .await?;
-
         Ok(())
     }
 }
@@ -239,9 +270,17 @@ mod tests {
 
         let cache = caches.get_cache("file:///test/store").await.unwrap();
 
+        // Get path ID (creates it)
+        let path_id = cache.get_path_id("foo/bar.txt").await.unwrap();
+        assert!(path_id > 0);
+
+        // Same path should return same ID
+        let path_id2 = cache.get_path_id("foo/bar.txt").await.unwrap();
+        assert_eq!(path_id, path_id2);
+
         // Initially not cached
         assert!(cache
-            .get_fingerprinted_file_info("foo/bar.txt")
+            .get_fingerprinted_file_info(path_id)
             .await
             .unwrap()
             .is_none());
@@ -252,13 +291,13 @@ mod tests {
             object_id: "abc123".to_string(),
         };
         cache
-            .set_fingerprinted_file_info("foo/bar.txt", &info)
+            .set_fingerprinted_file_info(path_id, &info)
             .await
             .unwrap();
 
         // Get it back
         let retrieved = cache
-            .get_fingerprinted_file_info("foo/bar.txt")
+            .get_fingerprinted_file_info(path_id)
             .await
             .unwrap()
             .unwrap();
@@ -281,20 +320,23 @@ mod tests {
             object_id: "bbb".to_string(),
         };
 
-        // Same path, different stores
+        // Same path, different stores - get path IDs first
+        let path_id1 = cache1.get_path_id("test.txt").await.unwrap();
+        let path_id2 = cache2.get_path_id("test.txt").await.unwrap();
+
         cache1
-            .set_fingerprinted_file_info("test.txt", &info1)
+            .set_fingerprinted_file_info(path_id1, &info1)
             .await
             .unwrap();
         cache2
-            .set_fingerprinted_file_info("test.txt", &info2)
+            .set_fingerprinted_file_info(path_id2, &info2)
             .await
             .unwrap();
 
         // Each should have its own data
         assert_eq!(
             cache1
-                .get_fingerprinted_file_info("test.txt")
+                .get_fingerprinted_file_info(path_id1)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -302,11 +344,34 @@ mod tests {
         );
         assert_eq!(
             cache2
-                .get_fingerprinted_file_info("test.txt")
+                .get_fingerprinted_file_info(path_id2)
                 .await
                 .unwrap()
                 .unwrap(),
             info2
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_path_entry_id() {
+        let (_temp, caches) = create_test_caches();
+
+        let cache = caches.get_cache("file:///test/store").await.unwrap();
+
+        // Create path entries incrementally
+        let foo_id = cache.get_path_entry_id(None, "foo").await.unwrap();
+        let bar_id = cache.get_path_entry_id(Some(foo_id), "bar").await.unwrap();
+        let baz_id = cache.get_path_entry_id(Some(bar_id), "baz.txt").await.unwrap();
+
+        // Should get same IDs on repeated calls
+        let foo_id2 = cache.get_path_entry_id(None, "foo").await.unwrap();
+        let bar_id2 = cache.get_path_entry_id(Some(foo_id), "bar").await.unwrap();
+
+        assert_eq!(foo_id, foo_id2);
+        assert_eq!(bar_id, bar_id2);
+
+        // The full path should give us the same final ID
+        let full_path_id = cache.get_path_id("foo/bar/baz.txt").await.unwrap();
+        assert_eq!(baz_id, full_path_id);
     }
 }

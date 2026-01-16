@@ -368,7 +368,9 @@ impl CacheDb {
     }
 
     /// Get a path ID for a full path string, creating intermediate entries as needed.
-    pub async fn get_path_id(&self, filestore_id: DbId, path: &str) -> Result<DbId> {
+    ///
+    /// Returns `None` for empty/root paths (e.g., "" or "/").
+    pub async fn get_path_id(&self, filestore_id: DbId, path: &str) -> Result<Option<DbId>> {
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         let mut parent: Option<DbId> = None;
@@ -381,10 +383,8 @@ impl CacheDb {
             );
         }
 
-        // For empty path (root), use a special marker
-        parent.ok_or_else(|| {
-            KeyValueDbError::Encoding("cannot get path ID for empty path".to_string())
-        })
+        // For empty/root path, return None
+        Ok(parent)
     }
 
     // =========================================================================
@@ -590,15 +590,19 @@ mod tests {
 
         let fs_id = db.get_or_create_filestore_id("file:///test").await.unwrap();
 
-        let path1 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap();
-        let path2 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap();
+        let path1 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap().unwrap();
+        let path2 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap().unwrap();
 
         // Same path should get same ID
         assert_eq!(path1, path2);
 
         // Different path should get different ID
-        let path3 = db.get_path_id(fs_id, "foo/bar/other.txt").await.unwrap();
+        let path3 = db.get_path_id(fs_id, "foo/bar/other.txt").await.unwrap().unwrap();
         assert_ne!(path1, path3);
+
+        // Empty/root paths should return None
+        assert!(db.get_path_id(fs_id, "").await.unwrap().is_none());
+        assert!(db.get_path_id(fs_id, "/").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -606,7 +610,7 @@ mod tests {
         let (_temp, db) = create_test_db();
 
         let fs_id = db.get_or_create_filestore_id("file:///test").await.unwrap();
-        let path_id = db.get_path_id(fs_id, "test.txt").await.unwrap();
+        let path_id = db.get_path_id(fs_id, "test.txt").await.unwrap().unwrap();
 
         // Initially not set
         assert!(db

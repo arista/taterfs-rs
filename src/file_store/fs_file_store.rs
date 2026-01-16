@@ -44,8 +44,15 @@ impl FsFileStore {
         }
     }
 
-    /// Convert a relative path to an absolute filesystem path.
-    fn to_absolute(&self, relative: &Path) -> PathBuf {
+    /// Convert a path to an absolute filesystem path.
+    ///
+    /// The path is always interpreted relative to the file store's root,
+    /// even if it appears to be absolute (starts with `/`).
+    fn to_absolute(&self, path: &Path) -> PathBuf {
+        // Strip leading "/" or root component to ensure path is treated as relative
+        let relative = path
+            .strip_prefix("/")
+            .unwrap_or(path);
         self.root.join(relative)
     }
 
@@ -311,6 +318,13 @@ impl FileStore for FsFileStore {
 // =============================================================================
 
 /// Recursively scan a directory, generating scan events with ignore filtering.
+///
+/// Only processes regular files and directories. Symlinks, block/char devices,
+/// sockets, FIFOs, and other special file types are skipped.
+///
+/// TODO: Add support for symlinks. Currently symlinks are ignored to avoid
+/// infinite loops and to keep the initial implementation simple. Future work
+/// could support symlinks with cycle detection and configurable behavior.
 async fn scan_directory(
     dir_path: &Path,
     root: &Path,
@@ -328,10 +342,19 @@ async fn scan_directory(
     sorted_entries.sort_by_key(|a| a.file_name());
 
     for entry in sorted_entries {
+        let file_type = entry.file_type().await?;
+
+        // Only process regular files and directories.
+        // Skip symlinks, block/char devices, sockets, FIFOs, etc.
+        let is_dir = file_type.is_dir();
+        let is_file = file_type.is_file();
+        if !is_dir && !is_file {
+            continue;
+        }
+
         let entry_path = entry.path();
         let file_name = entry.file_name().to_string_lossy().into_owned();
         let metadata = entry.metadata().await?;
-        let is_dir = metadata.is_dir();
 
         // Check if this entry should be ignored
         if helper.should_ignore(&file_name, is_dir) {
@@ -653,6 +676,27 @@ mod tests {
         assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
     }
 
+    #[tokio::test]
+    async fn test_absolute_path_treated_as_relative() {
+        let temp = create_test_dir();
+
+        // Create a file
+        File::create(temp.path().join("hello.txt"))
+            .unwrap()
+            .write_all(b"Hello")
+            .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+
+        // Even with an absolute path, it should be relative to the store root
+        let entry = store.get_entry(Path::new("/hello.txt")).await.unwrap();
+        assert!(matches!(entry, Some(DirectoryEntry::File(_))));
+
+        // Also test with get_file
+        let contents = store.get_file(Path::new("/hello.txt")).await.unwrap();
+        assert_eq!(&contents[..], b"Hello");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_executable_file() {
@@ -679,5 +723,57 @@ mod tests {
             }
             _ => panic!("Expected file entry"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_scan_ignores_symlinks() {
+        let temp = create_test_dir();
+
+        // Create a regular file
+        File::create(temp.path().join("real.txt"))
+            .unwrap()
+            .write_all(b"real content")
+            .unwrap();
+
+        // Create a symlink to the file
+        std::os::unix::fs::symlink(
+            temp.path().join("real.txt"),
+            temp.path().join("link.txt"),
+        )
+        .unwrap();
+
+        // Create a directory and a symlink to it
+        std::fs::create_dir(temp.path().join("realdir")).unwrap();
+        std::os::unix::fs::symlink(
+            temp.path().join("realdir"),
+            temp.path().join("linkdir"),
+        )
+        .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+
+        let events: Vec<_> = store
+            .scan(None)
+            .await
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::EnterDirectory(d) => Some(d.name.as_str()),
+                ScanEvent::File(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // Should include real file and directory, but not symlinks
+        assert!(names.contains(&"real.txt"));
+        assert!(names.contains(&"realdir"));
+        assert!(!names.contains(&"link.txt"));
+        assert!(!names.contains(&"linkdir"));
     }
 }

@@ -33,6 +33,11 @@ impl LmdbKeyValueDb {
         std::fs::create_dir_all(path)?;
 
         // Open LMDB environment
+        // TODO: Make map_size configurable. Also consider failure scenarios:
+        // - What happens when the database reaches max size? (writes fail)
+        // - Should we monitor usage and warn before hitting the limit?
+        // - Should we implement cache eviction at the LMDB level?
+        // - How do we recover if the database becomes full?
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(1024 * 1024 * 1024) // 1GB max size

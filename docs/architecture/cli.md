@@ -79,6 +79,18 @@ tfs repo write {repo spec} [{contents}]
 ```
 Writes the given contents to the given repo and generates the resulting hash as output.  If --input-file/-f is specified, then the contents will be read from that file.  It is an error for both -f and {contents} to be specified.  If neither is specified, then the contents will be read from STDIN.  The resulting hash will be written to STDOUT or to the given {output file}, and will be formatted as pretty-printed JSON if --json is specified.
 
+```
+tfs repo upload-file {repo spec} {filestore spec} {path}
+  [--output-file / -o {output file}]
+```
+Calls upload_file() from the filestore to the repo and prints the resulting file hash id to STDOUT, or the given output file
+
+```
+tfs repo upload-directory {repo spec} {filestore spec} [{path}]
+  [--output-file / -o {output file}]
+```
+Calls upload_directory() from the filestore to the repo and prints the resulting directory hash id to STDOUT, or the given output file
+
 ### tfs file-store
 
 ```
@@ -89,8 +101,7 @@ Calls scan() on the filestore and prints the results to STDOUT, or the given out
   EnterDirectory - print "{name}/" at the current indent level, and increment the current indent level by 4
   ExitDirectory - decrease the current indent level by 4
   File - print "{name} ({size} bytes, {x or - for executable bit}, fingerprint: {fingerprint})" at the current indent level
-  
-  
+
 ```
 tfs file-store source_chunks {filestore spec} [{path}]
   [--input-file / -f {input file}]

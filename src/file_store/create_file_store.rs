@@ -333,7 +333,7 @@ impl CreateFileStoreContext {
                 let source =
                     S3FileSource::new(s3_config, flow_control, self.managed_buffers.clone()).await;
 
-                Ok(Arc::new(S3FileStoreWrapper(source)))
+                Ok(Arc::new(S3FileStoreWrapper::new(source)))
             }
 
             FileStoreType::FileSystem => {
@@ -358,15 +358,29 @@ impl CreateFileStoreContext {
 /// Wrapper to make S3FileSource implement FileStore.
 ///
 /// S3FileSource only implements FileSource, not FileDest.
-struct S3FileStoreWrapper(S3FileSource);
+struct S3FileStoreWrapper {
+    source: S3FileSource,
+    cache_url: String,
+}
+
+impl S3FileStoreWrapper {
+    fn new(source: S3FileSource) -> Self {
+        let cache_url = source.cache_url();
+        Self { source, cache_url }
+    }
+}
 
 impl FileStore for S3FileStoreWrapper {
     fn get_source(&self) -> Option<&dyn crate::file_store::FileSource> {
-        Some(&self.0)
+        Some(&self.source)
     }
 
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
         None // S3FileStore doesn't support FileDest yet
+    }
+
+    fn cache_url(&self) -> &str {
+        &self.cache_url
     }
 }
 

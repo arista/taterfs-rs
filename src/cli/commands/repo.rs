@@ -6,8 +6,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::app::App;
-use crate::cli::{CliError, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
+use std::path::Path;
+
+use crate::app::{upload_directory, upload_file, App};
+use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
 use crate::repo::RepoInitialize;
 use crate::util::ManagedBuffers;
 
@@ -41,6 +43,14 @@ pub enum RepoCommand {
 
     /// Write an object.
     Write(WriteArgs),
+
+    /// Upload a file to the repository.
+    #[command(name = "upload-file")]
+    UploadFile(UploadFileArgs),
+
+    /// Upload a directory to the repository.
+    #[command(name = "upload-directory")]
+    UploadDirectory(UploadDirectoryArgs),
 }
 
 impl RepoCommand {
@@ -54,6 +64,8 @@ impl RepoCommand {
             RepoCommand::Exists(args) => args.run(app, global).await,
             RepoCommand::Read(args) => args.run(app, global).await,
             RepoCommand::Write(args) => args.run(app, global).await,
+            RepoCommand::UploadFile(args) => args.run(app, global).await,
+            RepoCommand::UploadDirectory(args) => args.run(app, global).await,
         }
     }
 }
@@ -369,6 +381,131 @@ impl WriteArgs {
             self.output.write(&WriteOutput { id }, true).await?;
         } else {
             self.output.write_str(&id).await?;
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Upload File
+// =============================================================================
+
+/// Arguments for the upload-file command.
+#[derive(Args, Debug)]
+pub struct UploadFileArgs {
+    #[command(flatten)]
+    pub repo: RepoArgs,
+
+    #[command(flatten)]
+    pub file_store: FileStoreArgs,
+
+    /// Path to the file within the file store.
+    pub path: String,
+
+    #[command(flatten)]
+    pub output: OutputSink,
+}
+
+#[derive(Serialize)]
+struct UploadFileOutput {
+    hash: String,
+}
+
+impl UploadFileArgs {
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        let repo_ctx = self.repo.to_create_repo_context(false);
+        let repo = app.create_repo(repo_ctx).await?;
+
+        let fs_ctx = self.file_store.to_create_file_store_context();
+        let file_store = app.create_file_store(fs_ctx).await?;
+
+        let path = Path::new(&self.path);
+        let result = upload_file(file_store.as_ref(), repo, path)
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
+
+        // Wait for upload to complete
+        result
+            .complete
+            .complete()
+            .await
+            .map_err(|e| CliError::Other(format!("upload failed: {}", e)))?;
+
+        let hash = result.result.hash;
+
+        if global.json {
+            self.output
+                .write(&UploadFileOutput { hash }, true)
+                .await?;
+        } else {
+            self.output.write_str(&hash).await?;
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Upload Directory
+// =============================================================================
+
+/// Arguments for the upload-directory command.
+#[derive(Args, Debug)]
+pub struct UploadDirectoryArgs {
+    #[command(flatten)]
+    pub repo: RepoArgs,
+
+    #[command(flatten)]
+    pub file_store: FileStoreArgs,
+
+    /// Path to the directory within the file store. If not specified, uploads the entire file store.
+    pub path: Option<String>,
+
+    #[command(flatten)]
+    pub output: OutputSink,
+}
+
+#[derive(Serialize)]
+struct UploadDirectoryOutput {
+    hash: String,
+}
+
+impl UploadDirectoryArgs {
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        let repo_ctx = self.repo.to_create_repo_context(false);
+        let repo = app.create_repo(repo_ctx).await?;
+
+        let fs_ctx = self.file_store.to_create_file_store_context();
+        let file_store = app.create_file_store(fs_ctx).await?;
+
+        // Get the cache for this file store
+        let cache = app
+            .file_store_caches()
+            .get_cache(file_store.cache_url())
+            .await
+            .map_err(CliError::Other)?;
+
+        let path = self.path.as_deref().map(Path::new);
+        let result = upload_directory(file_store.as_ref(), repo, cache, path)
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
+
+        // Wait for upload to complete
+        result
+            .complete
+            .complete()
+            .await
+            .map_err(|e| CliError::Other(format!("upload failed: {}", e)))?;
+
+        let hash = result.result.hash;
+
+        if global.json {
+            self.output
+                .write(&UploadDirectoryOutput { hash }, true)
+                .await?;
+        } else {
+            self.output.write_str(&hash).await?;
         }
 
         Ok(())

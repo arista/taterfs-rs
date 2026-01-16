@@ -448,6 +448,11 @@ impl FileStore for MemoryFileStore {
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
         None // Not implemented yet
     }
+
+    fn cache_url(&self) -> &str {
+        // Memory file stores use a constant URL since they're ephemeral
+        "memory://"
+    }
 }
 
 // =============================================================================

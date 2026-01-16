@@ -22,6 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 pub struct FsFileStore {
     /// Root path on the filesystem.
     root: PathBuf,
+    /// Cache URL for this file store.
+    cache_url: String,
     /// Buffer manager for chunk allocation.
     managed_buffers: ManagedBuffers,
 }
@@ -29,8 +31,11 @@ pub struct FsFileStore {
 impl FsFileStore {
     /// Create a new FsFileStore rooted at the given path.
     pub fn new(root: impl AsRef<Path>, managed_buffers: ManagedBuffers) -> Self {
+        let root_path = root.as_ref().to_path_buf();
+        let cache_url = format!("file://{}", root_path.display());
         Self {
-            root: root.as_ref().to_path_buf(),
+            root: root_path,
+            cache_url,
             managed_buffers,
         }
     }
@@ -290,6 +295,10 @@ impl FileStore for FsFileStore {
 
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
         None // Not implemented yet
+    }
+
+    fn cache_url(&self) -> &str {
+        &self.cache_url
     }
 }
 

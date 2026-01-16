@@ -166,6 +166,11 @@ impl App {
         &self.config
     }
 
+    /// Get the file store caches.
+    pub fn file_store_caches(&self) -> &Arc<dyn FileStoreCaches> {
+        &self.file_store_caches
+    }
+
     /// Create a repository from a specification.
     pub async fn create_repo(&self, ctx: AppCreateRepoContext) -> Result<Arc<Repo>> {
         let repo_ctx = CreateRepoContext::new(

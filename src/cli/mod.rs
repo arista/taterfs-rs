@@ -75,6 +75,13 @@ pub enum Command {
         #[command(subcommand)]
         command: commands::file_store::FileStoreCommand,
     },
+
+    /// Key-value cache operations.
+    #[command(name = "key-value-cache")]
+    KeyValueCache {
+        #[command(subcommand)]
+        command: commands::key_value_cache::KeyValueCacheCommand,
+    },
 }
 
 // =============================================================================
@@ -97,6 +104,7 @@ impl Cli {
                 match command {
                     Command::Repo { command } => command.run(app, &global).await,
                     Command::FileStore { command } => command.run(app, &global).await,
+                    Command::KeyValueCache { command } => command.run(app, &global).await,
                 }
             })
         })

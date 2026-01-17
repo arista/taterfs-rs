@@ -114,3 +114,16 @@ Calls get_source_chunks on the filestore at the given path (which may alternatel
 At the end, print:
 
 total: {total size}
+
+### tfs key-value-cache
+
+```
+tfs key-value-cache list-entries [{prefix}]
+  [--output-file / -o {output file}]
+```
+Calls list_entries() on the cache, and for each entry, converts the key and value to strings and prints out:
+
+```
+{key} -> {value}
+```
+The output is printed to the output-file is specified, otherwise STDOUT.  If no prefix is specified, then all entries will be printed

@@ -2,7 +2,7 @@
 //!
 //! Provides write-back caching with LRU eviction on top of any KeyValueDb.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -105,8 +105,8 @@ struct CacheState {
     cache: LruCache<Vec<u8>, CacheEntry>,
     /// Current size of cached data.
     cache_size: usize,
-    /// Pending writes to be flushed.
-    pending: HashMap<Vec<u8>, WriteOp>,
+    /// Pending writes to be flushed (BTreeMap for sorted iteration).
+    pending: BTreeMap<Vec<u8>, WriteOp>,
     /// Total size of pending writes.
     pending_size: usize,
     /// Last flush time.
@@ -124,7 +124,7 @@ impl CachingKeyValueDb {
             state: Arc::new(Mutex::new(CacheState {
                 cache,
                 cache_size: 0,
-                pending: HashMap::new(),
+                pending: BTreeMap::new(),
                 pending_size: 0,
                 last_flush: Instant::now(),
             })),
@@ -294,39 +294,24 @@ impl KeyValueDb for CachingKeyValueDb {
     }
 
     async fn list_entries(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueEntries + Send>> {
-        // Get entries from underlying database
-        let mut underlying_entries = self.inner.list_entries(prefix).await?;
+        // Get lazy iterator from underlying database
+        let underlying = self.inner.list_entries(prefix).await?;
 
-        // Collect underlying entries into a BTreeMap for sorted iteration
-        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        while let Some(entry) = underlying_entries.next().await? {
-            merged.insert(entry.key, entry.value);
-        }
-
-        // Overlay pending writes
-        {
+        // Extract pending entries matching the prefix (snapshot)
+        let pending_entries: Vec<(Vec<u8>, WriteOp)> = {
             let state = self.state.lock().await;
-            for (key, op) in &state.pending {
-                if key.starts_with(prefix) {
-                    match op {
-                        WriteOp::Set { value, .. } => {
-                            merged.insert(key.clone(), value.clone());
-                        }
-                        WriteOp::Del { .. } => {
-                            merged.remove(key);
-                        }
-                    }
-                }
-            }
-        }
+            state
+                .pending
+                .range::<Vec<u8>, _>(prefix.to_vec()..)
+                .take_while(|(k, _)| k.starts_with(prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
 
-        // Convert to entry list
-        let entries: Vec<KeyValueEntry> = merged
-            .into_iter()
-            .map(|(key, value)| KeyValueEntry::new(key, value))
-            .collect();
-
-        Ok(Box::new(CachingKeyValueEntries { entries, index: 0 }))
+        Ok(Box::new(CachingKeyValueEntries::new(
+            underlying,
+            pending_entries,
+        )))
     }
 
     async fn transaction(&self) -> Result<Box<dyn KeyValueDbTransaction + Send>> {
@@ -495,20 +480,137 @@ impl KeyValueDbWrites for CachingWrites {
 // CachingKeyValueEntries
 // =============================================================================
 
+/// Iterator that zipper-merges underlying database entries with pending writes.
+///
+/// Pending Set operations add or override entries, Del operations remove entries.
+/// Entries are yielded in sorted key order.
 struct CachingKeyValueEntries {
-    entries: Vec<KeyValueEntry>,
-    index: usize,
+    /// Iterator over underlying database entries.
+    underlying: Box<dyn KeyValueEntries + Send>,
+    /// Pending entries sorted by key (snapshot taken at iteration start).
+    pending: Vec<(Vec<u8>, WriteOp)>,
+    /// Index into pending entries.
+    pending_index: usize,
+    /// Next entry from underlying (peeked ahead).
+    underlying_next: Option<KeyValueEntry>,
+    /// Whether we've exhausted the underlying iterator.
+    underlying_exhausted: bool,
+}
+
+impl CachingKeyValueEntries {
+    fn new(underlying: Box<dyn KeyValueEntries + Send>, pending: Vec<(Vec<u8>, WriteOp)>) -> Self {
+        Self {
+            underlying,
+            pending,
+            pending_index: 0,
+            underlying_next: None,
+            underlying_exhausted: false,
+        }
+    }
+
+    /// Peek the next pending entry (if any).
+    fn peek_pending(&self) -> Option<&(Vec<u8>, WriteOp)> {
+        self.pending.get(self.pending_index)
+    }
+
+    /// Advance pending to the next entry.
+    fn advance_pending(&mut self) {
+        self.pending_index += 1;
+    }
+
+    /// Ensure we have a peeked underlying entry (if available).
+    async fn ensure_underlying_peeked(&mut self) -> Result<()> {
+        if self.underlying_next.is_none() && !self.underlying_exhausted {
+            self.underlying_next = self.underlying.next().await?;
+            if self.underlying_next.is_none() {
+                self.underlying_exhausted = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the peeked underlying entry.
+    fn take_underlying(&mut self) -> Option<KeyValueEntry> {
+        self.underlying_next.take()
+    }
 }
 
 #[async_trait]
 impl KeyValueEntries for CachingKeyValueEntries {
     async fn next(&mut self) -> Result<Option<KeyValueEntry>> {
-        if self.index >= self.entries.len() {
-            return Ok(None);
+        loop {
+            // Ensure we have a peeked underlying entry
+            self.ensure_underlying_peeked().await?;
+
+            let pending = self.peek_pending();
+            let underlying = self.underlying_next.as_ref();
+
+            match (pending, underlying) {
+                (None, None) => {
+                    // Both exhausted
+                    return Ok(None);
+                }
+                (Some((key, op)), None) => {
+                    // Only pending left
+                    let key = key.clone();
+                    let op = op.clone();
+                    self.advance_pending();
+                    match op {
+                        WriteOp::Set { value, .. } => {
+                            return Ok(Some(KeyValueEntry::new(key, value)));
+                        }
+                        WriteOp::Del { .. } => {
+                            // Skip deleted entries
+                            continue;
+                        }
+                    }
+                }
+                (None, Some(_)) => {
+                    // Only underlying left
+                    return Ok(self.take_underlying());
+                }
+                (Some((pending_key, op)), Some(underlying_entry)) => {
+                    // Compare keys
+                    match pending_key.cmp(&underlying_entry.key) {
+                        std::cmp::Ordering::Less => {
+                            // Pending key comes first
+                            let key = pending_key.clone();
+                            let op = op.clone();
+                            self.advance_pending();
+                            match op {
+                                WriteOp::Set { value, .. } => {
+                                    return Ok(Some(KeyValueEntry::new(key, value)));
+                                }
+                                WriteOp::Del { .. } => {
+                                    // Skip deleted entries
+                                    continue;
+                                }
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Same key - pending takes precedence
+                            let key = pending_key.clone();
+                            let op = op.clone();
+                            self.advance_pending();
+                            self.take_underlying(); // Discard underlying
+                            match op {
+                                WriteOp::Set { value, .. } => {
+                                    return Ok(Some(KeyValueEntry::new(key, value)));
+                                }
+                                WriteOp::Del { .. } => {
+                                    // Key was deleted
+                                    continue;
+                                }
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Underlying key comes first
+                            return Ok(self.take_underlying());
+                        }
+                    }
+                }
+            }
         }
-        let entry = self.entries[self.index].clone();
-        self.index += 1;
-        Ok(Some(entry))
     }
 }
 

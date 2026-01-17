@@ -20,6 +20,7 @@ The following rules are applied to find the config file:
     * pending_writes_max_count={default 10000} - length of the pending writes list before flushing
     * pending_writes_max_size={default 10000000} - size of the pending writes list before flushing
     * max_memory_size={default 10000000} - maximum amount of memory usage for the cache
+    * max_object_memory_size={default 10000000} - maximum amount of memory usage for the repo object cache
 
 * [filestores] section
     * global_ignores={comma-separated list of gitignore-format entries to be used by FileSource.scan(), default ".git/,.tfs/"}

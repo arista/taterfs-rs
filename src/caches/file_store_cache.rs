@@ -254,13 +254,15 @@ impl FileStoreCaches for DbFileStoreCaches {
 #[cfg(test)]
 mod tests {
     use super::super::lmdb_key_value_db::LmdbKeyValueDb;
+    use super::super::object_cache_db::NoopObjectCacheDb;
     use super::*;
     use tempfile::TempDir;
 
     fn create_test_caches() -> (TempDir, DbFileStoreCaches) {
         let temp_dir = TempDir::new().unwrap();
         let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
-        let cache_db = Arc::new(CacheDb::new(lmdb));
+        let object_cache = Arc::new(NoopObjectCacheDb);
+        let cache_db = Arc::new(CacheDb::new(lmdb, object_cache));
         let caches = DbFileStoreCaches::new(cache_db);
         (temp_dir, caches)
     }

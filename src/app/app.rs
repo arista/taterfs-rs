@@ -10,8 +10,9 @@ use thiserror::Error;
 
 use crate::app::CapacityManagers;
 use crate::caches::{
-    CacheDb, CachingConfig, CachingKeyValueDb, DbFileStoreCaches, DbRepoCaches, FileStoreCaches,
-    KeyValueDb, LmdbKeyValueDb, NoopCaches, NoopFileStoreCaches, RepoCaches,
+    CacheDb, CachingConfig, CachingKeyValueDb, CachingObjectCacheDb, DbFileStoreCaches,
+    DbRepoCaches, FileStoreCaches, FsObjectCacheDb, KeyValueDb, LmdbKeyValueDb, NoopCaches,
+    NoopFileStoreCaches, ObjectCacheDb, RepoCaches,
 };
 use crate::config::{read_config, ConfigHelper, ConfigSource};
 use crate::file_store::{
@@ -173,7 +174,7 @@ impl App {
             let file_store_caches: Arc<dyn FileStoreCaches> = Arc::new(NoopFileStoreCaches);
             (repo_caches, file_store_caches, None)
         } else {
-            // Create LMDB-backed cache
+            // Create LMDB-backed cache for key-value operations
             let lmdb = LmdbKeyValueDb::new(&cache_config.path)
                 .map_err(|e| AppError::CacheInit(e.to_string()))?;
 
@@ -185,7 +186,18 @@ impl App {
             };
 
             let caching_db = Arc::new(CachingKeyValueDb::new(Arc::new(lmdb), caching_config));
-            let cache_db = Arc::new(CacheDb::new(caching_db.clone() as Arc<dyn KeyValueDb>));
+
+            // Create filesystem-backed object cache with in-memory LRU caching
+            let fs_object_cache = Arc::new(FsObjectCacheDb::new(&cache_config.path));
+            let object_cache: Arc<dyn ObjectCacheDb> = Arc::new(CachingObjectCacheDb::new(
+                fs_object_cache,
+                cache_config.max_object_memory_size.0 as usize,
+            ));
+
+            let cache_db = Arc::new(CacheDb::new(
+                caching_db.clone() as Arc<dyn KeyValueDb>,
+                object_cache,
+            ));
 
             let repo_caches: Arc<dyn RepoCaches> = Arc::new(DbRepoCaches::new(cache_db.clone()));
             let file_store_caches: Arc<dyn FileStoreCaches> =

@@ -11,11 +11,16 @@
 //!    - [`LmdbKeyValueDb`] - LMDB-backed implementation
 //!    - [`CachingKeyValueDb`] - Write-back caching wrapper
 //!
-//! 2. **CacheDb** - Higher-level cache operations
-//!    - Repository ID and object caching
-//!    - File store path and fingerprint caching
+//! 2. **ObjectCacheDb** - Repository object caching (separate from KeyValueDb)
+//!    - [`FsObjectCacheDb`] - Filesystem-backed implementation
+//!    - [`CachingObjectCacheDb`] - In-memory LRU caching wrapper
 //!
-//! 3. **Application-level caches**
+//! 3. **CacheDb** - Higher-level cache operations
+//!    - Repository ID and existence tracking (uses KeyValueDb)
+//!    - Repository object caching (uses ObjectCacheDb)
+//!    - File store path and fingerprint caching (uses KeyValueDb)
+//!
+//! 4. **Application-level caches**
 //!    - [`RepoCache`] / [`RepoCaches`] - Repository object caching
 //!    - [`FileStoreCache`] / [`FileStoreCaches`] - File fingerprint caching
 
@@ -24,6 +29,7 @@ mod caching_key_value_db;
 mod file_store_cache;
 mod key_value_db;
 mod lmdb_key_value_db;
+mod object_cache_db;
 mod repo_cache;
 
 // Key-value database layer
@@ -33,6 +39,11 @@ pub use key_value_db::{
 };
 pub use lmdb_key_value_db::LmdbKeyValueDb;
 pub use caching_key_value_db::{CachingConfig, CachingKeyValueDb};
+
+// Object cache database layer
+pub use object_cache_db::{
+    CachingObjectCacheDb, FsObjectCacheDb, NoopObjectCacheDb, ObjectCacheDb, ObjectCacheError,
+};
 
 // Cache database layer
 pub use cache_db::{CacheDb, DbId};

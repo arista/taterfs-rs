@@ -214,6 +214,15 @@ impl App {
         &self.file_store_caches
     }
 
+    /// Get the underlying key-value database.
+    ///
+    /// Returns `None` if caching is disabled (--no-cache).
+    pub fn key_value_db(&self) -> Option<Arc<dyn KeyValueDb>> {
+        self.caching_db
+            .as_ref()
+            .map(|db| db.clone() as Arc<dyn KeyValueDb>)
+    }
+
     /// Flush pending cache writes.
     ///
     /// Called automatically by [`App::with_app`].

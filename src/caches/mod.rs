@@ -28,7 +28,8 @@ mod repo_cache;
 
 // Key-value database layer
 pub use key_value_db::{
-    KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, WriteOp,
+    KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries,
+    KeyValueEntry, WriteOp,
 };
 pub use lmdb_key_value_db::LmdbKeyValueDb;
 pub use caching_key_value_db::{CachingConfig, CachingKeyValueDb};

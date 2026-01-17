@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use heed::types::Bytes;
 use heed::{Database, Env, EnvOpenOptions};
 
-use super::key_value_db::{KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, Result, WriteOp};
+use super::key_value_db::{
+    KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries,
+    KeyValueEntry, Result, WriteOp,
+};
 
 // =============================================================================
 // LmdbKeyValueDb
@@ -101,6 +104,53 @@ impl KeyValueDb for LmdbKeyValueDb {
         })
         .await
         .map_err(|e| KeyValueDbError::Database(e.to_string()))?
+    }
+
+    async fn list_entries(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueEntries + Send>> {
+        let env = self.env.clone();
+        let db = self.db;
+        let prefix = prefix.to_vec();
+
+        // Collect all matching entries in a blocking task
+        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<KeyValueEntry>> {
+            let rtxn = env
+                .read_txn()
+                .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+            let mut entries = Vec::new();
+
+            // LMDB doesn't support empty prefix with prefix_iter, so use regular iter
+            if prefix.is_empty() {
+                let iter = db
+                    .iter(&rtxn)
+                    .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                for result in iter {
+                    let (key, value) =
+                        result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                    entries.push(KeyValueEntry::new(key.to_vec(), value.to_vec()));
+                }
+            } else {
+                let iter = db
+                    .prefix_iter(&rtxn, &prefix)
+                    .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                for result in iter {
+                    let (key, value) =
+                        result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                    entries.push(KeyValueEntry::new(key.to_vec(), value.to_vec()));
+                }
+            }
+
+            Ok(entries)
+        })
+        .await
+        .map_err(|e| KeyValueDbError::Database(e.to_string()))??;
+
+        Ok(Box::new(LmdbKeyValueEntries {
+            entries,
+            index: 0,
+        }))
     }
 
     async fn transaction(&self) -> Result<Box<dyn KeyValueDbTransaction + Send>> {
@@ -289,6 +339,27 @@ impl KeyValueDbWrites for LmdbWrites {
 }
 
 // =============================================================================
+// LmdbKeyValueEntries
+// =============================================================================
+
+struct LmdbKeyValueEntries {
+    entries: Vec<KeyValueEntry>,
+    index: usize,
+}
+
+#[async_trait]
+impl KeyValueEntries for LmdbKeyValueEntries {
+    async fn next(&mut self) -> Result<Option<KeyValueEntry>> {
+        if self.index >= self.entries.len() {
+            return Ok(None);
+        }
+        let entry = self.entries[self.index].clone();
+        self.index += 1;
+        Ok(Some(entry))
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -354,5 +425,75 @@ mod tests {
         writes.flush().await.unwrap();
 
         assert!(!db.exists(b"key1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_list_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values with prefixes
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+        writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+        writes.set(b"prefix/c".to_vec(), b"value_c".to_vec()).await;
+        writes.set(b"other/x".to_vec(), b"value_x".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List entries with prefix
+        let mut entries = db.list_entries(b"prefix/").await.unwrap();
+
+        let e1 = entries.next().await.unwrap().unwrap();
+        assert_eq!(e1.key, b"prefix/a");
+        assert_eq!(e1.value, b"value_a");
+
+        let e2 = entries.next().await.unwrap().unwrap();
+        assert_eq!(e2.key, b"prefix/b");
+        assert_eq!(e2.value, b"value_b");
+
+        let e3 = entries.next().await.unwrap().unwrap();
+        assert_eq!(e3.key, b"prefix/c");
+        assert_eq!(e3.value, b"value_c");
+
+        // No more entries
+        assert!(entries.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_entries_empty_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"a".to_vec(), b"1".to_vec()).await;
+        writes.set(b"b".to_vec(), b"2".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List all entries (empty prefix)
+        let mut entries = db.list_entries(b"").await.unwrap();
+
+        let e1 = entries.next().await.unwrap().unwrap();
+        assert_eq!(e1.key, b"a");
+
+        let e2 = entries.next().await.unwrap().unwrap();
+        assert_eq!(e2.key, b"b");
+
+        assert!(entries.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_entries_no_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"foo/a".to_vec(), b"1".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List with non-matching prefix
+        let mut entries = db.list_entries(b"bar/").await.unwrap();
+        assert!(entries.next().await.unwrap().is_none());
     }
 }

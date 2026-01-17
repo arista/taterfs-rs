@@ -164,8 +164,6 @@ repository-id-by-uuid/{encoded uuid} -> {repository dbid} - implements get/set_r
 ex/{repository dbid}/{object id} -> {empty value} - implements get/set_exists
 fs/{repository dbid}/{object id} -> {empty value} - implements get/set_fully_stored
 
-ro/{object id} -> "RepoObject JSON in canonical form" - implements get/set_object
-
 filestore-id-by-url/{filestore url, uri-component-encoded} -> implements get/set_filestore_id
 na/{filestore dbid}/{encoded name} -> {name id} - implements get/set_name_id
 pa/{filestore dbid}/{path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id

@@ -13,9 +13,9 @@ use chrono::Utc;
 use crate::backend::{BackendError, RepoBackend, RepositoryInfo};
 use crate::caches::RepoCache;
 use crate::repository::{
-    Branch, BranchListEntry, Branches, BranchesType, Commit, CommitMetadata, CommitType,
-    Directory, DirectoryType, File, JsonError, ObjectId, RepoObject, Root, RootType, from_json,
-    to_canonical_json,
+    Branch, BranchListEntry, Branches, BranchesType, ChunkFilePart, Commit, CommitMetadata,
+    CommitType, DirEntry, Directory, DirectoryPart, DirectoryType, File, FileEntry, FilePart,
+    JsonError, ObjectId, RepoObject, Root, RootType, from_json, to_canonical_json,
 };
 use crate::util::{
     CapacityManager, Complete, Completes, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete,
@@ -122,6 +122,143 @@ pub struct FlowControl {
     pub total_throughput_limiter: Option<CapacityManager>,
     /// Manages memory buffers for read/write operations.
     pub managed_buffers: Option<ManagedBuffers>,
+}
+
+// =============================================================================
+// Directory Entry List
+// =============================================================================
+
+/// A directory entry - either a file or a subdirectory.
+///
+/// This is the leaf type yielded by [`DirectoryEntryList`], representing
+/// actual entries (not partial directory references).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryEntry {
+    /// A file entry.
+    File(FileEntry),
+    /// A subdirectory entry.
+    Directory(DirEntry),
+}
+
+/// An iterator over directory entries that handles nested PartialDirectory references.
+///
+/// This struct provides an async iterator interface that walks through all entries
+/// in a directory, recursively fetching and expanding any `PartialDirectory` references.
+pub struct DirectoryEntryList {
+    repo: Arc<Repo>,
+    /// Stack of pending directory parts to process.
+    /// Each element is (directory_id, index into entries).
+    pending: Vec<(Directory, usize)>,
+}
+
+impl DirectoryEntryList {
+    /// Create a new directory entry list starting from the given directory.
+    fn new(repo: Arc<Repo>, directory: Directory) -> Self {
+        Self {
+            repo,
+            pending: vec![(directory, 0)],
+        }
+    }
+
+    /// Get the next directory entry.
+    ///
+    /// Returns `None` when all entries have been yielded.
+    /// Automatically handles `PartialDirectory` entries by fetching and
+    /// expanding them.
+    pub async fn next(&mut self) -> Result<Option<DirectoryEntry>> {
+        loop {
+            // Get the current directory and index from the stack
+            let Some((dir, idx)) = self.pending.last_mut() else {
+                return Ok(None);
+            };
+
+            // Check if we've exhausted this directory's entries
+            if *idx >= dir.entries.len() {
+                self.pending.pop();
+                continue;
+            }
+
+            // Get the current entry and advance the index
+            let entry = dir.entries[*idx].clone();
+            *idx += 1;
+
+            match entry {
+                DirectoryPart::File(file_entry) => {
+                    return Ok(Some(DirectoryEntry::File(file_entry)));
+                }
+                DirectoryPart::Directory(dir_entry) => {
+                    return Ok(Some(DirectoryEntry::Directory(dir_entry)));
+                }
+                DirectoryPart::Partial(partial) => {
+                    // Fetch the partial directory and push it onto the stack
+                    let nested_dir = self.repo.read_directory(&partial.directory).await?;
+                    self.pending.push((nested_dir, 0));
+                    // Continue the loop to process entries from the nested directory
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// File Chunk List
+// =============================================================================
+
+/// An iterator over file chunks that handles nested FileFilePart references.
+///
+/// This struct provides an async iterator interface that walks through all chunks
+/// in a file, recursively fetching and expanding any `FileFilePart` references.
+pub struct FileChunkList {
+    repo: Arc<Repo>,
+    /// Stack of pending file parts to process.
+    /// Each element is (file, index into parts).
+    pending: Vec<(File, usize)>,
+}
+
+impl FileChunkList {
+    /// Create a new file chunk list starting from the given file.
+    fn new(repo: Arc<Repo>, file: File) -> Self {
+        Self {
+            repo,
+            pending: vec![(file, 0)],
+        }
+    }
+
+    /// Get the next file chunk.
+    ///
+    /// Returns `None` when all chunks have been yielded.
+    /// Automatically handles `FileFilePart` entries by fetching and
+    /// expanding them.
+    pub async fn next(&mut self) -> Result<Option<ChunkFilePart>> {
+        loop {
+            // Get the current file and index from the stack
+            let Some((file, idx)) = self.pending.last_mut() else {
+                return Ok(None);
+            };
+
+            // Check if we've exhausted this file's parts
+            if *idx >= file.parts.len() {
+                self.pending.pop();
+                continue;
+            }
+
+            // Get the current part and advance the index
+            let part = file.parts[*idx].clone();
+            *idx += 1;
+
+            match part {
+                FilePart::Chunk(chunk) => {
+                    return Ok(Some(chunk));
+                }
+                FilePart::File(file_part) => {
+                    // Fetch the nested file and push it onto the stack
+                    let nested_file = self.repo.read_file(&file_part.file).await?;
+                    self.pending.push((nested_file, 0));
+                    // Continue the loop to process parts from the nested file
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -671,6 +808,35 @@ impl Repo {
                 actual: other.type_name(),
             }),
         }
+    }
+
+    // =========================================================================
+    // List Functions
+    // =========================================================================
+
+    /// List all entries in a directory, recursively handling PartialDirectory entries.
+    ///
+    /// This is a convenience function that walks through all entries in a directory,
+    /// automatically fetching and expanding any `PartialDirectory` references.
+    ///
+    /// Returns a [`DirectoryEntryList`] that can be used to iterate over all entries.
+    pub async fn list_directory_entries(
+        self: &Arc<Self>,
+        directory_id: &ObjectId,
+    ) -> Result<DirectoryEntryList> {
+        let directory = self.read_directory(directory_id).await?;
+        Ok(DirectoryEntryList::new(Arc::clone(self), directory))
+    }
+
+    /// List all chunks in a file, recursively handling FileFilePart entries.
+    ///
+    /// This is a convenience function that walks through all chunks in a file,
+    /// automatically fetching and expanding any `FileFilePart` references.
+    ///
+    /// Returns a [`FileChunkList`] that can be used to iterate over all chunks.
+    pub async fn list_file_chunks(self: &Arc<Self>, file_id: &ObjectId) -> Result<FileChunkList> {
+        let file = self.read_file(file_id).await?;
+        Ok(FileChunkList::new(Arc::clone(self), file))
     }
 }
 

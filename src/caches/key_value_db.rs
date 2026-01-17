@@ -50,6 +50,53 @@ impl From<std::io::Error> for KeyValueDbError {
 pub type Result<T> = std::result::Result<T, KeyValueDbError>;
 
 // =============================================================================
+// KeyValueEntry
+// =============================================================================
+
+/// A key-value entry from the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyValueEntry {
+    /// The key bytes.
+    pub key: Vec<u8>,
+    /// The value bytes.
+    pub value: Vec<u8>,
+}
+
+impl KeyValueEntry {
+    /// Create a new key-value entry.
+    pub fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self { key, value }
+    }
+
+    /// Get the key as a UTF-8 string.
+    ///
+    /// Returns an error if the key is not valid UTF-8.
+    pub fn key_string(&self) -> std::result::Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.key)
+    }
+
+    /// Get the value as a UTF-8 string.
+    ///
+    /// Returns an error if the value is not valid UTF-8.
+    pub fn value_string(&self) -> std::result::Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.value)
+    }
+}
+
+// =============================================================================
+// KeyValueEntries Trait
+// =============================================================================
+
+/// An iterator over key-value entries.
+///
+/// Yields entries in lexicographic key order.
+#[async_trait]
+pub trait KeyValueEntries: Send {
+    /// Get the next entry, or `None` if there are no more entries.
+    async fn next(&mut self) -> Result<Option<KeyValueEntry>>;
+}
+
+// =============================================================================
 // KeyValueDb Trait
 // =============================================================================
 
@@ -63,6 +110,11 @@ pub trait KeyValueDb: Send + Sync {
 
     /// Get the value for a key, returning `None` if not found.
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// List all entries with keys starting with the given prefix.
+    ///
+    /// Returns an iterator that yields entries in lexicographic key order.
+    async fn list_entries(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueEntries + Send>>;
 
     /// Start a transaction for atomic read-modify-write operations.
     ///

@@ -125,7 +125,7 @@ KeyValueDbWrites {
 }
 
 KeyValueEntries {
-  async get() -> KeyValueEntry
+  async get() -> Option<KeyValueEntry>
 }
 
 KeyValueEntry {

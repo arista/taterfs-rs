@@ -25,6 +25,7 @@ const DEFAULT_CACHE_PENDING_WRITES_FLUSH_PERIOD_MS: u64 = 500;
 const DEFAULT_CACHE_PENDING_WRITES_MAX_COUNT: usize = 10_000;
 const DEFAULT_CACHE_PENDING_WRITES_MAX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const DEFAULT_CACHE_MAX_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+const DEFAULT_CACHE_MAX_OBJECT_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_MEMORY_MAX: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_NETWORK_MAX_CONCURRENT_REQUESTS: u32 = 40;
 const DEFAULT_NETWORK_MAX_REQUESTS_PER_SECOND: u32 = 100;
@@ -281,6 +282,7 @@ fn default_config() -> Config {
             pending_writes_max_count: DEFAULT_CACHE_PENDING_WRITES_MAX_COUNT,
             pending_writes_max_size: ByteSize(DEFAULT_CACHE_PENDING_WRITES_MAX_SIZE),
             max_memory_size: ByteSize(DEFAULT_CACHE_MAX_MEMORY_SIZE),
+            max_object_memory_size: ByteSize(DEFAULT_CACHE_MAX_OBJECT_MEMORY_SIZE),
         },
         memory: MemoryConfig {
             max: Limit::Value(ByteSize(DEFAULT_MEMORY_MAX)),
@@ -378,6 +380,9 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
     }
     if let Some(val) = ini.get("cache", "max_memory_size") {
         config.cache.max_memory_size = ByteSize::parse(&val)?;
+    }
+    if let Some(val) = ini.get("cache", "max_object_memory_size") {
+        config.cache.max_object_memory_size = ByteSize::parse(&val)?;
     }
 
     // [memory] section
@@ -555,6 +560,10 @@ fn apply_cache_override(config: &mut Config, param: &str, value: &str) -> Result
         }
         "max_memory_size" => {
             config.cache.max_memory_size = ByteSize::parse(value)?;
+            Ok(())
+        }
+        "max_object_memory_size" => {
+            config.cache.max_object_memory_size = ByteSize::parse(value)?;
             Ok(())
         }
         _ => Err(ConfigError::InvalidOverrideKey {

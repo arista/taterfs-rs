@@ -1,4 +1,4 @@
-//! Cache database built on top of KeyValueDb.
+//! Cache database built on top of KeyValueDb and ObjectCacheDb.
 //!
 //! Provides higher-level cache operations for repositories and file stores.
 
@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use crate::repository::RepoObject;
 
 use super::key_value_db::{KeyValueDb, KeyValueDbError, Result};
+use super::object_cache_db::ObjectCacheDb;
 
 // =============================================================================
 // FingerprintedFileInfo
@@ -38,7 +39,6 @@ const KEY_NEXT_ID: &[u8] = b"next-id";
 const KEY_REPO_ID_PREFIX: &[u8] = b"repository-id-by-uuid/";
 const KEY_EXISTS_PREFIX: &[u8] = b"ex/";
 const KEY_FULLY_STORED_PREFIX: &[u8] = b"fs/";
-const KEY_REPO_OBJECT_PREFIX: &[u8] = b"ro/";
 const KEY_FILESTORE_ID_PREFIX: &[u8] = b"filestore-id-by-url/";
 const KEY_NAME_ID_PREFIX: &[u8] = b"na/";
 const KEY_PATH_ENTRY_PREFIX: &[u8] = b"pa/";
@@ -50,13 +50,14 @@ const KEY_FILE_INFO_PREFIX: &[u8] = b"fi/";
 
 /// A cache database providing repository and file store caching.
 ///
-/// Built on top of a KeyValueDb, provides:
+/// Built on top of a KeyValueDb and ObjectCacheDb, provides:
 /// - Repository existence and fully-stored tracking
-/// - Repository object caching
+/// - Repository object caching (via ObjectCacheDb)
 /// - File store fingerprint caching
 /// - ID allocation with block caching
 pub struct CacheDb {
     db: Arc<dyn KeyValueDb>,
+    object_cache: Arc<dyn ObjectCacheDb>,
     id_allocator: Mutex<IdAllocator>,
 }
 
@@ -69,9 +70,10 @@ struct IdAllocator {
 
 impl CacheDb {
     /// Create a new cache database.
-    pub fn new(db: Arc<dyn KeyValueDb>) -> Self {
+    pub fn new(db: Arc<dyn KeyValueDb>, object_cache: Arc<dyn ObjectCacheDb>) -> Self {
         Self {
             db,
+            object_cache,
             id_allocator: Mutex::new(IdAllocator {
                 next: 0,
                 block_end: 0,
@@ -203,27 +205,18 @@ impl CacheDb {
 
     /// Get a cached repository object.
     pub async fn get_object(&self, object_id: &str) -> Result<Option<RepoObject>> {
-        let key = repo_object_key(object_id);
-        match self.db.get(&key).await? {
-            Some(bytes) => {
-                let json = String::from_utf8(bytes)
-                    .map_err(|e| KeyValueDbError::Encoding(e.to_string()))?;
-                let obj: RepoObject = serde_json::from_str(&json)
-                    .map_err(|e| KeyValueDbError::Encoding(e.to_string()))?;
-                Ok(Some(obj))
-            }
-            None => Ok(None),
-        }
+        self.object_cache
+            .get_object(object_id)
+            .await
+            .map_err(|e| KeyValueDbError::Encoding(e.to_string()))
     }
 
     /// Cache a repository object.
     pub async fn set_object(&self, object_id: &str, obj: &RepoObject) -> Result<()> {
-        let key = repo_object_key(object_id);
-        let json = serde_json::to_string(obj)
-            .map_err(|e| KeyValueDbError::Encoding(e.to_string()))?;
-        let mut writes = self.db.write().await?;
-        writes.set(key, json.into_bytes()).await;
-        writes.flush().await
+        self.object_cache
+            .set_object(object_id, obj)
+            .await
+            .map_err(|e| KeyValueDbError::Encoding(e.to_string()))
     }
 
     // =========================================================================
@@ -468,12 +461,6 @@ fn fully_stored_key(repo_id: DbId, object_id: &str) -> Vec<u8> {
     key
 }
 
-fn repo_object_key(object_id: &str) -> Vec<u8> {
-    let mut key = KEY_REPO_OBJECT_PREFIX.to_vec();
-    key.extend(object_id.as_bytes());
-    key
-}
-
 fn filestore_id_key(url: &str) -> Vec<u8> {
     let mut key = KEY_FILESTORE_ID_PREFIX.to_vec();
     key.extend(encode_uri_component(url).as_bytes());
@@ -522,13 +509,15 @@ fn parse_u64(bytes: &[u8]) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::super::lmdb_key_value_db::LmdbKeyValueDb;
+    use super::super::object_cache_db::NoopObjectCacheDb;
     use super::*;
     use tempfile::TempDir;
 
     fn create_test_db() -> (TempDir, CacheDb) {
         let temp_dir = TempDir::new().unwrap();
         let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
-        let cache_db = CacheDb::new(lmdb);
+        let object_cache = Arc::new(NoopObjectCacheDb);
+        let cache_db = CacheDb::new(lmdb, object_cache);
         (temp_dir, cache_db)
     }
 

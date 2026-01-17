@@ -99,6 +99,8 @@ As will be described later, these calls map to a key/value database in a straigh
 
 The path functions are all intended to allow paths to be used in keys (for get_fingerprinted_file_info, for example) while cutting down on key size.  Each component of a path is mapped to a name id, and the path hierarchy is represented by "path entry" mappings from a [parent path, name] combo to a new path id.  The get_path_id() function is a convenience function that goes through that logic.
 
+The get_object() and set_object() calls do not use the Key/Value database.  Those are instead mapped to an ObjectCacheDb (described later)
+
 ### KeyValueDb
 
 This is an even more fundamental interface to an underlying key/value database that will be used to implement CacheDb.
@@ -214,3 +216,34 @@ The pending writes are stored in the memory cache, so that reads of pending writ
 * At shutdown (best effort)
 
 The cache should also limit the use of its non-pending entries to "max_memory_size" (from [cache] config section), evicting entries in using an LRU algorithm.
+
+### ObjectCacheDb
+
+This is the interface used to cache repo objects locally.  It is kept separate from the KeyValueDb because it will likely grow to a much larger scale and may have to be managed differently.  Its interface looks like this:
+
+```
+ObjectCacheDb {
+  // Maintains a cache of objects
+  async get_object(object_id: ObjectId) -> RepoObject | null
+  async set_object(object_id: ObjectId, obj: RepoObject)
+}
+```
+
+It has a file system implementation, FsObjectCacheDb, which is instantiated with a local directory.  It stores objects serialized as canonical JSON, with each object stored in a separate file under the form:
+
+```
+{cache directory}/cache_objects/{object_id[0..2]}/{object_id[2..4]}/{object_id[4..6]}/{object_id}.json
+```
+
+When writing, each object is first written to a temporary file, then moved to the appropriate location.  There is no batching of writes - set_object() will immediately write to the filesystem.  The temporary location is:
+
+```
+{cache directory}/.cache_objects_tmp
+```
+
+The FsObjectCacheDb will be located in the same directory as the LmdbKeyValueDb.
+
+TODO: think about encrypting object contents at rest
+
+There is also an in-memory caching implementation, CachingObjectCacheDb, which maintains an in-memory LRU cache.  This is the implementation that is used by the rest of the application (CacheDb).  The maximum size of the cache is set in [configuration](./configuration.md) under [cache].max_object_memory_size.  Memory size is computed by the serialized length of the value, plus the length of the object id.
+

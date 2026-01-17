@@ -68,8 +68,10 @@ pub struct CacheConfig {
     pub pending_writes_max_count: usize,
     /// Maximum total size of pending writes before forcing a flush.
     pub pending_writes_max_size: ByteSize,
-    /// Maximum memory for the read cache.
+    /// Maximum memory for the key-value read cache.
     pub max_memory_size: ByteSize,
+    /// Maximum memory for the repository object cache.
+    pub max_object_memory_size: ByteSize,
 }
 
 /// [memory] section - memory usage limits.

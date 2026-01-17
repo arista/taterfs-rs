@@ -279,6 +279,7 @@ mod tests {
                 pending_writes_max_count: 10_000,
                 pending_writes_max_size: ByteSize(10 * 1024 * 1024),
                 max_memory_size: ByteSize(100 * 1024 * 1024),
+                max_object_memory_size: ByteSize(100 * 1024 * 1024),
             },
             memory: MemoryConfig {
                 max: Limit::Value(ByteSize(100 * 1024 * 1024)),

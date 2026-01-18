@@ -62,3 +62,7 @@ async upload_directory_from_scan_events(store: FileStore, repo: Repo, path: Path
                 * Call upload_file
                 * add a FileEntry with the corresponding File and complete
                 * Call set_fingerprinted_file_info on the FileStore's cache
+
+### Directory Download
+
+A repo Directory is downloaded recursively from a [repository](./repository_interface.md) to a location in a [file store](./file_stores.md), such that the resulting file store location has the same contents as the repo directory.  There may already be files and directories in that file store, so as the download proceeds, files and directories may need to be removed or replaced.

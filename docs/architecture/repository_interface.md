@@ -42,6 +42,7 @@ async read_file(id: ObjectId) -> File
 
 async list_directory_entries(directory_id: ObjectId) -> DirectoryEntryList
 async list_file_chunks(file_id: ObjectId) -> FileChunkList
+async scan_directory(directory_id: ObjectId) -> DirectoryScanEvent stream
 ```
 
 ```
@@ -52,13 +53,23 @@ DirectoryEntrylist {
 FileChunklist {
   async next() -> Option<ChunkFilePart>
 }
+
+RepoScanEvents {
+  async next() -> Option<RepoScanEvent>
+}
+
+enum RepoScanEvent {
+  EnterDirectory(DirEntry)
+  ExitDirectory
+  File(FileEntry)
+}
 ```
 
 The expected_size passed to read is used when interacting with the throughput limiters.  If no expected_size is passed, then once the object is read and the expected_size is known, the throughput limiters are called at that point.  For the write calls, the size is known up front, so the size can be passed to the capacity managers.
 
 The read_{object type} functions are convenience functions that effectively call read_object and "cast" to the appropriate object, erroring if the actual object doesn't match the requested type.
 
-The list_directory_entry and list_file_chunks functions are convenience functions that walk through the entries of a Directory or File, recursively handling PartialDirectory and FileFilePart entries.
+The list_directory_entry and list_file_chunks functions are convenience functions that walk through the entries of a Directory or File, recursively handling PartialDirectory and FileFilePart entries.  The scan_directory() function is another convenience function that will recursively traverse an entire directory structure.
 
 The write functions return WithComplete structures very quickly, but are not actually finished until their WithComplete.complete is complete.
 

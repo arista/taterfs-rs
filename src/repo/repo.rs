@@ -262,6 +262,131 @@ impl FileChunkList {
 }
 
 // =============================================================================
+// Directory Scan
+// =============================================================================
+
+/// An event emitted during a directory scan.
+///
+/// These events form a recursive traversal of a directory tree:
+/// - `EnterDirectory` is emitted when entering a directory
+/// - `File` is emitted for each file encountered
+/// - `ExitDirectory` is emitted when leaving a directory
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoScanEvent {
+    /// Entering a directory. The root directory will have an empty name.
+    EnterDirectory(DirEntry),
+    /// Exiting the current directory.
+    ExitDirectory,
+    /// A file in the current directory.
+    File(FileEntry),
+}
+
+/// Internal state for directory scanning.
+enum ScanState {
+    /// Haven't started yet - need to emit EnterDirectory for root.
+    NotStarted,
+    /// Processing entries.
+    Processing,
+    /// Done - no more events.
+    Done,
+}
+
+/// An iterator that recursively scans a directory tree.
+///
+/// This struct provides an async iterator interface that performs a depth-first
+/// traversal of a directory tree, emitting [`RepoScanEvent`] events for each
+/// entry encountered.
+///
+/// Events are emitted in the following order:
+/// 1. `EnterDirectory` when starting to process a directory
+/// 2. `File` for each file in the directory
+/// 3. Recursive events for each subdirectory
+/// 4. `ExitDirectory` when done with the directory
+pub struct DirectoryScan {
+    repo: Arc<Repo>,
+    /// Stack of (Directory, entry_index) for depth-first traversal.
+    stack: Vec<(Directory, usize)>,
+    /// Current scan state.
+    state: ScanState,
+    /// The root directory ID.
+    root_id: ObjectId,
+}
+
+impl DirectoryScan {
+    /// Create a new directory scan starting from the given directory.
+    fn new(repo: Arc<Repo>, root_id: ObjectId) -> Self {
+        Self {
+            repo,
+            stack: Vec::new(),
+            state: ScanState::NotStarted,
+            root_id,
+        }
+    }
+
+    /// Get the next scan event.
+    ///
+    /// Returns `None` when the entire directory tree has been scanned.
+    /// Events are emitted depth-first: when a subdirectory is encountered,
+    /// its contents are fully scanned before continuing with the parent.
+    pub async fn next(&mut self) -> Result<Option<RepoScanEvent>> {
+        match self.state {
+            ScanState::NotStarted => {
+                // Load root directory and emit EnterDirectory
+                let root_dir = self.repo.read_directory(&self.root_id).await?;
+                self.stack.push((root_dir, 0));
+                self.state = ScanState::Processing;
+                Ok(Some(RepoScanEvent::EnterDirectory(DirEntry {
+                    name: String::new(),
+                    directory: self.root_id.clone(),
+                })))
+            }
+            ScanState::Processing => self.process_next().await,
+            ScanState::Done => Ok(None),
+        }
+    }
+
+    /// Process the next entry from the stack.
+    async fn process_next(&mut self) -> Result<Option<RepoScanEvent>> {
+        loop {
+            // Get top of stack
+            let Some((dir, idx)) = self.stack.last_mut() else {
+                self.state = ScanState::Done;
+                return Ok(None);
+            };
+
+            // Check if we've exhausted this directory
+            if *idx >= dir.entries.len() {
+                self.stack.pop();
+                return Ok(Some(RepoScanEvent::ExitDirectory));
+            }
+
+            // Get current entry and advance index
+            let entry = dir.entries[*idx].clone();
+            *idx += 1;
+
+            match entry {
+                DirectoryPart::File(f) => {
+                    return Ok(Some(RepoScanEvent::File(f)));
+                }
+                DirectoryPart::Directory(d) => {
+                    // Load the subdirectory and push onto stack
+                    let subdir = self.repo.read_directory(&d.directory).await?;
+                    self.stack.push((subdir, 0));
+                    // Return EnterDirectory event
+                    return Ok(Some(RepoScanEvent::EnterDirectory(d)));
+                }
+                DirectoryPart::Partial(p) => {
+                    // Load partial and push onto stack (transparent to caller)
+                    let partial_dir = self.repo.read_directory(&p.directory).await?;
+                    self.stack.push((partial_dir, 0));
+                    // Loop to continue processing from the partial
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Repo
 // =============================================================================
 
@@ -837,6 +962,20 @@ impl Repo {
     pub async fn list_file_chunks(self: &Arc<Self>, file_id: &ObjectId) -> Result<FileChunkList> {
         let file = self.read_file(file_id).await?;
         Ok(FileChunkList::new(Arc::clone(self), file))
+    }
+
+    /// Recursively scan a directory tree, emitting events for each entry.
+    ///
+    /// This is a convenience function that performs a depth-first traversal
+    /// of the directory tree, automatically fetching and expanding any
+    /// `PartialDirectory` references transparently.
+    ///
+    /// Returns a [`DirectoryScan`] that yields [`RepoScanEvent`] events:
+    /// - `EnterDirectory` when entering a directory (root has empty name)
+    /// - `File` for each file encountered
+    /// - `ExitDirectory` when leaving a directory
+    pub fn scan_directory(self: &Arc<Self>, directory_id: &ObjectId) -> DirectoryScan {
+        DirectoryScan::new(Arc::clone(self), directory_id.clone())
     }
 }
 

@@ -4,12 +4,12 @@
 //! of [`DownloadAction`]s needed to make a file store location match a repository
 //! directory's contents.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::StreamExt;
 
-use crate::file_store::{FileSource, ScanEvent, ScanEvents};
+use crate::file_store::{FileStore, ScanEvent, ScanEvents};
 use crate::repo::{DirectoryScan, Repo, RepoScanEvent};
 use crate::repository::ObjectId;
 
@@ -126,33 +126,25 @@ struct StackFrame {
 pub struct DownloadActions {
     /// Reference to the repository.
     repo: Arc<Repo>,
-    /// Reference to the file source (for scanning).
-    source: Arc<dyn FileSource>,
-    /// Base path in the file store.
-    base_path: PathBuf,
     /// Stack of directory frames for nested traversal.
     stack: Vec<StackFrame>,
     /// Whether we've started processing (emitted initial EnterDirectory for root).
     started: bool,
     /// Root directory ID in the repository.
     root_dir_id: ObjectId,
+    /// Initial file store scan (consumed during initialization).
+    initial_fs_scan: Option<ScanEvents>,
 }
 
 impl DownloadActions {
     /// Create a new download actions iterator.
-    fn new(
-        repo: Arc<Repo>,
-        source: Arc<dyn FileSource>,
-        root_dir_id: ObjectId,
-        base_path: PathBuf,
-    ) -> Self {
+    fn new(repo: Arc<Repo>, root_dir_id: ObjectId, fs_scan: ScanEvents) -> Self {
         Self {
             repo,
-            source,
-            base_path,
             stack: Vec::new(),
             started: false,
             root_dir_id,
+            initial_fs_scan: Some(fs_scan),
         }
     }
 
@@ -223,18 +215,11 @@ impl DownloadActions {
         // Start repo scan
         let repo_scan = self.repo.scan_directory(&self.root_dir_id);
 
-        // Start file store scan
-        let fs_scan = self.source.scan(Some(&self.base_path)).await;
-
-        // Handle case where file store path doesn't exist
-        let fs_scan = match fs_scan {
-            Ok(scan) => scan,
-            Err(crate::file_store::Error::NotFound(_)) => {
-                // Path doesn't exist - create empty scan
-                Box::pin(futures::stream::empty())
-            }
-            Err(e) => return Err(e.into()),
-        };
+        // Take the initial file store scan (passed in during construction)
+        let fs_scan = self
+            .initial_fs_scan
+            .take()
+            .unwrap_or_else(|| Box::pin(futures::stream::empty()));
 
         self.stack.push(StackFrame {
             repo_scan,
@@ -629,15 +614,30 @@ impl DownloadActions {
 ///
 /// * `repo` - The repository to download from
 /// * `directory_id` - The root directory ID in the repository
-/// * `source` - The file source to compare against
+/// * `store` - The file store to compare against
 /// * `path` - The base path in the file store
-pub fn download_actions(
+///
+/// # Errors
+///
+/// Returns an error if the file store does not support reading (no FileSource).
+pub async fn download_actions(
     repo: Arc<Repo>,
     directory_id: ObjectId,
-    source: Arc<dyn FileSource>,
+    store: &dyn FileStore,
     path: &Path,
-) -> DownloadActions {
-    DownloadActions::new(repo, source, directory_id, path.to_path_buf())
+) -> Result<DownloadActions> {
+    let source = store
+        .get_source()
+        .ok_or_else(|| DownloadError::FileStore("file store does not support reading".to_string()))?;
+
+    // Start the file store scan. If the path doesn't exist, use an empty scan.
+    let fs_scan = match source.scan(Some(path)).await {
+        Ok(scan) => scan,
+        Err(crate::file_store::Error::NotFound(_)) => Box::pin(futures::stream::empty()),
+        Err(e) => return Err(e.into()),
+    };
+
+    Ok(DownloadActions::new(repo, directory_id, fs_scan))
 }
 
 #[cfg(test)]

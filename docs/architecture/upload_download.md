@@ -89,3 +89,87 @@ interface DownloadActions {
   async next() -> Option<DownloadAction>
 }
 ```
+
+The algorithm for download_actions is as follows:
+
+Maintain a stack of DownloaddActionsDir objects:
+
+```
+// These should be in repo.rs
+enum RepoNamedScanEvent {
+  EnterDirectory
+  FileEntry
+}
+
+impl RepoNamedScanEvent {
+  name() -> string
+}
+
+
+// These should be in file_store/mod.rs
+enum NamedScanEvent {
+  EnterDirectory
+  FileEntry
+}
+
+impl NamedScanEvent {
+  name() -> string
+}
+
+
+DownloadActionDir {
+  repo_scan: Option<Repo DirectoryScan>
+  repo_scan_event: Option<RepoNamedScanEvent>
+  store_scan: Option<FileSource ScanEvents>
+  store_scan_event: Option<NamedScanEvent>
+}
+```
+
+* if repo_scan_event != null
+    * if store_scan_event != null
+        * compare the names of repo_scan_event and store_scan_event
+        * if repo_scan_event.name < store_scan_event.name
+            * add_from_repo_scan_event(repo_scan_event)
+        * else if repo_scan_event.name > store_scan_event.name
+            * remove_from_store_scan_event(store_scan_event)
+        * else
+            * resolve_from_repo_and_store_scan_events(repo_scan_event, store_scan_event)
+    * else
+        * add_from_repo_scan_event(repo_scan_event)
+* else
+    * if store_scan_event != null
+        * do nothing
+    * else
+        * exit_directory()
+
+
+* add_from_repo_scan_event(repo_scan_event)
+    * if EnterDirectory
+    * if FileEntry
+
+* remove_from_store_scan_event(store_scan_event)
+    * if EnterDirectory
+    * if FileEntry
+
+* resolve_from_repo_and_store_scan_events(repo_scan_event, store_scan_event)
+
+* exit_directory()
+
+
+RepoScanEvent
+
+    /// Entering a directory. The root directory will have an empty name.
+    EnterDirectory(DirEntry),
+    /// Exiting the current directory.
+    ExitDirectory,
+    /// A file in the current directory.
+    File(FileEntry),
+
+pub enum ScanEvent {
+    /// Entering a directory.
+    EnterDirectory(DirEntry),
+    /// Exiting a directory (returning to parent).
+    ExitDirectory,
+    /// A file was encountered.
+    File(FileEntry),
+}

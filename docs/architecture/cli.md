@@ -91,6 +91,21 @@ tfs repo upload-directory {repo spec} {filestore spec} [{path}]
 ```
 Calls upload_directory() from the filestore to the repo and prints the resulting directory hash id to STDOUT, or the given output file
 
+```
+tfs repo download-actions {repo spec} {directory object_id} {filestore spec} [{path}]
+  [--output-file / -o {output file}]
+```
+Calls download_actions() and prints out the results (or writes them to --output-file).  The printout looks like this:
+
+```
+mkdir(name)
+rmdir(name)
+rm(name)
+enter(name) - and indent 4 spaces
+exit - undo indent
+download(name, object_id)
+```
+
 ### tfs file-store
 
 ```

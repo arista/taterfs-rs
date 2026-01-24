@@ -99,6 +99,10 @@ type DirectoryPart = DirectoryEntry | PartialDirectory
 
 type DirectoryEntry = FileEntry | DirEntry
 
+impl DirectoryEntry {
+  name() -> string
+}
+
 interface FileEntry {
   type: "File"
   name: string

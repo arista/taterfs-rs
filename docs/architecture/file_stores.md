@@ -90,6 +90,12 @@ enum DirectoryEntry {
   Dir(DirEntry)
   File(FileEntry)
 }
+
+impl DirectoryEntry {
+  name() -> string
+  path() -> string
+}
+
 ```
 
 The fingerprint is used to quickly determine if a file has changed without reading the entire file's contents.  Each FileStore will implement this differently - the FSFileStore might include the last modified time, the S3FileStore might use the ETag, etc.  The fingerprint must be less than 128 characters, and must change when a file's content, **or executable bit**, *may* have changed.  If a FileStore cannot meet these requirements, then it should just leave this null.
@@ -104,10 +110,10 @@ A FileDest allows files and directories to be written to a FileStore, ultimately
 
 ```
 interface FileDest {
-// Return information about one file or directory
+  // Return information about one file or directory
   get_entry(path: Path) -> Option<DirectoryEntry>
   // List the contents of a directory, error if the path does not point to a directory
-  async list_directory(path: Path) -> Option<DirectoryList>
+  async list_directory(path: Path) -> Option<DirectoryEntryList>
   // Write a file whose contents are supplied asynchronously by the given FileChunks
   async write_file_from_chunks(path: Path, chunks: SourceChunks)
   // Remove the file or directory at the given Path, if it exists
@@ -118,10 +124,12 @@ interface FileDest {
   async set_executable(path: Path, executable: bool)
 }
 
-interface DirectoryList {
+interface DirectoryEntryList {
   async next() -> Option<DirectoryEntry>
 }
 ```
+
+Unlike the FileSource.scan function, the list_directury function will **not** respect directives in ".gitignore" and ".tfsignore" files.  However, it will still ignore ".git/" and ".tfs/" directories.
 
 A FileDest implementation should do its best to avoid leaving a partially-written file, even if it's interrupted during a write_file_from_chunks operation.  Some implementations will, for example, build the file in a temporary location, then move the file to its final location atomically.
 

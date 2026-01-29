@@ -155,8 +155,113 @@ pub type SourceChunkContents =
 // Directory Listing
 // =============================================================================
 
-/// Async iterator over directory entries.
-pub type DirectoryList = Pin<Box<dyn futures::Stream<Item = Result<DirectoryEntry>> + Send>>;
+/// Trait for providing raw directory listings and file access to DirectoryList.
+///
+/// This combines the ability to list directory contents with the ability to
+/// read files (needed by ScanIgnoreHelper to load ignore files).
+/// Extends ScanFileSource so the helper can load ignore files from child directories.
+#[async_trait]
+pub trait DirectoryListSource: ScanFileSource + Send + Sync {
+    /// List the raw (unfiltered) entries in a directory.
+    ///
+    /// Returns None if the path does not exist.
+    /// Returns an error if the path exists but is not a directory.
+    async fn list_raw_directory(&self, path: &str) -> Result<Option<Vec<DirectoryEntry>>>;
+}
+
+/// An ignore-aware directory listing.
+///
+/// DirectoryList holds pre-loaded, filtered directory entries and a
+/// ScanIgnoreHelper for drilling into child directories via `list_directory`.
+pub struct DirectoryList {
+    /// Pre-loaded, already filtered entries.
+    entries: Vec<DirectoryEntry>,
+    /// Current position in entries.
+    index: usize,
+    /// Ignore helper with state for the current directory.
+    helper: ScanIgnoreHelper,
+    /// Source for listing child directories and loading ignore files.
+    lister: Arc<dyn DirectoryListSource>,
+    /// Path of the directory this listing represents (relative to store root).
+    path: String,
+}
+
+impl DirectoryList {
+    /// Create a new DirectoryList by filtering raw entries through the ignore helper.
+    pub fn new(
+        raw_entries: Vec<DirectoryEntry>,
+        helper: ScanIgnoreHelper,
+        lister: Arc<dyn DirectoryListSource>,
+        path: String,
+    ) -> Self {
+        let entries: Vec<DirectoryEntry> = raw_entries
+            .into_iter()
+            .filter(|entry| {
+                let (name, is_dir) = match entry {
+                    DirectoryEntry::Dir(d) => (&d.name, true),
+                    DirectoryEntry::File(f) => (&f.name, false),
+                };
+                !helper.should_ignore(name, is_dir)
+            })
+            .collect();
+        Self {
+            entries,
+            index: 0,
+            helper,
+            lister,
+            path,
+        }
+    }
+
+    /// Yield the next non-ignored entry.
+    pub async fn next(&mut self) -> Option<Result<DirectoryEntry>> {
+        if self.index < self.entries.len() {
+            let entry = self.entries[self.index].clone();
+            self.index += 1;
+            Some(Ok(entry))
+        } else {
+            None
+        }
+    }
+
+    /// Create a child DirectoryList for a subdirectory by name.
+    ///
+    /// The child inherits the parent's ignore state and loads any additional
+    /// ignore files from the child directory.
+    pub async fn list_directory(&self, name: &str) -> Result<Option<DirectoryList>> {
+        let child_path = if self.path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", self.path, name)
+        };
+
+        // List raw entries from the child directory
+        let raw_entries = match self.lister.list_raw_directory(&child_path).await? {
+            Some(entries) => entries,
+            None => return Ok(None),
+        };
+
+        // Clone the parent's helper and enter the child directory
+        let mut child_helper = self.helper.clone();
+        let dir_entry = ScanDirEntry {
+            name: name.to_string(),
+            path: child_path.clone(),
+        };
+        child_helper
+            .on_scan_event(
+                &ScanDirectoryEvent::EnterDirectory(dir_entry),
+                self.lister.as_ref(),
+            )
+            .await;
+
+        Ok(Some(DirectoryList::new(
+            raw_entries,
+            child_helper,
+            Arc::clone(&self.lister),
+            child_path,
+        )))
+    }
+}
 
 // =============================================================================
 // FileSource Trait
@@ -269,7 +374,12 @@ pub trait FileDest: Send + Sync {
     ///
     /// The implementation should avoid leaving a partially-written file
     /// even if interrupted (e.g., write to temp location then move atomically).
-    async fn write_file_from_chunks(&self, path: &Path, chunks: SourceChunks) -> Result<()>;
+    async fn write_file_from_chunks(
+        &self,
+        path: &Path,
+        chunks: SourceChunks,
+        executable: bool,
+    ) -> Result<()>;
 
     /// Remove the file or directory at the given path, if it exists.
     ///

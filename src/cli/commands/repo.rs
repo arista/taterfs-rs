@@ -10,7 +10,6 @@ use std::path::Path;
 
 use crate::app::{upload_directory, upload_file, App};
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
-use crate::download::{download_actions, DownloadAction};
 use crate::repo::RepoInitialize;
 use crate::util::ManagedBuffers;
 
@@ -53,9 +52,6 @@ pub enum RepoCommand {
     #[command(name = "upload-directory")]
     UploadDirectory(UploadDirectoryArgs),
 
-    /// Generate download actions for synchronizing a file store with a repository directory.
-    #[command(name = "download-actions")]
-    DownloadActions(DownloadActionsArgs),
 }
 
 impl RepoCommand {
@@ -71,7 +67,6 @@ impl RepoCommand {
             RepoCommand::Write(args) => args.run(app, global).await,
             RepoCommand::UploadFile(args) => args.run(app, global).await,
             RepoCommand::UploadDirectory(args) => args.run(app, global).await,
-            RepoCommand::DownloadActions(args) => args.run(app, global).await,
         }
     }
 }
@@ -514,149 +509,3 @@ impl UploadDirectoryArgs {
     }
 }
 
-// =============================================================================
-// Download Actions
-// =============================================================================
-
-/// Arguments for the download-actions command.
-#[derive(Args, Debug)]
-pub struct DownloadActionsArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
-    /// The directory object ID in the repository.
-    pub directory_id: String,
-
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
-
-    /// Path in the file store to compare against. If not specified, compares against the entire file store.
-    pub path: Option<String>,
-
-    #[command(flatten)]
-    pub output: OutputSink,
-}
-
-#[derive(Serialize)]
-struct DownloadActionsOutput {
-    actions: Vec<DownloadActionOutput>,
-}
-
-#[derive(Serialize)]
-struct DownloadActionOutput {
-    action: String,
-    name: Option<String>,
-    object_id: Option<String>,
-}
-
-impl From<&DownloadAction> for DownloadActionOutput {
-    fn from(action: &DownloadAction) -> Self {
-        match action {
-            DownloadAction::CreateDirectory(name) => DownloadActionOutput {
-                action: "mkdir".to_string(),
-                name: Some(name.clone()),
-                object_id: None,
-            },
-            DownloadAction::RemoveDirectory(name) => DownloadActionOutput {
-                action: "rmdir".to_string(),
-                name: Some(name.clone()),
-                object_id: None,
-            },
-            DownloadAction::RemoveFile(name) => DownloadActionOutput {
-                action: "rm".to_string(),
-                name: Some(name.clone()),
-                object_id: None,
-            },
-            DownloadAction::EnterDirectory(name) => DownloadActionOutput {
-                action: "enter".to_string(),
-                name: Some(name.clone()),
-                object_id: None,
-            },
-            DownloadAction::ExitDirectory => DownloadActionOutput {
-                action: "exit".to_string(),
-                name: None,
-                object_id: None,
-            },
-            DownloadAction::DownloadFile(name, object_id) => DownloadActionOutput {
-                action: "download".to_string(),
-                name: Some(name.clone()),
-                object_id: Some(object_id.clone()),
-            },
-        }
-    }
-}
-
-impl DownloadActionsArgs {
-    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
-        let repo = app.create_repo(repo_ctx).await?;
-
-        let fs_ctx = self.file_store.to_create_file_store_context();
-        let file_store = app.create_file_store(fs_ctx).await?;
-
-        let path = self.path.as_deref().map(Path::new).unwrap_or(Path::new(""));
-
-        let mut actions_iter = download_actions(repo, self.directory_id, file_store.as_ref(), path)
-            .await
-            .map_err(|e| CliError::Other(e.to_string()))?;
-
-        if global.json {
-            // Collect all actions for JSON output
-            let mut actions = Vec::new();
-            while let Some(action) = actions_iter
-                .next()
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?
-            {
-                actions.push(DownloadActionOutput::from(&action));
-            }
-            self.output
-                .write(&DownloadActionsOutput { actions }, true)
-                .await?;
-        } else {
-            // Output actions in plain text format with indentation
-            let mut indent = 0usize;
-            let mut output = String::new();
-
-            while let Some(action) = actions_iter
-                .next()
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?
-            {
-                let indent_str = " ".repeat(indent);
-                match &action {
-                    DownloadAction::CreateDirectory(name) => {
-                        output.push_str(&format!("{}mkdir({})\n", indent_str, name));
-                    }
-                    DownloadAction::RemoveDirectory(name) => {
-                        output.push_str(&format!("{}rmdir({})\n", indent_str, name));
-                    }
-                    DownloadAction::RemoveFile(name) => {
-                        output.push_str(&format!("{}rm({})\n", indent_str, name));
-                    }
-                    DownloadAction::EnterDirectory(name) => {
-                        output.push_str(&format!("{}enter({})\n", indent_str, name));
-                        indent += 4;
-                    }
-                    DownloadAction::ExitDirectory => {
-                        indent = indent.saturating_sub(4);
-                        let indent_str = " ".repeat(indent);
-                        output.push_str(&format!("{}exit\n", indent_str));
-                    }
-                    DownloadAction::DownloadFile(name, object_id) => {
-                        output.push_str(&format!("{}download({}, {})\n", indent_str, name, object_id));
-                    }
-                }
-            }
-
-            // Remove trailing newline if present
-            if output.ends_with('\n') {
-                output.pop();
-            }
-
-            self.output.write_str(&output).await?;
-        }
-
-        Ok(())
-    }
-}

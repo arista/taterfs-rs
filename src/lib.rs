@@ -13,7 +13,8 @@ pub mod util;
 pub use util::{CapacityManager, ReplenishmentRate, UsedCapacity};
 
 pub use file_store::{
-    DirEntry, DirectoryEntry, DirectoryList, Error, FileDest, FileEntry, FileSource, FileStore,
-    FsFileStore, MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry, Result, S3FileSource,
-    S3FileSourceConfig, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunks,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDest, FileEntry,
+    FileSource, FileStore, FsFileStore, MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry,
+    Result, S3FileSource, S3FileSourceConfig, ScanEvent, ScanEvents, SourceChunk,
+    SourceChunkContent, SourceChunks,
 };

@@ -53,6 +53,7 @@ const DEFAULT_GLOBAL_IGNORES: &[&str] = &[".git/", ".tfs/"];
 /// This helper maintains a stack of ignore matchers as directories are
 /// entered and exited. It loads .gitignore and .tfsignore files from
 /// each directory and applies their rules cumulatively.
+#[derive(Clone)]
 pub struct ScanIgnoreHelper {
     /// Matcher for global ignore patterns (from config).
     global_matcher: Option<Gitignore>,

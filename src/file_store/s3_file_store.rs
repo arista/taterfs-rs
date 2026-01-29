@@ -4,10 +4,10 @@
 //! treating object keys as paths with "/" as the directory separator.
 
 use super::chunk_sizes::next_chunk_size;
-use super::scan_ignore_helper::ScanIgnoreHelper;
+use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanFileSource, ScanIgnoreHelper};
 use crate::file_store::{
-    DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, Result, ScanEvent,
-    ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
+    DirEntry, DirectoryEntry, Error, FileEntry, FileSource, Result, ScanEvent, ScanEvents,
+    SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
 };
 use crate::repo::FlowControl;
 use crate::util::ManagedBuffers;
@@ -607,7 +607,7 @@ impl S3FileSource {
         prefix: &str,
         events: &mut Vec<ScanEvent>,
         helper: &mut ScanIgnoreHelper,
-        source: &dyn FileSource,
+        source: &dyn ScanFileSource,
     ) -> Result<()> {
         let s3_prefix = match &self.config.prefix {
             Some(p) if !prefix.is_empty() => format!("{}/{}/", p, prefix),
@@ -628,13 +628,16 @@ impl S3FileSource {
                     events.push(ScanEvent::EnterDirectory(dir.clone()));
 
                     helper
-                        .on_scan_event(&DirectoryScanEvent::EnterDirectory(dir.clone()), source)
+                        .on_scan_event(
+                            &ScanDirectoryEvent::EnterDirectory(ScanDirEntry::from(&dir)),
+                            source,
+                        )
                         .await;
 
                     Box::pin(self.scan_directory(&dir.path, events, helper, source)).await?;
 
                     helper
-                        .on_scan_event(&DirectoryScanEvent::ExitDirectory, source)
+                        .on_scan_event(&ScanDirectoryEvent::ExitDirectory, source)
                         .await;
 
                     events.push(ScanEvent::ExitDirectory);
@@ -658,80 +661,20 @@ impl S3FileSource {
 // =============================================================================
 
 /// Adapter to use S3FileSource with ScanIgnoreHelper.
+///
+/// Implements ScanFileSource directly, providing only the `get_file`
+/// method needed by the helper to load ignore files.
 struct ScanSourceAdapter {
     client: Client,
     config: S3FileSourceConfig,
 }
 
 #[async_trait]
-impl FileSource for ScanSourceAdapter {
-    async fn scan(&self, _path: Option<&Path>) -> Result<ScanEvents> {
-        // Not used by ScanIgnoreHelper
-        Ok(Box::pin(stream::empty()))
-    }
-
-    async fn get_source_chunks(&self, _path: &Path) -> Result<Option<SourceChunks>> {
-        // Not used by ScanIgnoreHelper
-        Ok(None)
-    }
-
-    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
-        // Not used by ScanIgnoreHelper - provide simple sequential implementation
-        let contents_stream = chunks.then(|chunk_result| async move {
-            let chunk = chunk_result?;
-            chunk.get().await
-        });
-        Ok(Box::pin(contents_stream))
-    }
-
-    async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
-        let key = {
-            let path_str = path.to_string_lossy();
-            match &self.config.prefix {
-                Some(prefix) if !path_str.is_empty() => format!("{}/{}", prefix, path_str),
-                Some(prefix) => prefix.clone(),
-                None => path_str.into_owned(),
-            }
-        };
-
-        // Try as file first
-        let head = self
-            .client
-            .head_object()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await;
-
-        if let Ok(metadata) = head {
-            let path_str = path.to_string_lossy().into_owned();
-            let name = path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let size = metadata.content_length().unwrap_or(0) as u64;
-            let fingerprint = metadata.e_tag().and_then(|etag| {
-                let etag = etag.trim_matches('"');
-                if etag.len() <= 128 {
-                    Some(etag.to_string())
-                } else {
-                    None
-                }
-            });
-
-            return Ok(Some(DirectoryEntry::File(FileEntry {
-                name,
-                path: path_str,
-                size,
-                executable: false,
-                fingerprint,
-            })));
-        }
-
-        Ok(None)
-    }
-
-    async fn get_file(&self, path: &Path) -> Result<Bytes> {
+impl ScanFileSource for ScanSourceAdapter {
+    async fn get_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
         let key = {
             let path_str = path.to_string_lossy();
             match &self.config.prefix {
@@ -748,10 +691,10 @@ impl FileSource for ScanSourceAdapter {
             .key(&key)
             .send()
             .await
-            .map_err(|e| Error::Other(e.to_string()))?;
+            .map_err(|e| Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
 
         let body = response.body.collect().await;
-        let aggregated = body.map_err(|e| Error::Other(e.to_string()))?;
+        let aggregated = body.map_err(|e| Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
         let bytes = aggregated.into_bytes();
 
         Ok(Bytes::from(bytes.to_vec()))

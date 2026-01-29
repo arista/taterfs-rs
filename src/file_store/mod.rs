@@ -19,7 +19,7 @@ pub use create_file_store::{
 pub use fs_file_store::FsFileStore;
 pub use memory_file_store::{MemoryFileStore, MemoryFileStoreBuilder, MemoryFsEntry};
 pub use s3_file_store::{S3FileSource, S3FileSourceConfig};
-pub use scan_ignore_helper::ScanIgnoreHelper;
+pub use scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanFileSource, ScanIgnoreHelper};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -107,15 +107,6 @@ pub enum ScanEvent {
     File(FileEntry),
 }
 
-/// Events for directory enter/exit only (used by ScanIgnoreHelper).
-#[derive(Debug, Clone)]
-pub enum DirectoryScanEvent {
-    /// Entering a directory.
-    EnterDirectory(DirEntry),
-    /// Exiting a directory.
-    ExitDirectory,
-}
-
 /// Async iterator over scan events.
 pub type ScanEvents = Pin<Box<dyn futures::Stream<Item = Result<ScanEvent>> + Send>>;
 
@@ -166,6 +157,47 @@ pub type SourceChunkContents =
 
 /// Async iterator over directory entries.
 pub type DirectoryList = Pin<Box<dyn futures::Stream<Item = Result<DirectoryEntry>> + Send>>;
+
+// =============================================================================
+// FileSource Trait
+// =============================================================================
+
+// =============================================================================
+// Bridge: FileSource -> ScanFileSource
+// =============================================================================
+
+/// Blanket implementation so any FileSource can be used as a ScanFileSource.
+#[async_trait]
+impl<T: FileSource + ?Sized> ScanFileSource for T {
+    async fn get_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
+        FileSource::get_file(self, path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
+/// Convert a file_store DirEntry into a ScanDirEntry.
+impl From<DirEntry> for ScanDirEntry {
+    fn from(entry: DirEntry) -> Self {
+        ScanDirEntry {
+            name: entry.name,
+            path: entry.path,
+        }
+    }
+}
+
+/// Convert a file_store DirEntry reference into a ScanDirEntry.
+impl From<&DirEntry> for ScanDirEntry {
+    fn from(entry: &DirEntry) -> Self {
+        ScanDirEntry {
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+        }
+    }
+}
 
 // =============================================================================
 // FileSource Trait

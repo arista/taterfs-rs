@@ -3,10 +3,47 @@
 //! The ScanIgnoreHelper follows along with a scan operation, loading
 //! .gitignore and .tfsignore files as directories are entered, and
 //! provides a method to check if entries should be ignored.
+//!
+//! This module defines its own [`ScanDirectoryEvent`] and [`ScanFileSource`]
+//! interfaces so that it can be used outside of the file_store module.
 
-use crate::file_store::{DirectoryScanEvent, FileSource};
+use async_trait::async_trait;
+use bytes::Bytes;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
+
+// =============================================================================
+// ScanIgnoreHelper's own interfaces
+// =============================================================================
+
+/// A directory entry used by ScanIgnoreHelper during scanning.
+#[derive(Debug, Clone)]
+pub struct ScanDirEntry {
+    /// Base name of the directory.
+    pub name: String,
+    /// Path relative to the root.
+    pub path: String,
+}
+
+/// Events for directory enter/exit used by ScanIgnoreHelper.
+#[derive(Debug, Clone)]
+pub enum ScanDirectoryEvent {
+    /// Entering a directory.
+    EnterDirectory(ScanDirEntry),
+    /// Exiting a directory.
+    ExitDirectory,
+}
+
+/// A minimal file source interface used by ScanIgnoreHelper.
+///
+/// Only requires the ability to read a file's contents, which is all
+/// the helper needs to load ignore files.
+#[async_trait]
+pub trait ScanFileSource: Send + Sync {
+    /// Retrieve an entire file's contents.
+    /// Returns an error if the file does not exist or cannot be read.
+    async fn get_file(&self, path: &Path) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+}
 
 /// Default global ignore patterns if none are configured.
 const DEFAULT_GLOBAL_IGNORES: &[&str] = &[".git/", ".tfs/"];
@@ -65,19 +102,17 @@ impl ScanIgnoreHelper {
     ///
     /// If `path` is `None` or empty, only the root directory's ignore files
     /// are loaded.
-    pub async fn initialize_to_path<S: FileSource + ?Sized>(
+    pub async fn initialize_to_path<S: ScanFileSource + ?Sized>(
         &mut self,
         path: Option<&Path>,
         source: &S,
     ) {
-        use crate::file_store::DirEntry;
-
         // Always enter root first
-        let root_entry = DirEntry {
+        let root_entry = ScanDirEntry {
             name: String::new(),
             path: String::new(),
         };
-        self.on_scan_event(&DirectoryScanEvent::EnterDirectory(root_entry), source)
+        self.on_scan_event(&ScanDirectoryEvent::EnterDirectory(root_entry), source)
             .await;
 
         // If there's a path, walk through each component
@@ -91,11 +126,11 @@ impl ScanIgnoreHelper {
                     } else {
                         accumulated = format!("{}/{}", accumulated, name_str);
                     }
-                    let dir_entry = DirEntry {
+                    let dir_entry = ScanDirEntry {
                         name: name_str,
                         path: accumulated.clone(),
                     };
-                    self.on_scan_event(&DirectoryScanEvent::EnterDirectory(dir_entry), source)
+                    self.on_scan_event(&ScanDirectoryEvent::EnterDirectory(dir_entry), source)
                         .await;
                 }
             }
@@ -106,17 +141,17 @@ impl ScanIgnoreHelper {
     ///
     /// Call this for each EnterDirectory and ExitDirectory event during scanning.
     /// When entering a directory, this loads any .gitignore or .tfsignore files.
-    pub async fn on_scan_event<S: FileSource + ?Sized>(
+    pub async fn on_scan_event<S: ScanFileSource + ?Sized>(
         &mut self,
-        event: &DirectoryScanEvent,
+        event: &ScanDirectoryEvent,
         source: &S,
     ) {
         match event {
-            DirectoryScanEvent::EnterDirectory(dir) => {
+            ScanDirectoryEvent::EnterDirectory(dir) => {
                 let matcher = self.load_ignore_files(source, &dir.path).await;
                 self.stack.push(matcher);
             }
-            DirectoryScanEvent::ExitDirectory => {
+            ScanDirectoryEvent::ExitDirectory => {
                 self.stack.pop();
             }
         }
@@ -153,7 +188,7 @@ impl ScanIgnoreHelper {
     }
 
     /// Load .gitignore and .tfsignore files from a directory.
-    async fn load_ignore_files<S: FileSource + ?Sized>(
+    async fn load_ignore_files<S: ScanFileSource + ?Sized>(
         &self,
         source: &S,
         dir_path: &str,
@@ -211,7 +246,7 @@ impl Default for ScanIgnoreHelper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_store::{DirEntry, MemoryFileStore, MemoryFsEntry};
+    use crate::file_store::{MemoryFileStore, MemoryFsEntry};
 
     #[tokio::test]
     async fn test_always_ignores_git_and_tfs() {
@@ -246,7 +281,7 @@ mod tests {
         // Enter root directory
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: String::new(),
                     path: String::new(),
                 }),
@@ -270,7 +305,7 @@ mod tests {
 
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: String::new(),
                     path: String::new(),
                 }),
@@ -292,7 +327,7 @@ mod tests {
 
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: String::new(),
                     path: String::new(),
                 }),
@@ -318,7 +353,7 @@ mod tests {
         // Enter root
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: String::new(),
                     path: String::new(),
                 }),
@@ -332,7 +367,7 @@ mod tests {
         // Enter src/
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: "src".to_string(),
                     path: "src".to_string(),
                 }),
@@ -346,7 +381,7 @@ mod tests {
 
         // Exit src/
         helper
-            .on_scan_event(&DirectoryScanEvent::ExitDirectory, &store)
+            .on_scan_event(&ScanDirectoryEvent::ExitDirectory, &store)
             .await;
 
         // Back to root - only root patterns
@@ -364,7 +399,7 @@ mod tests {
 
         helper
             .on_scan_event(
-                &DirectoryScanEvent::EnterDirectory(DirEntry {
+                &ScanDirectoryEvent::EnterDirectory(ScanDirEntry {
                     name: String::new(),
                     path: String::new(),
                 }),

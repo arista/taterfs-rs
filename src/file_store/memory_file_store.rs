@@ -1,11 +1,11 @@
 //! In-memory FileStore implementation for testing.
 
 use super::chunk_sizes::next_chunk_size;
-use super::scan_ignore_helper::ScanIgnoreHelper;
+use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::{FileStoreCache, NoopFileStoreCache};
 use crate::file_store::{
-    DirEntry, DirectoryEntry, DirectoryScanEvent, Error, FileEntry, FileSource, FileStore, Result,
-    ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
+    DirEntry, DirectoryEntry, Error, FileEntry, FileSource, FileStore, Result, ScanEvent,
+    ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
 };
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
@@ -504,7 +504,10 @@ async fn scan_tree_with_ignore(
 
                 // Notify helper of directory entry to load ignore files
                 helper
-                    .on_scan_event(&DirectoryScanEvent::EnterDirectory(dir_entry), source)
+                    .on_scan_event(
+                        &ScanDirectoryEvent::EnterDirectory(ScanDirEntry::from(&dir_entry)),
+                        source,
+                    )
                     .await;
 
                 Box::pin(scan_tree_with_ignore(
@@ -518,7 +521,7 @@ async fn scan_tree_with_ignore(
 
                 // Notify helper of directory exit
                 helper
-                    .on_scan_event(&DirectoryScanEvent::ExitDirectory, source)
+                    .on_scan_event(&ScanDirectoryEvent::ExitDirectory, source)
                     .await;
 
                 events.push(ScanEvent::ExitDirectory);

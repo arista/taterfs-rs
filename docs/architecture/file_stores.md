@@ -46,11 +46,6 @@ enum ScanEvent {
   File(FileEntry)
 }
 
-enum DirectoryScanEvent {
-  EnterDirectory(DirEntry)
-  ExitDirectory
-}
-
 interface DirEntry {
   name: string
   path: string // relative to the FileStore's root
@@ -144,16 +139,27 @@ The implementation uses the `ignore` crate for gitignore pattern matching, which
 - Directory-only patterns (`logs/`)
 - Comments and blank lines
 
-To implement these rules, FileStores can take advantage of a ScanIgnoreHelper.  This component has the following API:
+To implement these rules, FileStores can take advantage of a ScanIgnoreHelper.  This component defines its own interfaces (`ScanDirectoryEvent`, `ScanFileSource`) so it can be used outside the file_store module.  Its API:
 
 ```
 interface ScanIgnoreHelper {
-  async on_scan_event(event: DirectoryScanEvent, file_source: FileSource)
+  async on_scan_event(event: ScanDirectoryEvent, source: ScanFileSource)
   should_ignore(name: string) -> bool
+}
+
+enum ScanDirectoryEvent {
+  EnterDirectory(ScanDirEntry)
+  ExitDirectory
+}
+
+interface ScanFileSource {
+  async get_file(path: Path) -> Bytes
 }
 ```
 
-The idea is that the helper "follows" along with the FileSource as it enters and leaves directories.  Upon entering a directory, the helper uses the file_source's get_entry and get_file methods to check for a ".tfsignore" or ".gitignore", and push their directives into its context, then pop those directives upon leaving the directory.
+The idea is that the helper "follows" along with a scan as it enters and leaves directories.  Upon entering a directory, the helper uses the source's get_file method to check for a ".tfsignore" or ".gitignore", and push their directives into its context, then pop those directives upon leaving the directory.
+
+FileSource implements ScanFileSource via a blanket impl, so FileStore implementations can pass themselves directly.  Callers convert DirEntry to ScanDirEntry (via `From`) when constructing ScanDirectoryEvent values.
 
 Note that the ignore rules only come into play as part of the FileSource's scan() operation.  The other FileSource operations do not follow these ignore rules.
 

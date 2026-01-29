@@ -6,8 +6,9 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::FileStoreCache;
 use crate::file_store::{
-    DirEntry, DirectoryEntry, Error, FileEntry, FileSource, FileStore, Result, ScanEvent,
-    ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileEntry, FileSource,
+    FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents,
+    SourceChunks,
 };
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
@@ -305,11 +306,174 @@ impl FileStore for FsFileStore {
     }
 
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
-        None // Not implemented yet
+        Some(self)
     }
 
     fn get_cache(&self) -> Arc<dyn FileStoreCache> {
         self.cache.clone()
+    }
+}
+
+// =============================================================================
+// DirectoryListSource Implementation
+// =============================================================================
+
+/// A DirectoryListSource backed by the local filesystem.
+struct FsDirectoryListSource {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl super::scan_ignore_helper::ScanFileSource for FsDirectoryListSource {
+    async fn get_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
+        let relative = path.strip_prefix("/").unwrap_or(path);
+        let absolute = self.root.join(relative);
+        let contents = fs::read(&absolute).await?;
+        Ok(Bytes::from(contents))
+    }
+}
+
+#[async_trait]
+impl DirectoryListSource for FsDirectoryListSource {
+    async fn list_raw_directory(&self, path: &str) -> Result<Option<Vec<DirectoryEntry>>> {
+        let absolute = if path.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(path)
+        };
+
+        let metadata = match fs::metadata(&absolute).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        if !metadata.is_dir() {
+            return Err(Error::NotADirectory(path.to_string()));
+        }
+
+        let mut read_dir = fs::read_dir(&absolute).await?;
+        let mut entries = Vec::new();
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            // Only process regular files and directories, skip symlinks etc.
+            if !file_type.is_dir() && !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let entry_path = if path.is_empty() {
+                file_name.clone()
+            } else {
+                format!("{}/{}", path, file_name)
+            };
+
+            if file_type.is_dir() {
+                entries.push(DirectoryEntry::Dir(DirEntry {
+                    name: file_name,
+                    path: entry_path,
+                }));
+            } else {
+                let metadata = entry.metadata().await?;
+                entries.push(DirectoryEntry::File(FileEntry {
+                    name: file_name,
+                    path: entry_path,
+                    size: metadata.len(),
+                    executable: FsFileStore::is_executable(&metadata),
+                    fingerprint: FsFileStore::fingerprint(&metadata),
+                }));
+            }
+        }
+
+        // Sort by name for consistent ordering
+        entries.sort_by(|a, b| {
+            let name_a = match a {
+                DirectoryEntry::Dir(d) => &d.name,
+                DirectoryEntry::File(f) => &f.name,
+            };
+            let name_b = match b {
+                DirectoryEntry::Dir(d) => &d.name,
+                DirectoryEntry::File(f) => &f.name,
+            };
+            name_a.cmp(name_b)
+        });
+
+        Ok(Some(entries))
+    }
+}
+
+// =============================================================================
+// FileDest Implementation
+// =============================================================================
+
+#[async_trait]
+impl crate::file_store::FileDest for FsFileStore {
+    async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
+        FileSource::get_entry(self, path).await
+    }
+
+    async fn list_directory(&self, path: &Path) -> Result<Option<DirectoryList>> {
+        let relative = path.strip_prefix("/").unwrap_or(path);
+        let path_str = relative.to_string_lossy().into_owned();
+
+        let absolute = self.to_absolute(path);
+        let metadata = match fs::metadata(&absolute).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        if !metadata.is_dir() {
+            return Err(Error::NotADirectory(path_str.clone()));
+        }
+
+        let lister: Arc<dyn DirectoryListSource> = Arc::new(FsDirectoryListSource {
+            root: self.root.clone(),
+        });
+
+        // Create and initialize ignore helper
+        let mut helper = ScanIgnoreHelper::new();
+        helper
+            .initialize_to_path(Some(relative), lister.as_ref())
+            .await;
+
+        // List raw entries
+        let raw_entries = match lister.list_raw_directory(&path_str).await? {
+            Some(entries) => entries,
+            None => return Ok(None),
+        };
+
+        Ok(Some(DirectoryList::new(
+            raw_entries,
+            helper,
+            lister,
+            path_str,
+        )))
+    }
+
+    async fn write_file_from_chunks(
+        &self,
+        _path: &Path,
+        _chunks: SourceChunks,
+        _executable: bool,
+    ) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn rm(&self, _path: &Path) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn mkdir(&self, _path: &Path) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
     }
 }
 

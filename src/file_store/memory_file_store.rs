@@ -4,8 +4,9 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::{FileStoreCache, NoopFileStoreCache};
 use crate::file_store::{
-    DirEntry, DirectoryEntry, Error, FileEntry, FileSource, FileStore, Result, ScanEvent,
-    ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileEntry, FileSource,
+    FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents,
+    SourceChunks,
 };
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
@@ -458,11 +459,162 @@ impl FileStore for MemoryFileStore {
     }
 
     fn get_dest(&self) -> Option<&dyn crate::file_store::FileDest> {
-        None // Not implemented yet
+        Some(self)
     }
 
     fn get_cache(&self) -> Arc<dyn FileStoreCache> {
         self.cache.clone()
+    }
+}
+
+// =============================================================================
+// DirectoryListSource Implementation
+// =============================================================================
+
+/// A DirectoryListSource backed by the MemoryFileStore's tree data.
+struct MemoryDirectoryListSource {
+    root: BTreeMap<String, TreeNode>,
+}
+
+impl MemoryDirectoryListSource {
+    /// Navigate to a directory in the tree and return its children.
+    fn get_children(&self, path: &str) -> Option<&BTreeMap<String, TreeNode>> {
+        if path.is_empty() {
+            return Some(&self.root);
+        }
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current = &self.root;
+        for component in &components {
+            match current.get(*component)? {
+                TreeNode::Directory(children) => current = children,
+                TreeNode::File(_) => return None,
+            }
+        }
+        Some(current)
+    }
+}
+
+#[async_trait]
+impl super::scan_ignore_helper::ScanFileSource for MemoryDirectoryListSource {
+    async fn get_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>> {
+        let path_str = path.to_string_lossy();
+        let components: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+        if components.is_empty() {
+            return Err("empty path".into());
+        }
+        let mut current = &self.root;
+        for component in &components[..components.len() - 1] {
+            match current.get(*component) {
+                Some(TreeNode::Directory(children)) => current = children,
+                _ => return Err(format!("not found: {}", path_str).into()),
+            }
+        }
+        match current.get(components[components.len() - 1]) {
+            Some(TreeNode::File(f)) => Ok(Bytes::from(f.read_all())),
+            _ => Err(format!("not found: {}", path_str).into()),
+        }
+    }
+}
+
+#[async_trait]
+impl DirectoryListSource for MemoryDirectoryListSource {
+    async fn list_raw_directory(&self, path: &str) -> Result<Option<Vec<DirectoryEntry>>> {
+        let children = match self.get_children(path) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let entries: Vec<DirectoryEntry> = children
+            .iter()
+            .map(|(name, node)| {
+                let entry_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", path, name)
+                };
+                match node {
+                    TreeNode::Directory(_) => DirectoryEntry::Dir(DirEntry {
+                        name: name.clone(),
+                        path: entry_path,
+                    }),
+                    TreeNode::File(f) => DirectoryEntry::File(FileEntry {
+                        name: name.clone(),
+                        path: entry_path,
+                        size: f.size(),
+                        executable: f.executable,
+                        fingerprint: None,
+                    }),
+                }
+            })
+            .collect();
+
+        Ok(Some(entries))
+    }
+}
+
+// =============================================================================
+// FileDest Implementation
+// =============================================================================
+
+#[async_trait]
+impl crate::file_store::FileDest for MemoryFileStore {
+    async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
+        FileSource::get_entry(self, path).await
+    }
+
+    async fn list_directory(&self, path: &Path) -> Result<Option<DirectoryList>> {
+        let path_str = MemoryFileStore::path_to_string(path);
+
+        // Check path exists and is a directory (or root)
+        if !MemoryFileStore::is_root_path(path) {
+            match self.get_node(path) {
+                Some(TreeNode::Directory(_)) => {}
+                Some(TreeNode::File(_)) => {
+                    return Err(Error::NotADirectory(path_str.clone()));
+                }
+                None => return Ok(None),
+            }
+        }
+
+        let lister: Arc<dyn DirectoryListSource> = Arc::new(MemoryDirectoryListSource {
+            root: self.root.clone(),
+        });
+
+        // Create and initialize ignore helper
+        let mut helper = ScanIgnoreHelper::new();
+        helper.initialize_to_path(Some(path), lister.as_ref()).await;
+
+        // List raw entries
+        let raw_entries = match lister.list_raw_directory(&path_str).await? {
+            Some(entries) => entries,
+            None => return Ok(None),
+        };
+
+        Ok(Some(DirectoryList::new(raw_entries, helper, lister, path_str)))
+    }
+
+    async fn write_file_from_chunks(
+        &self,
+        _path: &Path,
+        _chunks: SourceChunks,
+        _executable: bool,
+    ) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn rm(&self, _path: &Path) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn mkdir(&self, _path: &Path) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
+    }
+
+    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<()> {
+        Err(Error::Other("not implemented".into()))
     }
 }
 
@@ -991,5 +1143,163 @@ mod tests {
 
         assert!(!names.contains(&"debug.log"));
         assert!(names.contains(&"important.log"));
+    }
+
+    // =========================================================================
+    // DirectoryList Tests
+    // =========================================================================
+
+    /// Helper to collect all entry names from a DirectoryList.
+    async fn collect_names(list: &mut crate::file_store::DirectoryList) -> Vec<String> {
+        let mut names = Vec::new();
+        while let Some(Ok(entry)) = list.next().await {
+            match entry {
+                DirectoryEntry::Dir(d) => names.push(d.name),
+                DirectoryEntry::File(f) => names.push(f.name),
+            }
+        }
+        names
+    }
+
+    /// Helper to check if a name is in a list of names.
+    fn has_name(names: &[String], name: &str) -> bool {
+        names.iter().any(|n| n == name)
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_filters_ignored_entries() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log\ntarget/"))
+            .add("app.log", MemoryFsEntry::file("log"))
+            .add("main.rs", MemoryFsEntry::file("fn main() {}"))
+            .add("target/debug/app", MemoryFsEntry::file("binary"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let mut list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+
+        let names = collect_names(&mut list).await;
+
+        assert!(has_name(&names, ".gitignore"));
+        assert!(has_name(&names, "main.rs"));
+        assert!(!has_name(&names, "app.log"));
+        assert!(!has_name(&names, "target"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_filters_git_and_tfs_dirs() {
+        let store = MemoryFileStore::builder()
+            .add(".git/config", MemoryFsEntry::file("config"))
+            .add(".tfs/data", MemoryFsEntry::file("data"))
+            .add("file.txt", MemoryFsEntry::file("content"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let mut list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+
+        let names = collect_names(&mut list).await;
+
+        assert!(!has_name(&names, ".git"));
+        assert!(!has_name(&names, ".tfs"));
+        assert!(has_name(&names, "file.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_child_carries_ignore_context() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("src/.gitignore", MemoryFsEntry::file("*.bak"))
+            .add("src/main.rs", MemoryFsEntry::file("fn main() {}"))
+            .add("src/debug.log", MemoryFsEntry::file("log"))
+            .add("src/backup.bak", MemoryFsEntry::file("backup"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let root_list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+
+        // Drill into src/ via list_directory
+        let mut src_list = root_list.list_directory("src").await.unwrap().unwrap();
+        let names = collect_names(&mut src_list).await;
+
+        // Root ignore (*.log) and src ignore (*.bak) should both apply
+        assert!(has_name(&names, ".gitignore"));
+        assert!(has_name(&names, "main.rs"));
+        assert!(!has_name(&names, "debug.log"));
+        assert!(!has_name(&names, "backup.bak"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_nested_list_directory() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("a/.gitignore", MemoryFsEntry::file("*.tmp"))
+            .add("a/b/.tfsignore", MemoryFsEntry::file("*.bak"))
+            .add("a/b/file.txt", MemoryFsEntry::file("content"))
+            .add("a/b/file.log", MemoryFsEntry::file("ignored by root"))
+            .add("a/b/file.tmp", MemoryFsEntry::file("ignored by a"))
+            .add("a/b/file.bak", MemoryFsEntry::file("ignored by a/b"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let root_list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+        let a_list = root_list.list_directory("a").await.unwrap().unwrap();
+        let mut b_list = a_list.list_directory("b").await.unwrap().unwrap();
+
+        let names = collect_names(&mut b_list).await;
+
+        // All three levels of ignore should apply
+        assert!(has_name(&names, ".tfsignore"));
+        assert!(has_name(&names, "file.txt"));
+        assert!(!has_name(&names, "file.log"));
+        assert!(!has_name(&names, "file.tmp"));
+        assert!(!has_name(&names, "file.bak"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_nonexistent_child() {
+        let store = MemoryFileStore::builder()
+            .add("file.txt", MemoryFsEntry::file("content"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let root_list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+
+        let result = root_list.list_directory("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_from_subdirectory() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log"))
+            .add("src/main.rs", MemoryFsEntry::file("fn main() {}"))
+            .add("src/debug.log", MemoryFsEntry::file("log"))
+            .build();
+
+        // List starting from a subdirectory - root ignores should still apply
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let mut list = dest.list_directory(Path::new("src")).await.unwrap().unwrap();
+
+        let names = collect_names(&mut list).await;
+
+        assert!(has_name(&names, "main.rs"));
+        assert!(!has_name(&names, "debug.log"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_list_negation_pattern() {
+        let store = MemoryFileStore::builder()
+            .add(".gitignore", MemoryFsEntry::file("*.log\n!important.log"))
+            .add("debug.log", MemoryFsEntry::file("ignored"))
+            .add("important.log", MemoryFsEntry::file("kept"))
+            .build();
+
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+        let mut list = dest.list_directory(Path::new("")).await.unwrap().unwrap();
+
+        let names = collect_names(&mut list).await;
+
+        assert!(!has_name(&names, "debug.log"));
+        assert!(has_name(&names, "important.log"));
     }
 }

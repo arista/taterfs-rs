@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Currently scan_ignore_helper.rs depends directly on interfaces from file_store: DirectoryScanEvent and FileSource.  I would like to separate out ScanIgnoreHelper so that it can be used in more contexts.  Therefore, please remove those direct references, and instead have it define its own ScanDirectoryEvent, and its own ScanFileSource interface, tailored to just what it needs.  The places that call ScanIgnoreHelper will then need to bridge to those structures.  Also, update file_stores.md to match the changes (please keep the changes to that .md file minimal, no need to copy in the full rust definitions).  Please do this all on branch "nsa-abstract-ignore"
+Look at file_stores.md and see the changes specified there around DirectoryList respecting the ignore directives, and that list_directory has been added to DirectoryList, specifically so that DirectoryList can do this efficiently by storing ScanIgnoreHelpers in the DirectoryList
 
 ## Planned Features
 

@@ -104,7 +104,7 @@ interface FileDest {
   // List the contents of a directory, error if the path does not point to a directory
   async list_directory(path: Path) -> Option<DirectoryList>
   // Write a file whose contents are supplied asynchronously by the given FileChunks
-  async write_file_from_chunks(path: Path, chunks: SourceChunks)
+  async write_file_from_chunks(path: Path, chunks: SourceChunks, executable: bool)
   // Remove the file or directory at the given Path, if it exists
   async rm(path: Path)
   // Create a new directory at the given Path if there isn't yet a directory there, error if there is already a file there
@@ -115,10 +115,14 @@ interface FileDest {
 
 interface DirectoryList {
   async next() -> Option<DirectoryEntry>
+  // List the contents of a directory that is an immediate child of the directory represented by this structure, error if the name does not point to a directory
+  async list_directory(name: string) -> Option<DirectoryList>
 }
 ```
 
 A FileDest implementation should do its best to avoid leaving a partially-written file, even if it's interrupted during a write_file_from_chunks operation.  Some implementations will, for example, build the file in a temporary location, then move the file to its final location atomically.
+
+The list_directory() function (and its recursive DirectoryList.list_directory function) should respect ignore directives the same way that FileSource.scan does.
 
 ## Implementation Helpers
 

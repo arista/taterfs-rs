@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // =============================================================================
 // MemoryFsEntry - Builder Input Types
@@ -151,7 +152,7 @@ enum TreeNode {
 
 /// An in-memory FileStore implementation, primarily for testing.
 pub struct MemoryFileStore {
-    root: BTreeMap<String, TreeNode>,
+    root: RwLock<BTreeMap<String, TreeNode>>,
     /// Buffer manager for chunk allocation.
     managed_buffers: ManagedBuffers,
     /// Cache for this file store.
@@ -162,32 +163,6 @@ impl MemoryFileStore {
     /// Create a new builder for constructing a MemoryFileStore.
     pub fn builder() -> MemoryFileStoreBuilder {
         MemoryFileStoreBuilder::new()
-    }
-
-    /// Look up a node at the given path.
-    fn get_node(&self, path: &Path) -> Option<&TreeNode> {
-        let components: Vec<_> = path
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(s) => s.to_str(),
-                _ => None,
-            })
-            .collect();
-
-        if components.is_empty() {
-            return None; // Root is handled specially
-        }
-
-        let mut current = self.root.get(components[0])?;
-        for component in &components[1..] {
-            match current {
-                TreeNode::Directory(children) => {
-                    current = children.get(*component)?;
-                }
-                TreeNode::File(_) => return None,
-            }
-        }
-        Some(current)
     }
 
     /// Check if a path is the root (empty path).
@@ -202,6 +177,85 @@ impl MemoryFileStore {
     fn path_to_string(path: &Path) -> String {
         path.to_string_lossy().into_owned()
     }
+}
+
+/// Look up a node at the given path in the tree.
+fn get_node<'a>(root: &'a BTreeMap<String, TreeNode>, path: &Path) -> Option<&'a TreeNode> {
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+
+    if components.is_empty() {
+        return None; // Root is handled specially
+    }
+
+    let mut current = root.get(components[0])?;
+    for component in &components[1..] {
+        match current {
+            TreeNode::Directory(children) => {
+                current = children.get(*component)?;
+            }
+            TreeNode::File(_) => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Extract path components as strings.
+fn path_components(path: &Path) -> Vec<&str> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Navigate to the parent directory of a path, creating intermediate
+/// directories as needed. Returns a mutable reference to the parent's children map.
+fn get_or_create_parent<'a>(
+    root: &'a mut BTreeMap<String, TreeNode>,
+    parent_components: &[&str],
+) -> Result<&'a mut BTreeMap<String, TreeNode>> {
+    let mut current = root;
+    for &component in parent_components {
+        current = match current
+            .entry(component.to_string())
+            .or_insert_with(|| TreeNode::Directory(BTreeMap::new()))
+        {
+            TreeNode::Directory(children) => children,
+            TreeNode::File(_) => {
+                return Err(Error::NotADirectory(component.to_string()));
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// Navigate to a mutable node at the given path.
+fn get_node_mut<'a>(
+    root: &'a mut BTreeMap<String, TreeNode>,
+    path: &Path,
+) -> Option<&'a mut TreeNode> {
+    let components = path_components(path);
+    if components.is_empty() {
+        return None;
+    }
+
+    let mut current = root.get_mut(components[0])?;
+    for component in &components[1..] {
+        match current {
+            TreeNode::Directory(children) => {
+                current = children.get_mut(*component)?;
+            }
+            TreeNode::File(_) => return None,
+        }
+    }
+    Some(current)
 }
 
 // =============================================================================
@@ -290,7 +344,7 @@ impl MemoryFileStoreBuilder {
     /// Build the MemoryFileStore.
     pub fn build(self) -> MemoryFileStore {
         MemoryFileStore {
-            root: self.root,
+            root: RwLock::new(self.root),
             managed_buffers: self.managed_buffers,
             cache: self.cache.unwrap_or_else(|| Arc::new(NoopFileStoreCache)),
         }
@@ -343,14 +397,18 @@ impl SourceChunk for MemorySourceChunk {
 #[async_trait]
 impl FileSource for MemoryFileStore {
     async fn scan(&self, path: Option<&Path>) -> Result<ScanEvents> {
+        // Clone root to avoid holding the lock during the scan.
+        // This prevents deadlocks since scan_tree_with_ignore needs
+        // ScanFileSource access (which would re-acquire the lock).
+        let source = MemoryDirectoryListSource {
+            root: self.root.read().await.clone(),
+        };
+
         // Determine the starting point
         let (start_children, start_path) = match path {
             Some(p) if !Self::is_root_path(p) => {
-                // Navigate to the specified path
-                match self.get_node(p) {
-                    Some(TreeNode::Directory(children)) => {
-                        (children, p.to_path_buf())
-                    }
+                match get_node(&source.root, p) {
+                    Some(TreeNode::Directory(children)) => (children, p.to_path_buf()),
                     Some(TreeNode::File(_)) => {
                         return Err(Error::NotADirectory(Self::path_to_string(p)));
                     }
@@ -359,7 +417,7 @@ impl FileSource for MemoryFileStore {
                     }
                 }
             }
-            _ => (&self.root, PathBuf::new()),
+            _ => (&source.root, PathBuf::new()),
         };
 
         let mut events = Vec::new();
@@ -367,16 +425,18 @@ impl FileSource for MemoryFileStore {
 
         // Initialize helper by walking from root to the target path,
         // loading ignore files along the way
-        helper.initialize_to_path(path, self).await;
+        helper.initialize_to_path(path, &source).await;
 
         // Scan the tree with ignore filtering
-        scan_tree_with_ignore(start_children, start_path, &mut events, &mut helper, self).await;
+        scan_tree_with_ignore(start_children, start_path, &mut events, &mut helper, &source)
+            .await;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>> {
-        let node = match self.get_node(path) {
+        let root = self.root.read().await;
+        let node = match get_node(&root, path) {
             Some(n) => n,
             None => return Ok(None),
         };
@@ -387,6 +447,8 @@ impl FileSource for MemoryFileStore {
                 return Err(Error::NotAFile(Self::path_to_string(path)));
             }
         };
+
+        drop(root);
 
         let chunks = compute_chunks(&file, self.managed_buffers.clone());
         Ok(Some(Box::pin(stream::iter(
@@ -414,7 +476,8 @@ impl FileSource for MemoryFileStore {
             })));
         }
 
-        let node = match self.get_node(path) {
+        let root = self.root.read().await;
+        let node = match get_node(&root, path) {
             Some(n) => n,
             None => return Ok(None),
         };
@@ -442,8 +505,8 @@ impl FileSource for MemoryFileStore {
     }
 
     async fn get_file(&self, path: &Path) -> Result<Bytes> {
-        let node = self
-            .get_node(path)
+        let root = self.root.read().await;
+        let node = get_node(&root, path)
             .ok_or_else(|| Error::NotFound(Self::path_to_string(path)))?;
 
         match node {
@@ -567,10 +630,11 @@ impl crate::file_store::FileDest for MemoryFileStore {
 
     async fn list_directory(&self, path: &Path) -> Result<Option<DirectoryList>> {
         let path_str = MemoryFileStore::path_to_string(path);
+        let root = self.root.read().await;
 
         // Check path exists and is a directory (or root)
         if !MemoryFileStore::is_root_path(path) {
-            match self.get_node(path) {
+            match get_node(&root, path) {
                 Some(TreeNode::Directory(_)) => {}
                 Some(TreeNode::File(_)) => {
                     return Err(Error::NotADirectory(path_str.clone()));
@@ -580,8 +644,10 @@ impl crate::file_store::FileDest for MemoryFileStore {
         }
 
         let lister: Arc<dyn DirectoryListSource> = Arc::new(MemoryDirectoryListSource {
-            root: self.root.clone(),
+            root: root.clone(),
         });
+
+        drop(root);
 
         // Create and initialize ignore helper
         let mut helper = ScanIgnoreHelper::new();
@@ -593,28 +659,114 @@ impl crate::file_store::FileDest for MemoryFileStore {
             None => return Ok(None),
         };
 
-        Ok(Some(DirectoryList::new(raw_entries, helper, lister, path_str)))
+        Ok(Some(DirectoryList::new(
+            raw_entries,
+            helper,
+            lister,
+            path_str,
+        )))
     }
 
     async fn write_file_from_chunks(
         &self,
-        _path: &Path,
-        _chunks: SourceChunks,
-        _executable: bool,
+        path: &Path,
+        chunks: SourceChunks,
+        executable: bool,
     ) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+        let components = path_components(path);
+        if components.is_empty() {
+            return Err(Error::InvalidPath("empty path".into()));
+        }
+
+        // Collect all chunk data before acquiring the write lock
+        let mut data = Vec::new();
+        let mut chunks = chunks;
+        while let Some(chunk_result) = chunks.next().await {
+            let chunk = chunk_result?;
+            let content = chunk.get().await?;
+            data.extend_from_slice(&content.bytes[..]);
+        }
+
+        let mut root = self.root.write().await;
+        let parent = get_or_create_parent(&mut root, &components[..components.len() - 1])?;
+        let name = components.last().unwrap().to_string();
+        parent.insert(
+            name,
+            TreeNode::File(MemoryFile {
+                contents: MemoryFileContents::Explicit(Arc::new(data)),
+                executable,
+            }),
+        );
+
+        Ok(())
     }
 
-    async fn rm(&self, _path: &Path) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn rm(&self, path: &Path) -> Result<()> {
+        let components = path_components(path);
+        if components.is_empty() {
+            // Remove everything from root
+            let mut root = self.root.write().await;
+            root.clear();
+            return Ok(());
+        }
+
+        let mut root = self.root.write().await;
+
+        if components.len() == 1 {
+            // Remove from root level
+            root.remove(components[0]);
+            return Ok(());
+        }
+
+        // Navigate to parent and remove the child
+        let parent_components = &components[..components.len() - 1];
+        let mut current = &mut *root;
+        for &component in parent_components {
+            match current.get_mut(component) {
+                Some(TreeNode::Directory(children)) => current = children,
+                _ => return Ok(()), // Parent doesn't exist, nothing to remove
+            }
+        }
+        current.remove(*components.last().unwrap());
+
+        Ok(())
     }
 
-    async fn mkdir(&self, _path: &Path) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn mkdir(&self, path: &Path) -> Result<()> {
+        let components = path_components(path);
+        if components.is_empty() {
+            return Ok(()); // Root already exists
+        }
+
+        let mut root = self.root.write().await;
+        let mut current = &mut *root;
+        for &component in &components {
+            current = match current
+                .entry(component.to_string())
+                .or_insert_with(|| TreeNode::Directory(BTreeMap::new()))
+            {
+                TreeNode::Directory(children) => children,
+                TreeNode::File(_) => {
+                    return Err(Error::NotAFile(component.to_string()));
+                }
+            };
+        }
+
+        Ok(())
     }
 
-    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
+        let mut root = self.root.write().await;
+        let node = get_node_mut(&mut root, path)
+            .ok_or_else(|| Error::NotFound(Self::path_to_string(path)))?;
+
+        match node {
+            TreeNode::File(f) => {
+                f.executable = executable;
+                Ok(())
+            }
+            TreeNode::Directory(_) => Err(Error::NotAFile(Self::path_to_string(path))),
+        }
     }
 }
 
@@ -623,12 +775,12 @@ impl crate::file_store::FileDest for MemoryFileStore {
 // =============================================================================
 
 /// Recursively scan a tree with ignore filtering, generating scan events in depth-first, lexicographic order.
-async fn scan_tree_with_ignore(
+async fn scan_tree_with_ignore<S: super::scan_ignore_helper::ScanFileSource + ?Sized>(
     children: &BTreeMap<String, TreeNode>,
     current_path: PathBuf,
     events: &mut Vec<ScanEvent>,
     helper: &mut ScanIgnoreHelper,
-    source: &MemoryFileStore,
+    source: &S,
 ) {
     // BTreeMap iterates in sorted order
     for (name, node) in children {
@@ -1301,5 +1453,212 @@ mod tests {
 
         assert!(!has_name(&names, "debug.log"));
         assert!(has_name(&names, "important.log"));
+    }
+
+    // =========================================================================
+    // FileDest Mutation Tests
+    // =========================================================================
+
+    /// Helper to create a simple SourceChunks stream from bytes.
+    fn chunks_from_bytes(data: &[u8]) -> SourceChunks {
+        let managed_buffers = ManagedBuffers::new();
+        let file = MemoryFile {
+            contents: MemoryFileContents::Explicit(Arc::new(data.to_vec())),
+            executable: false,
+        };
+        let chunks = super::compute_chunks(&file, managed_buffers);
+        Box::pin(futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok(Box::new(c) as Box<dyn SourceChunk>)),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_write_file_from_chunks() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let data = b"Hello, World!";
+        let chunks = chunks_from_bytes(data);
+        dest.write_file_from_chunks(Path::new("hello.txt"), chunks, false)
+            .await
+            .unwrap();
+
+        // Verify via FileSource
+        let contents = store.get_file(Path::new("hello.txt")).await.unwrap();
+        assert_eq!(&contents[..], data);
+    }
+
+    #[tokio::test]
+    async fn test_write_file_creates_parent_dirs() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let chunks = chunks_from_bytes(b"nested");
+        dest.write_file_from_chunks(Path::new("a/b/c.txt"), chunks, false)
+            .await
+            .unwrap();
+
+        let contents = store.get_file(Path::new("a/b/c.txt")).await.unwrap();
+        assert_eq!(&contents[..], b"nested");
+
+        // Parent directories should exist
+        let dir = store.get_entry(Path::new("a/b")).await.unwrap();
+        assert!(matches!(dir, Some(DirectoryEntry::Dir(_))));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_executable() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let chunks = chunks_from_bytes(b"#!/bin/bash");
+        dest.write_file_from_chunks(Path::new("script.sh"), chunks, true)
+            .await
+            .unwrap();
+
+        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        match entry {
+            Some(DirectoryEntry::File(f)) => assert!(f.executable),
+            _ => panic!("Expected file entry"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_file_overwrites_existing() {
+        let store = MemoryFileStore::builder()
+            .add("file.txt", MemoryFsEntry::file("old content"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let chunks = chunks_from_bytes(b"new content");
+        dest.write_file_from_chunks(Path::new("file.txt"), chunks, false)
+            .await
+            .unwrap();
+
+        let contents = store.get_file(Path::new("file.txt")).await.unwrap();
+        assert_eq!(&contents[..], b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_rm_file() {
+        let store = MemoryFileStore::builder()
+            .add("file.txt", MemoryFsEntry::file("content"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.rm(Path::new("file.txt")).await.unwrap();
+
+        let entry = store.get_entry(Path::new("file.txt")).await.unwrap();
+        assert!(entry.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rm_directory() {
+        let store = MemoryFileStore::builder()
+            .add("dir/a.txt", MemoryFsEntry::file("a"))
+            .add("dir/b.txt", MemoryFsEntry::file("b"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.rm(Path::new("dir")).await.unwrap();
+
+        let entry = store.get_entry(Path::new("dir")).await.unwrap();
+        assert!(entry.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rm_nonexistent_is_ok() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        // Should not error
+        dest.rm(Path::new("nonexistent")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mkdir() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.mkdir(Path::new("a/b/c")).await.unwrap();
+
+        let entry = store.get_entry(Path::new("a/b/c")).await.unwrap();
+        assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_existing_dir_is_ok() {
+        let store = MemoryFileStore::builder()
+            .add("dir/file.txt", MemoryFsEntry::file("content"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        // Should not error
+        dest.mkdir(Path::new("dir")).await.unwrap();
+
+        // Original contents should still be there
+        let contents = store.get_file(Path::new("dir/file.txt")).await.unwrap();
+        assert_eq!(&contents[..], b"content");
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_error_if_file_exists() {
+        let store = MemoryFileStore::builder()
+            .add("file.txt", MemoryFsEntry::file("content"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.mkdir(Path::new("file.txt")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_executable() {
+        let store = MemoryFileStore::builder()
+            .add("script.sh", MemoryFsEntry::file("#!/bin/bash"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        // Set executable
+        dest.set_executable(Path::new("script.sh"), true)
+            .await
+            .unwrap();
+        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        match entry {
+            Some(DirectoryEntry::File(f)) => assert!(f.executable),
+            _ => panic!("Expected file entry"),
+        }
+
+        // Clear executable
+        dest.set_executable(Path::new("script.sh"), false)
+            .await
+            .unwrap();
+        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        match entry {
+            Some(DirectoryEntry::File(f)) => assert!(!f.executable),
+            _ => panic!("Expected file entry"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_executable_not_found() {
+        let store = MemoryFileStore::builder().build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.set_executable(Path::new("missing"), true).await;
+        assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_set_executable_on_directory() {
+        let store = MemoryFileStore::builder()
+            .add("dir/file.txt", MemoryFsEntry::file("content"))
+            .build();
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.set_executable(Path::new("dir"), true).await;
+        assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 }

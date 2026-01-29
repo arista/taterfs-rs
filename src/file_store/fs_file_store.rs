@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// A FileStore backed by the local filesystem.
 pub struct FsFileStore {
@@ -457,23 +457,145 @@ impl crate::file_store::FileDest for FsFileStore {
 
     async fn write_file_from_chunks(
         &self,
-        _path: &Path,
-        _chunks: SourceChunks,
-        _executable: bool,
+        path: &Path,
+        chunks: SourceChunks,
+        executable: bool,
     ) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+        let absolute = self.to_absolute(path);
+
+        // Create parent directories
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Write to a temp file in the same directory for atomic rename.
+        // Use a unique name based on process id and a counter to avoid collisions.
+        let file_name = absolute
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let temp_name = format!(
+            ".{}.{}.tmp",
+            file_name,
+            std::process::id(),
+        );
+        let temp_path = absolute
+            .parent()
+            .unwrap_or(&self.root)
+            .join(&temp_name);
+
+        let mut file: fs::File = fs::File::create(&temp_path).await?;
+
+        // Stream chunks into the temp file
+        let mut chunks = chunks;
+        while let Some(chunk_result) = chunks.next().await {
+            let chunk = chunk_result?;
+            let content = chunk.get().await?;
+            file.write_all(&content.bytes[..]).await?;
+        }
+        file.flush().await?;
+        drop(file);
+
+        // Set executable bit if needed
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&temp_path).await?;
+            let mut perms = metadata.permissions();
+            let mode = perms.mode();
+            // Add execute bits where read bits are set
+            perms.set_mode(mode | ((mode & 0o444) >> 2));
+            fs::set_permissions(&temp_path, perms).await?;
+        }
+
+        // Atomic rename to final path
+        fs::rename(&temp_path, &absolute).await?;
+
+        // If not executable on unix, ensure execute bits are cleared
+        // (in case the destination previously had them)
+        #[cfg(unix)]
+        if !executable {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&absolute).await?;
+            let mut perms = metadata.permissions();
+            let mode = perms.mode();
+            if mode & 0o111 != 0 {
+                perms.set_mode(mode & !0o111);
+                fs::set_permissions(&absolute, perms).await?;
+            }
+        }
+
+        Ok(())
     }
 
-    async fn rm(&self, _path: &Path) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn rm(&self, path: &Path) -> Result<()> {
+        let absolute = self.to_absolute(path);
+
+        let metadata = match fs::metadata(&absolute).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+
+        if metadata.is_dir() {
+            fs::remove_dir_all(&absolute).await?;
+        } else {
+            fs::remove_file(&absolute).await?;
+        }
+
+        Ok(())
     }
 
-    async fn mkdir(&self, _path: &Path) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn mkdir(&self, path: &Path) -> Result<()> {
+        let absolute = self.to_absolute(path);
+
+        // Check if a file exists at the path
+        match fs::metadata(&absolute).await {
+            Ok(m) if m.is_file() => {
+                return Err(Error::NotADirectory(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            Ok(_) => return Ok(()), // Already a directory
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        fs::create_dir_all(&absolute).await?;
+        Ok(())
     }
 
-    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<()> {
-        Err(Error::Other("not implemented".into()))
+    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
+        let absolute = self.to_absolute(path);
+
+        let metadata = match fs::metadata(&absolute).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::NotFound(path.to_string_lossy().into_owned()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if !metadata.is_file() {
+            return Err(Error::NotAFile(path.to_string_lossy().into_owned()));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = metadata.permissions();
+            let mode = perms.mode();
+            if executable {
+                // Add execute bits where read bits are set
+                perms.set_mode(mode | ((mode & 0o444) >> 2));
+            } else {
+                // Remove all execute bits
+                perms.set_mode(mode & !0o111);
+            }
+            fs::set_permissions(&absolute, perms).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -942,5 +1064,237 @@ mod tests {
         assert!(names.contains(&"realdir"));
         assert!(!names.contains(&"link.txt"));
         assert!(!names.contains(&"linkdir"));
+    }
+
+    // =========================================================================
+    // FileDest Tests
+    // =========================================================================
+
+    /// Helper to create a SourceChunks stream from bytes using MemoryFileStore.
+    async fn chunks_from_bytes(data: &[u8]) -> SourceChunks {
+        use crate::file_store::{MemoryFileStore, MemoryFsEntry};
+
+        let store = MemoryFileStore::builder()
+            .add("_data", MemoryFsEntry::file(data))
+            .build();
+
+        store
+            .get_source_chunks(Path::new("_data"))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_dest_write_file_from_chunks() {
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let data = b"Hello, World!";
+        let chunks = chunks_from_bytes(data).await;
+        dest.write_file_from_chunks(Path::new("hello.txt"), chunks, false)
+            .await
+            .unwrap();
+
+        // Verify the file was written
+        let contents = std::fs::read(temp.path().join("hello.txt")).unwrap();
+        assert_eq!(&contents, data);
+    }
+
+    #[tokio::test]
+    async fn test_dest_write_creates_parent_dirs() {
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let chunks = chunks_from_bytes(b"nested").await;
+        dest.write_file_from_chunks(Path::new("a/b/c.txt"), chunks, false)
+            .await
+            .unwrap();
+
+        let contents = std::fs::read(temp.path().join("a/b/c.txt")).unwrap();
+        assert_eq!(&contents, b"nested");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dest_write_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let chunks = chunks_from_bytes(b"#!/bin/bash").await;
+        dest.write_file_from_chunks(Path::new("script.sh"), chunks, true)
+            .await
+            .unwrap();
+
+        let metadata = std::fs::metadata(temp.path().join("script.sh")).unwrap();
+        let mode = metadata.permissions().mode();
+        assert!(mode & 0o111 != 0, "Expected executable bit set, got mode {:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dest_write_not_executable_clears_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = create_test_dir();
+
+        // Create an executable file first
+        let script_path = temp.path().join("script.sh");
+        File::create(&script_path)
+            .unwrap()
+            .write_all(b"old")
+            .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        // Write non-executable over it
+        let chunks = chunks_from_bytes(b"new content").await;
+        dest.write_file_from_chunks(Path::new("script.sh"), chunks, false)
+            .await
+            .unwrap();
+
+        let metadata = std::fs::metadata(&script_path).unwrap();
+        let mode = metadata.permissions().mode();
+        assert!(mode & 0o111 == 0, "Expected no execute bits, got mode {:o}", mode);
+    }
+
+    #[tokio::test]
+    async fn test_dest_rm_file() {
+        let temp = create_test_dir();
+        File::create(temp.path().join("file.txt"))
+            .unwrap()
+            .write_all(b"content")
+            .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.rm(Path::new("file.txt")).await.unwrap();
+        assert!(!temp.path().join("file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_dest_rm_directory() {
+        let temp = create_test_dir();
+        std::fs::create_dir_all(temp.path().join("dir/sub")).unwrap();
+        File::create(temp.path().join("dir/sub/file.txt"))
+            .unwrap()
+            .write_all(b"content")
+            .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.rm(Path::new("dir")).await.unwrap();
+        assert!(!temp.path().join("dir").exists());
+    }
+
+    #[tokio::test]
+    async fn test_dest_rm_nonexistent_is_ok() {
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.rm(Path::new("nonexistent")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_dest_mkdir() {
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.mkdir(Path::new("a/b/c")).await.unwrap();
+        assert!(temp.path().join("a/b/c").is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_dest_mkdir_existing_dir_is_ok() {
+        let temp = create_test_dir();
+        std::fs::create_dir(temp.path().join("existing")).unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        dest.mkdir(Path::new("existing")).await.unwrap();
+        assert!(temp.path().join("existing").is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_dest_mkdir_error_if_file_exists() {
+        let temp = create_test_dir();
+        File::create(temp.path().join("file.txt")).unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.mkdir(Path::new("file.txt")).await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dest_set_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = create_test_dir();
+        File::create(temp.path().join("script.sh"))
+            .unwrap()
+            .write_all(b"#!/bin/bash")
+            .unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        // Set executable
+        dest.set_executable(Path::new("script.sh"), true)
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(temp.path().join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "Expected executable, got mode {:o}", mode);
+
+        // Clear executable
+        dest.set_executable(Path::new("script.sh"), false)
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(temp.path().join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 == 0, "Expected not executable, got mode {:o}", mode);
+    }
+
+    #[tokio::test]
+    async fn test_dest_set_executable_not_found() {
+        let temp = create_test_dir();
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.set_executable(Path::new("missing"), true).await;
+        assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_dest_set_executable_on_directory() {
+        let temp = create_test_dir();
+        std::fs::create_dir(temp.path().join("dir")).unwrap();
+
+        let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
+        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
+
+        let result = dest.set_executable(Path::new("dir"), true).await;
+        assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 }

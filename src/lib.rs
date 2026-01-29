@@ -5,7 +5,6 @@ pub mod backend;
 pub mod caches;
 pub mod cli;
 pub mod config;
-pub mod download;
 pub mod file_store;
 pub mod repo;
 pub mod repository;

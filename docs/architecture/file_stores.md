@@ -85,6 +85,11 @@ enum DirectoryEntry {
   Dir(DirEntry)
   File(FileEntry)
 }
+
+impl DirectoryEntry {
+  name() -> string
+  path() -> string
+}
 ```
 
 The fingerprint is used to quickly determine if a file has changed without reading the entire file's contents.  Each FileStore will implement this differently - the FSFileStore might include the last modified time, the S3FileStore might use the ETag, etc.  The fingerprint must be less than 128 characters, and must change when a file's content, **or executable bit**, *may* have changed.  If a FileStore cannot meet these requirements, then it should just leave this null.

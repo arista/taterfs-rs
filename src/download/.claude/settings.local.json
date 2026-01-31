@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nReplace download_actions implementation with noop stub\n\nKeep the public API \\(download_actions function, DownloadAction enum,\nDownloadError enum, DownloadActions struct with next method\\) but\nreplace the implementation to just return None. The CLI command\nremains in place and will work when download_actions is re-implemented.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

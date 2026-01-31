@@ -115,7 +115,7 @@ interface FileDest {
   // List the contents of a directory, error if the path does not point to a directory
   async list_directory(path: Path) -> Option<DirectoryEntryList>
   // Write a file whose contents are supplied asynchronously by the given FileChunks
-  async write_file_from_chunks(path: Path, chunks: SourceChunks)
+  async write_file(path: Path, object_id, executable: bool)
   // Remove the file or directory at the given Path, if it exists
   async rm(path: Path)
   // Create a new directory at the given Path if there isn't yet a directory there, error if there is already a file there

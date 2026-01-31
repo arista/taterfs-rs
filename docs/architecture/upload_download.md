@@ -103,10 +103,14 @@ DownloadActionsState {
 }
 
 DownloadActionDir {
-  repo_entries: Option<Repo DirectoryEntryList>
+  // The repo's entries from the directory, None if the directory doesn't exist in the repo
+  repo_entries: Option<Repo ScanEvents>
+  // The latest entry read within the directory, None if none remain
   repo_entry: Option<Repo DirectoryEntry>
-  store_entries: Option<FileDes DirectoryEntryList>
-  store_entry: Option<DirectoryEntry>
+  // The file store's entries from the directory, None if the directory doesn't exist in the file store
+  store_entries: Option<FileSource ScanEvents>
+  // The latest entry read within the directory, None if none remain
+  store_entry: Option<FileSource DirectoryEntry>
 }
 ```
 
@@ -131,6 +135,125 @@ DownloadActions.next():
     * return the next action from the queue
 
 DownloadActions.generate_download_actions():
+
+
+```
+if repo_entries is None {
+    // scanning through a store directory that's not in the repo, so just ignore (it will be removed when done scanning)}
+    advance_store_entry()
+else {
+    if store_entries is None {
+        // Add repo entry to a store directory that doesn't exist yet
+        add_repo_entry()
+    }
+    else {
+        if repo_entry is None {
+            // Out of repo entries, remove any remaining store entries
+            if store_entry is None {
+                end_directory()
+            }
+            else {
+                remove_store_entry()
+            }
+        }
+        else {
+            if store_entry is None {
+                // Out of directory entries, so add any repo entries
+                add_repo_entry()
+            }
+            else {
+                if repo_entry.name < store_entry.name {
+                    // Repo entry comes before store entry, so add it
+                    add_repo_entry()
+                }
+                else if repo_entry.name > store_entry.name {
+                    // Repo entry comes after store entry, so remove the store entry
+                    remove_store_entry()
+                }
+                else {
+                    // Repo and store entries have the same name, so "merge" them
+                    merge_entries()
+                }
+            }
+        }
+    }
+}
+```
+
+add_repo_entry():
+
+```
+if repo_entry is DirectoryEntry {
+  add CreateDirectory action
+  push a new DownloadActionDir with repo_entries set, and store_entries None
+  advance_repo()
+}
+else {
+  add DownloadFile action
+  advance_repo()
+}
+```
+
+remove_store_entry():
+
+```
+if store_entry is DirectoryEntry {
+  // FIXME
+}
+else {
+  add RemoveFile action
+}
+```
+
+merge_entries():
+
+```
+```
+
+advance_repo():
+
+```
+```
+
+end_directory():
+
+```
+```
+
+
+* if Some(repo_entries)
+    * if Some(store_entries)
+        * if Some(repo_entry)
+            * if Some(store_entry)
+                * if repo_entry.name < store_entry.name
+                    * add_repo_entry()
+                * else if repo_entry.name > store_entry.name
+                    * remove_store_entry()
+                * else
+                    * merge_entries()
+            * else
+                * add_repo_entry()
+        * else
+            * if Some(store_entry)
+                * remove_store_entry()
+            * else
+                * FIXME
+    * else
+        * if Some(repo_entry)
+            * add_repo_entry()
+* else - we are scanning through a store directory that's not in the repo, so just ignore (it will be removed when done scanning)
+    * advance_store_entry()
+```
+
+add_repo_entry():
+
+remove_store_entry():
+
+merge_entries():
+
+advance_store_entry():
+  store_entry = store_entries.next()
+  if store_entry is None
 
 
 * if repo_scan_event != null

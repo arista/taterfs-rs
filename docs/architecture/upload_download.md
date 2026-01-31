@@ -93,7 +93,24 @@ DownloadRepoToStore {
   // The repo Directory being downloaded
   repo_directory_id: ObjectId
   // The entries of the store's directory, None if the directory doesn't yet exist in the store
-  store_entries: Option<DirectoryEntryList>
+  store_entries: Option<file store DirectoryList>
+}
+
+impl DownloadRepoToStore {
+  new(repo, repo_directory_id, file_store, store_path, actions) {
+    constructs the DownloadRepoToStore, filling in the appropriate cache_path_id by calling the file store cache from the file_store, and creating store_entries based on what the store_path points to in the file store (file_store.get_dest.get_entry):
+      a directory -> the DirectoryList for that directory (file_store.get_dest.list_directory)
+      nothing -> call actions.mkdir, and None
+      a file -> call actions.rm, actions.mkdir, and None
+  }
+  
+  for_child(&self, name, repo_entry, parent_store_entries?) {
+    construct a new DonwloadRepoToStore that inherits values from this one, but represents a child directory with the given name.
+      The store_path will append the name
+      The cache_path_id will retrieve the child's path id from the file_store's cache.
+      The repo_directory_id will be obtained from the repo_entry
+      The store_entries is obtained by calling list_directory on the parent_store_entries (if any).
+  }
 }
 ```
 
@@ -108,14 +125,17 @@ async download_repo_to_store() {
     if repo_entry != null {
       if store_entry != null {
         if repo_entry.name < store_entry.name {
+          // Add repo entries until we reach a store entry
           download_repo_entry(repo_entry)
           repo_entry = repo_entries.next()
         }
         else if repo_entry.name > store_entry.name {
-          remove_store_entry(store_entry)
+          // Remove store entries until we reach a repo entry
+          remove_store_entry()
           store_entry = store_entries.next()
         }
         else {
+          // Both repo and store entry exist
           merge_entries(repo_entry, store_entry)
           repo_entry = repo_entries.next()
           store_entry = store_entries.next()
@@ -128,8 +148,8 @@ async download_repo_to_store() {
     }
     else {
       if store_entry != null {
-        remove_store_entry(store_entry)
-        store_entry = file_store_entries.next()
+        remove_store_entry()
+        store_entry = store_entries.next()
       }
       else {
         break
@@ -144,7 +164,7 @@ download_repo_entry(repo_entry) {
     Directory -> {
       // descend recursively
       file_dest.mkdir(store_path)
-      download_repo_to_store() recursive call with child repo_entry and no store_entries
+      for_child(name, repo_entry, None).download_repo_to_store
     }
     File -> {
       file_dest.download_file(store_path, file id, file executable)
@@ -152,7 +172,7 @@ download_repo_entry(repo_entry) {
   }
 }
 
-remove_store_entry(store_entry) {
+remove_store_entry() {
   actions.rm(store_path)
 }
 
@@ -161,14 +181,14 @@ merge_entries(path, repo_entry, store_entry, file_dest) {
     Directory -> {
       case store_entry -> {
         Directory -> {
-          // descend recursively
-          download_repo_to_store() recursive call with child repo_entry and child store_entries
+          // descend recursively through both
+          for_child(name, repo_entry, store_entries).download_repo_to_store
         }
         File -> {
           // replace store file with repo directory
           file_dest.rm(store_path)
           file_dest.mkdir(store_path)
-          download_repo_to_store() recursive call with child repo_entry and no store_entries
+          for_child(name, repo_entry, None).download_repo_to_store
         }
       }
     }
@@ -181,7 +201,8 @@ merge_entries(path, repo_entry, store_entry, file_dest) {
         }
         File -> {
           check file_store_cache for the file's FingerprintedFileInfo
-          if it has that info and its object id matches the repo_entry {
+          if it has that info and it matches the File's current fingerprint and its object id matches the repo_entry {
+            // The file already exists and matches what would have been downloaded.  Check to see if its executable bit has changed
             if file_store's executable bit doesn't match the repo entry's executable bit {
               file_dest.set_executable(store_path, file executable)
             }

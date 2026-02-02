@@ -58,12 +58,7 @@ pub trait DownloadActions: Send + Sync {
     async fn mkdir(&self, path: &Path) -> Result<()>;
 
     /// Download a file from the repository to the given path.
-    async fn download_file(
-        &self,
-        path: &Path,
-        file_id: &ObjectId,
-        executable: bool,
-    ) -> Result<()>;
+    async fn download_file(&self, path: &Path, file_id: &ObjectId, executable: bool) -> Result<()>;
 
     /// Change the executable bit of a file.
     async fn set_executable(&self, path: &Path, executable: bool) -> Result<()>;
@@ -109,15 +104,12 @@ impl DownloadActions for FileDestDownloadActions {
         Ok(())
     }
 
-    async fn download_file(
-        &self,
-        path: &Path,
-        file_id: &ObjectId,
-        executable: bool,
-    ) -> Result<()> {
+    async fn download_file(&self, path: &Path, file_id: &ObjectId, executable: bool) -> Result<()> {
         // Read file chunks from the repo and collect them into SourceChunk items.
         let mut chunk_list = self.repo.list_file_chunks(file_id).await?;
-        let mut chunks: Vec<std::result::Result<Box<dyn file_store::SourceChunk>, file_store::Error>> = Vec::new();
+        let mut chunks: Vec<
+            std::result::Result<Box<dyn file_store::SourceChunk>, file_store::Error>,
+        > = Vec::new();
         let mut offset: u64 = 0;
 
         loop {
@@ -140,8 +132,7 @@ impl DownloadActions for FileDestDownloadActions {
             }
         }
 
-        let source_chunks: file_store::SourceChunks =
-            Box::pin(futures::stream::iter(chunks));
+        let source_chunks: file_store::SourceChunks = Box::pin(futures::stream::iter(chunks));
         self.dest()
             .write_file_from_chunks(path, source_chunks, executable)
             .await?;
@@ -304,7 +295,10 @@ impl<'a> DownloadRepoToStore<'a> {
     /// This is the core merge algorithm that walks through both the repo entries
     /// and store entries in sorted order, determining what changes need to be made.
     pub async fn download_repo_to_store(mut self) -> Result<()> {
-        let mut repo_entries = self.repo.list_directory_entries(&self.repo_directory_id).await?;
+        let mut repo_entries = self
+            .repo
+            .list_directory_entries(&self.repo_directory_id)
+            .await?;
 
         let mut repo_entry = repo_entries.next().await?;
         let mut store_entry = match self.store_entries {
@@ -369,7 +363,11 @@ impl<'a> DownloadRepoToStore<'a> {
                 let child_path = self.store_path.join(&dir_entry.name);
                 self.actions.mkdir(&child_path).await?;
                 let child = self
-                    .for_child_with_store_entries(&dir_entry.name, dir_entry.directory.clone(), &None)
+                    .for_child_with_store_entries(
+                        &dir_entry.name,
+                        dir_entry.directory.clone(),
+                        &None,
+                    )
                     .await?;
                 Box::pin(child.download_repo_to_store()).await?;
             }
@@ -414,7 +412,11 @@ impl<'a> DownloadRepoToStore<'a> {
                 self.actions.rm(&child_path).await?;
                 self.actions.mkdir(&child_path).await?;
                 let child = self
-                    .for_child_with_store_entries(&dir_entry.name, dir_entry.directory.clone(), &None)
+                    .for_child_with_store_entries(
+                        &dir_entry.name,
+                        dir_entry.directory.clone(),
+                        &None,
+                    )
                     .await?;
                 Box::pin(child.download_repo_to_store()).await?;
             }
@@ -501,8 +503,8 @@ mod tests {
     use crate::backend::MemoryBackend;
     use crate::caches::{CacheError, NoopFileStoreCache};
     use crate::repository::{
-        ChunkFilePart, DirEntry as RepoDirEntry, Directory, DirectoryType,
-        File, FileEntry as RepoFileEntry, FileType, FilePart, RepoObject,
+        ChunkFilePart, DirEntry as RepoDirEntry, Directory, DirectoryType, File,
+        FileEntry as RepoFileEntry, FilePart, FileType, RepoObject,
     };
     use crate::util::ManagedBuffers;
 
@@ -517,16 +519,10 @@ mod tests {
 
     #[async_trait]
     impl RepoCache for TestRepoCache {
-        async fn object_exists(
-            &self,
-            _id: &ObjectId,
-        ) -> std::result::Result<bool, CacheError> {
+        async fn object_exists(&self, _id: &ObjectId) -> std::result::Result<bool, CacheError> {
             Ok(false)
         }
-        async fn set_object_exists(
-            &self,
-            _id: &ObjectId,
-        ) -> std::result::Result<(), CacheError> {
+        async fn set_object_exists(&self, _id: &ObjectId) -> std::result::Result<(), CacheError> {
             Ok(())
         }
         async fn object_fully_stored(
@@ -610,10 +606,11 @@ mod tests {
         }
 
         async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
-            self.actions
-                .lock()
-                .unwrap()
-                .push(format!("set_executable:{}:{}", path.display(), executable));
+            self.actions.lock().unwrap().push(format!(
+                "set_executable:{}:{}",
+                path.display(),
+                executable
+            ));
             Ok(())
         }
     }
@@ -675,15 +672,11 @@ mod tests {
             }
         }
 
-        async fn list_directory(
-            &self,
-            path: &Path,
-        ) -> file_store::Result<Option<DirectoryList>> {
+        async fn list_directory(&self, path: &Path) -> file_store::Result<Option<DirectoryList>> {
             let path_str = path.to_string_lossy().to_string();
             match self.directories.get(&path_str) {
                 Some(entries) => {
-                    let helper =
-                        file_store::ScanIgnoreHelper::new();
+                    let helper = file_store::ScanIgnoreHelper::new();
                     Ok(Some(DirectoryList::new(
                         entries.clone(),
                         helper,
@@ -820,27 +813,26 @@ mod tests {
         let store = TestFileStore::empty();
         let actions = RecordingActions::new();
 
-        let download = DownloadRepoToStore::new(
-            repo,
-            root_dir_id,
-            &store,
-            PathBuf::from("dest"),
-            &actions,
-        )
-        .await
-        .unwrap();
+        let download =
+            DownloadRepoToStore::new(repo, root_dir_id, &store, PathBuf::from("dest"), &actions)
+                .await
+                .unwrap();
 
         download.download_repo_to_store().await.unwrap();
 
         let recorded = actions.get_actions();
         assert!(recorded.contains(&"mkdir:dest".to_string()));
         assert!(recorded.contains(&"mkdir:dest/dir_b".to_string()));
-        assert!(recorded
-            .iter()
-            .any(|a| a.starts_with("download:dest/dir_b/file_c.txt:")));
-        assert!(recorded
-            .iter()
-            .any(|a| a.starts_with("download:dest/file_a.txt:")));
+        assert!(
+            recorded
+                .iter()
+                .any(|a| a.starts_with("download:dest/dir_b/file_c.txt:"))
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|a| a.starts_with("download:dest/file_a.txt:"))
+        );
     }
 
     #[tokio::test]
@@ -904,15 +896,10 @@ mod tests {
         let store = TestFileStore::with_entries(dirs);
         let actions = RecordingActions::new();
 
-        let download = DownloadRepoToStore::new(
-            repo,
-            root_dir_id,
-            &store,
-            PathBuf::from("dest"),
-            &actions,
-        )
-        .await
-        .unwrap();
+        let download =
+            DownloadRepoToStore::new(repo, root_dir_id, &store, PathBuf::from("dest"), &actions)
+                .await
+                .unwrap();
 
         download.download_repo_to_store().await.unwrap();
 
@@ -921,9 +908,11 @@ mod tests {
         assert!(recorded.contains(&"rm:dest/file_b.txt".to_string()));
         // file_a.txt has no fingerprint match so it gets replaced
         assert!(recorded.contains(&"rm:dest/file_a.txt".to_string()));
-        assert!(recorded
-            .iter()
-            .any(|a| a.starts_with("download:dest/file_a.txt:")));
+        assert!(
+            recorded
+                .iter()
+                .any(|a| a.starts_with("download:dest/file_a.txt:"))
+        );
     }
 
     #[tokio::test]
@@ -972,15 +961,10 @@ mod tests {
         let store = TestFileStore::with_entries(dirs);
         let actions = RecordingActions::new();
 
-        let download = DownloadRepoToStore::new(
-            repo,
-            root_dir_id,
-            &store,
-            PathBuf::from("dest"),
-            &actions,
-        )
-        .await
-        .unwrap();
+        let download =
+            DownloadRepoToStore::new(repo, root_dir_id, &store, PathBuf::from("dest"), &actions)
+                .await
+                .unwrap();
 
         download.download_repo_to_store().await.unwrap();
 
@@ -1039,22 +1023,19 @@ mod tests {
         let store = TestFileStore::with_entries(dirs);
         let actions = RecordingActions::new();
 
-        let download = DownloadRepoToStore::new(
-            repo,
-            root_dir_id,
-            &store,
-            PathBuf::from("dest"),
-            &actions,
-        )
-        .await
-        .unwrap();
+        let download =
+            DownloadRepoToStore::new(repo, root_dir_id, &store, PathBuf::from("dest"), &actions)
+                .await
+                .unwrap();
 
         download.download_repo_to_store().await.unwrap();
 
         let recorded = actions.get_actions();
         assert!(recorded.contains(&"rm:dest/item_a".to_string()));
-        assert!(recorded
-            .iter()
-            .any(|a| a.starts_with("download:dest/item_a:") && a.ends_with(":true")));
+        assert!(
+            recorded
+                .iter()
+                .any(|a| a.starts_with("download:dest/item_a:") && a.ends_with(":true"))
+        );
     }
 }

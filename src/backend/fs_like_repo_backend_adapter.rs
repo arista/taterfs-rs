@@ -99,8 +99,9 @@ impl<B: FsLikeRepoBackend> RepoBackend for FsLikeRepoBackendAdapter<B> {
         }
 
         // Write the repository info
-        let data = serde_json::to_vec(info)
-            .map_err(|e| BackendError::Other(format!("failed to serialize repository info: {}", e)))?;
+        let data = serde_json::to_vec(info).map_err(|e| {
+            BackendError::Other(format!("failed to serialize repository info: {}", e))
+        })?;
         self.backend.write_file(REPOSITORY_INFO_PATH, &data).await
     }
 

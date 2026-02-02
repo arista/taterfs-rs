@@ -157,15 +157,9 @@ pub async fn upload_directory(
 
     // Start the recursive upload
     let path_buf = path.map(PathBuf::from).unwrap_or_default();
-    let (result, _remaining) = upload_directory_from_scan_events(
-        store,
-        repo,
-        cache,
-        path_buf,
-        cache_path_id,
-        scan_events,
-    )
-    .await?;
+    let (result, _remaining) =
+        upload_directory_from_scan_events(store, repo, cache, path_buf, cache_path_id, scan_events)
+            .await?;
 
     Ok(result)
 }
@@ -296,8 +290,7 @@ async fn upload_directory_from_scan_events(
                         path.join(&file_entry.name)
                     };
 
-                    let upload_result =
-                        upload_file(store, repo.clone(), &file_path).await?;
+                    let upload_result = upload_file(store, repo.clone(), &file_path).await?;
 
                     let file_hash = upload_result.result.hash.clone();
                     let complete = upload_result.complete;

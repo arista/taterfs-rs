@@ -14,11 +14,11 @@ use crate::caches::{
     DbRepoCaches, FileStoreCaches, FsObjectCacheDb, KeyValueDb, LmdbKeyValueDb, NoopCaches,
     NoopFileStoreCaches, ObjectCacheDb, RepoCaches,
 };
-use crate::config::{read_config, ConfigHelper, ConfigSource};
+use crate::config::{ConfigHelper, ConfigSource, read_config};
 use crate::file_store::{
-    create_file_store, CreateFileStoreContext, CreateFileStoreError, FileStore,
+    CreateFileStoreContext, CreateFileStoreError, FileStore, create_file_store,
 };
-use crate::repo::{create_repo, CreateRepoContext, CreateRepoError, Repo};
+use crate::repo::{CreateRepoContext, CreateRepoError, Repo, create_repo};
 use crate::util::ManagedBuffers;
 
 // =============================================================================
@@ -141,7 +141,10 @@ impl App {
     /// ```
     pub async fn with_app<F, T, E>(ctx: AppContext, f: F) -> std::result::Result<T, E>
     where
-        F: for<'a> FnOnce(&'a App) -> Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>,
+        F: for<'a> FnOnce(
+            &'a App,
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>,
         E: From<AppError>,
     {
         let app = Self::new(ctx)?;

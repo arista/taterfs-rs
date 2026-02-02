@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::app::{App, AppError};
 
-pub use args::{GlobalArgs, RepoArgs, FileStoreArgs, InputSource, OutputSink};
+pub use args::{FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs};
 
 // =============================================================================
 // Error Types

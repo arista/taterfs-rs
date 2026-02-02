@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use tokio::sync::Mutex;
 
 use crate::repository::RepoObject;
@@ -109,7 +109,8 @@ impl CacheDb {
 
         // Reserve a block
         let new_next = current + ID_BLOCK_SIZE;
-        txn.set(KEY_NEXT_ID.to_vec(), new_next.to_string().into_bytes()).await;
+        txn.set(KEY_NEXT_ID.to_vec(), new_next.to_string().into_bytes())
+            .await;
         txn.commit().await?;
 
         // Update local allocator
@@ -342,7 +343,10 @@ impl CacheDb {
         parent: Option<DbId>,
         name_id: DbId,
     ) -> Result<DbId> {
-        if let Some(id) = self.get_path_entry_id(filestore_id, parent, name_id).await? {
+        if let Some(id) = self
+            .get_path_entry_id(filestore_id, parent, name_id)
+            .await?
+        {
             return Ok(id);
         }
 
@@ -579,14 +583,26 @@ mod tests {
 
         let fs_id = db.get_or_create_filestore_id("file:///test").await.unwrap();
 
-        let path1 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap().unwrap();
-        let path2 = db.get_path_id(fs_id, "foo/bar/baz.txt").await.unwrap().unwrap();
+        let path1 = db
+            .get_path_id(fs_id, "foo/bar/baz.txt")
+            .await
+            .unwrap()
+            .unwrap();
+        let path2 = db
+            .get_path_id(fs_id, "foo/bar/baz.txt")
+            .await
+            .unwrap()
+            .unwrap();
 
         // Same path should get same ID
         assert_eq!(path1, path2);
 
         // Different path should get different ID
-        let path3 = db.get_path_id(fs_id, "foo/bar/other.txt").await.unwrap().unwrap();
+        let path3 = db
+            .get_path_id(fs_id, "foo/bar/other.txt")
+            .await
+            .unwrap()
+            .unwrap();
         assert_ne!(path1, path3);
 
         // Empty/root paths should return None
@@ -602,11 +618,12 @@ mod tests {
         let path_id = db.get_path_id(fs_id, "test.txt").await.unwrap().unwrap();
 
         // Initially not set
-        assert!(db
-            .get_fingerprinted_file_info(fs_id, path_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_fingerprinted_file_info(fs_id, path_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Set it
         let info = FingerprintedFileInfo {

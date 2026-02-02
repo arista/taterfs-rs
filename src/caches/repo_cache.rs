@@ -162,7 +162,10 @@ impl DbRepoCache {
 #[async_trait]
 impl RepoCache for DbRepoCache {
     async fn object_exists(&self, id: &ObjectId) -> Result<bool> {
-        Ok(self.cache_db.get_exists(self.repo_id, &id.to_string()).await?)
+        Ok(self
+            .cache_db
+            .get_exists(self.repo_id, &id.to_string())
+            .await?)
     }
 
     async fn set_object_exists(&self, id: &ObjectId) -> Result<()> {

@@ -406,17 +406,15 @@ impl FileSource for MemoryFileStore {
 
         // Determine the starting point
         let (start_children, start_path) = match path {
-            Some(p) if !Self::is_root_path(p) => {
-                match get_node(&source.root, p) {
-                    Some(TreeNode::Directory(children)) => (children, p.to_path_buf()),
-                    Some(TreeNode::File(_)) => {
-                        return Err(Error::NotADirectory(Self::path_to_string(p)));
-                    }
-                    None => {
-                        return Err(Error::NotFound(Self::path_to_string(p)));
-                    }
+            Some(p) if !Self::is_root_path(p) => match get_node(&source.root, p) {
+                Some(TreeNode::Directory(children)) => (children, p.to_path_buf()),
+                Some(TreeNode::File(_)) => {
+                    return Err(Error::NotADirectory(Self::path_to_string(p)));
                 }
-            }
+                None => {
+                    return Err(Error::NotFound(Self::path_to_string(p)));
+                }
+            },
             _ => (&source.root, PathBuf::new()),
         };
 
@@ -428,8 +426,14 @@ impl FileSource for MemoryFileStore {
         helper.initialize_to_path(path, &source).await;
 
         // Scan the tree with ignore filtering
-        scan_tree_with_ignore(start_children, start_path, &mut events, &mut helper, &source)
-            .await;
+        scan_tree_with_ignore(
+            start_children,
+            start_path,
+            &mut events,
+            &mut helper,
+            &source,
+        )
+        .await;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -506,8 +510,8 @@ impl FileSource for MemoryFileStore {
 
     async fn get_file(&self, path: &Path) -> Result<Bytes> {
         let root = self.root.read().await;
-        let node = get_node(&root, path)
-            .ok_or_else(|| Error::NotFound(Self::path_to_string(path)))?;
+        let node =
+            get_node(&root, path).ok_or_else(|| Error::NotFound(Self::path_to_string(path)))?;
 
         match node {
             TreeNode::File(f) => Ok(Bytes::from(f.read_all())),
@@ -643,9 +647,8 @@ impl crate::file_store::FileDest for MemoryFileStore {
             }
         }
 
-        let lister: Arc<dyn DirectoryListSource> = Arc::new(MemoryDirectoryListSource {
-            root: root.clone(),
-        });
+        let lister: Arc<dyn DirectoryListSource> =
+            Arc::new(MemoryDirectoryListSource { root: root.clone() });
 
         drop(root);
 
@@ -1430,7 +1433,11 @@ mod tests {
 
         // List starting from a subdirectory - root ignores should still apply
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
-        let mut list = dest.list_directory(Path::new("src")).await.unwrap().unwrap();
+        let mut list = dest
+            .list_directory(Path::new("src"))
+            .await
+            .unwrap()
+            .unwrap();
 
         let names = collect_names(&mut list).await;
 

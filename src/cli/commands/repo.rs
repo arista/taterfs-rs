@@ -6,10 +6,13 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::app::{upload_directory, upload_file, App};
+use crate::app::{App, upload_directory, upload_file};
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
+use async_trait::async_trait;
+use crate::download::{DownloadActions, DownloadRepoToStore};
+use crate::repository::ObjectId;
 use crate::repo::RepoInitialize;
 use crate::util::ManagedBuffers;
 
@@ -52,6 +55,9 @@ pub enum RepoCommand {
     #[command(name = "upload-directory")]
     UploadDirectory(UploadDirectoryArgs),
 
+    /// Download a directory from the repository to a file store.
+    #[command(name = "download-directory")]
+    DownloadDirectory(DownloadDirectoryArgs),
 }
 
 impl RepoCommand {
@@ -67,6 +73,7 @@ impl RepoCommand {
             RepoCommand::Write(args) => args.run(app, global).await,
             RepoCommand::UploadFile(args) => args.run(app, global).await,
             RepoCommand::UploadDirectory(args) => args.run(app, global).await,
+            RepoCommand::DownloadDirectory(args) => args.run(app, global).await,
         }
     }
 }
@@ -110,7 +117,12 @@ impl InitializeArgs {
 
         if global.json {
             self.output
-                .write(&RepositoryInfoOutput { uuid: info.uuid.clone() }, true)
+                .write(
+                    &RepositoryInfoOutput {
+                        uuid: info.uuid.clone(),
+                    },
+                    true,
+                )
                 .await?;
         } else {
             self.output.write_str(&info.uuid).await?;
@@ -151,9 +163,7 @@ impl GetCurrentRootArgs {
         };
 
         if global.json {
-            self.output
-                .write(&CurrentRootOutput { root }, true)
-                .await?;
+            self.output.write(&CurrentRootOutput { root }, true).await?;
         } else {
             match root {
                 Some(r) => self.output.write_str(&r).await?,
@@ -193,7 +203,12 @@ impl GetRepositoryInfoArgs {
 
         if global.json {
             self.output
-                .write(&RepositoryInfoOutput { uuid: info.uuid.clone() }, true)
+                .write(
+                    &RepositoryInfoOutput {
+                        uuid: info.uuid.clone(),
+                    },
+                    true,
+                )
                 .await?;
         } else {
             self.output.write_str(&info.uuid).await?;
@@ -268,7 +283,9 @@ impl ExistsArgs {
         if global.json {
             self.output.write(&ExistsOutput { exists }, true).await?;
         } else {
-            self.output.write_str(if exists { "true" } else { "false" }).await?;
+            self.output
+                .write_str(if exists { "true" } else { "false" })
+                .await?;
         }
 
         Ok(())
@@ -436,9 +453,7 @@ impl UploadFileArgs {
         let hash = result.result.hash;
 
         if global.json {
-            self.output
-                .write(&UploadFileOutput { hash }, true)
-                .await?;
+            self.output.write(&UploadFileOutput { hash }, true).await?;
         } else {
             self.output.write_str(&hash).await?;
         }
@@ -509,3 +524,153 @@ impl UploadDirectoryArgs {
     }
 }
 
+// =============================================================================
+// Download Directory
+// =============================================================================
+
+/// Arguments for the download-directory command.
+#[derive(Args, Debug)]
+pub struct DownloadDirectoryArgs {
+    #[command(flatten)]
+    pub repo: RepoArgs,
+
+    /// The directory object ID to download.
+    pub directory_object_id: String,
+
+    #[command(flatten)]
+    pub file_store: FileStoreArgs,
+
+    /// Path within the file store to download to.
+    pub path: Option<String>,
+
+    /// Perform a dry run without making changes.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+
+    /// Print actions that would be taken.
+    #[arg(long, short = 'v')]
+    pub verbose: bool,
+
+    #[command(flatten)]
+    pub output: OutputSink,
+}
+
+/// A [`DownloadActions`] implementation that streams actions to a callback
+/// without buffering. Used for dry-run mode.
+struct DryRunDownloadActions {
+    on_action: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl DryRunDownloadActions {
+    fn new(on_action: Box<dyn Fn(&str) + Send + Sync>) -> Self {
+        Self { on_action }
+    }
+}
+
+#[async_trait]
+impl DownloadActions for DryRunDownloadActions {
+    async fn rm(&self, path: &Path) -> crate::download::Result<()> {
+        (self.on_action)(&format!("rm {}", path.display()));
+        Ok(())
+    }
+
+    async fn mkdir(&self, path: &Path) -> crate::download::Result<()> {
+        (self.on_action)(&format!("mkdir {}", path.display()));
+        Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> crate::download::Result<()> {
+        let exec_marker = if executable { "+x" } else { "" };
+        (self.on_action)(&format!(
+            "download {} <- {}{}",
+            path.display(),
+            file_id,
+            exec_marker
+        ));
+        Ok(())
+    }
+
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+    ) -> crate::download::Result<()> {
+        let mode = if executable { "+x" } else { "-x" };
+        (self.on_action)(&format!("chmod {} {}", mode, path.display()));
+        Ok(())
+    }
+}
+
+impl DownloadDirectoryArgs {
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        if !self.dry_run {
+            return Err(CliError::Other(
+                "only --dry-run is currently supported".to_string(),
+            ));
+        }
+
+        let repo_ctx = self.repo.to_create_repo_context(false);
+        let repo = app.create_repo(repo_ctx).await?;
+
+        let fs_ctx = self.file_store.to_create_file_store_context();
+        let file_store = app.create_file_store(fs_ctx).await?;
+
+        let store_path = self.path.as_deref().map(PathBuf::from).unwrap_or_default();
+
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        let json = global.json;
+        let verbose = self.verbose;
+
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = match &self.output.file {
+            Some(path) => {
+                let file = std::fs::File::create(path)
+                    .map_err(|e| CliError::Other(format!("failed to create output file: {e}")))?;
+                Arc::new(Mutex::new(Box::new(std::io::BufWriter::new(file))))
+            }
+            None => Arc::new(Mutex::new(Box::new(std::io::stdout()))),
+        };
+
+        let on_action: Box<dyn Fn(&str) + Send + Sync> = if json {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                if let Ok(encoded) = serde_json::to_string(s) {
+                    let mut w = w.lock().unwrap();
+                    let _ = writeln!(w, "{encoded}");
+                }
+            })
+        } else if verbose {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                let mut w = w.lock().unwrap();
+                let _ = writeln!(w, "{s}");
+            })
+        } else {
+            Box::new(|_: &str| {})
+        };
+
+        let actions = DryRunDownloadActions::new(on_action);
+        let download = DownloadRepoToStore::new(
+            repo,
+            self.directory_object_id.clone(),
+            file_store.as_ref(),
+            store_path,
+            &actions,
+        )
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
+
+        download
+            .download_repo_to_store()
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
+
+        Ok(())
+    }
+}

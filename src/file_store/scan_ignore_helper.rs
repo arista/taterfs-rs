@@ -42,7 +42,10 @@ pub enum ScanDirectoryEvent {
 pub trait ScanFileSource: Send + Sync {
     /// Retrieve an entire file's contents.
     /// Returns an error if the file does not exist or cannot be read.
-    async fn get_file(&self, path: &Path) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+    async fn get_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Default global ignore patterns if none are configured.

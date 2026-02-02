@@ -92,19 +92,20 @@ tfs repo upload-directory {repo spec} {filestore spec} [{path}]
 Calls upload_directory() from the filestore to the repo and prints the resulting directory hash id to STDOUT, or the given output file
 
 ```
-tfs repo download-actions {repo spec} {directory object_id} {filestore spec} [{path}]
+tfs repo download-directory {repo spec} {directory object_id} {filestore spec} [{path}]
+  [--dry-run / -n]
+  [--verbose / -v]
   [--output-file / -o {output file}]
 ```
-Calls download_actions() and prints out the results (or writes them to --output-file).  The printout looks like this:
+Downloads the given directory from the given repo to the given path in the given filestore.  If --dry-run is specified, then the the system will still go through all the steps of seeing what actions would be taken, but no actual changes are made to the filestore.  If verbose is specified, then those actions will be printed as follows:
 
 ```
-mkdir(name)
-rmdir(name)
-rm(name)
-enter(name) - and indent 4 spaces
-exit - undo indent
-download(name, object_id)
+mkdir {path}
+rm {path}
+download {path} <- {object_id}{if executable then add "+x"}
 ```
+NOTE - currently it is an error to NOT specify --dry-run (the actual downoad isn't supported yet)
+
 
 ### tfs file-store
 

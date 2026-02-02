@@ -11,7 +11,7 @@ use lru::LruCache;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::repository::{to_canonical_json, RepoObject};
+use crate::repository::{RepoObject, to_canonical_json};
 
 // =============================================================================
 // Error Types

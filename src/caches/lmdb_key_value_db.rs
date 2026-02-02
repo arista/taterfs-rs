@@ -366,10 +366,7 @@ impl LmdbKeyValueEntries {
                     }
                     Some(last) => {
                         let iter = db
-                            .range(
-                                &rtxn,
-                                &(Bound::Excluded(last.as_slice()), Bound::Unbounded),
-                            )
+                            .range(&rtxn, &(Bound::Excluded(last.as_slice()), Bound::Unbounded))
                             .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
 
                         for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {
@@ -397,10 +394,7 @@ impl LmdbKeyValueEntries {
                     Some(last) => {
                         // Subsequent batches: use range starting after last key
                         let iter = db
-                            .range(
-                                &rtxn,
-                                &(Bound::Excluded(last.as_slice()), Bound::Unbounded),
-                            )
+                            .range(&rtxn, &(Bound::Excluded(last.as_slice()), Bound::Unbounded))
                             .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
 
                         for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {

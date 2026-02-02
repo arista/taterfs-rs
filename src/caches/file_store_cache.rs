@@ -282,11 +282,13 @@ mod tests {
         assert_eq!(path_id, path_id2);
 
         // Initially not cached
-        assert!(cache
-            .get_fingerprinted_file_info(path_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            cache
+                .get_fingerprinted_file_info(path_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Set info
         let info = FingerprintedFileInfo {
@@ -364,7 +366,10 @@ mod tests {
         // Create path entries incrementally
         let foo_id = cache.get_path_entry_id(None, "foo").await.unwrap();
         let bar_id = cache.get_path_entry_id(Some(foo_id), "bar").await.unwrap();
-        let baz_id = cache.get_path_entry_id(Some(bar_id), "baz.txt").await.unwrap();
+        let baz_id = cache
+            .get_path_entry_id(Some(bar_id), "baz.txt")
+            .await
+            .unwrap();
 
         // Should get same IDs on repeated calls
         let foo_id2 = cache.get_path_entry_id(None, "foo").await.unwrap();

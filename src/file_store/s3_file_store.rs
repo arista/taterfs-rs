@@ -4,7 +4,9 @@
 //! treating object keys as paths with "/" as the directory separator.
 
 use super::chunk_sizes::next_chunk_size;
-use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanFileSource, ScanIgnoreHelper};
+use super::scan_ignore_helper::{
+    ScanDirEntry, ScanDirectoryEvent, ScanFileSource, ScanIgnoreHelper,
+};
 use crate::file_store::{
     DirEntry, DirectoryEntry, Error, FileEntry, FileSource, Result, ScanEvent, ScanEvents,
     SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
@@ -691,10 +693,14 @@ impl ScanFileSource for ScanSourceAdapter {
             .key(&key)
             .send()
             .await
-            .map_err(|e| Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
+            .map_err(|e| {
+                Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>
+            })?;
 
         let body = response.body.collect().await;
-        let aggregated = body.map_err(|e| Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
+        let aggregated = body.map_err(|e| {
+            Box::new(Error::Other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>
+        })?;
         let bytes = aggregated.into_bytes();
 
         Ok(Bytes::from(bytes.to_vec()))

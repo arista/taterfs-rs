@@ -8,9 +8,9 @@ mod create_repo;
 mod repo;
 
 pub use create_repo::{
-    create_repo, BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec,
+    BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec, create_repo,
 };
 pub use repo::{
-    DirectoryEntry, DirectoryEntryList, DirectoryScan, FileChunkList, FlowControl, Repo,
-    RepoError, RepoInitialize, RepoScanEvent, Result,
+    DirectoryEntry, DirectoryEntryList, DirectoryScan, FileChunkList, FlowControl, Repo, RepoError,
+    RepoInitialize, RepoScanEvent, Result,
 };

@@ -33,12 +33,12 @@ mod object_cache_db;
 mod repo_cache;
 
 // Key-value database layer
+pub use caching_key_value_db::{CachingConfig, CachingKeyValueDb};
 pub use key_value_db::{
     KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries,
     KeyValueEntry, WriteOp,
 };
 pub use lmdb_key_value_db::LmdbKeyValueDb;
-pub use caching_key_value_db::{CachingConfig, CachingKeyValueDb};
 
 // Object cache database layer
 pub use object_cache_db::{
@@ -57,6 +57,5 @@ pub use repo_cache::{
 // File store cache layer
 pub use file_store_cache::{
     DbFileStoreCache, DbFileStoreCaches, FileStoreCache, FileStoreCacheError, FileStoreCaches,
-    FingerprintedFileInfo, NoopFileStoreCache, NoopFileStoreCaches,
-    Result as FileStoreCacheResult,
+    FingerprintedFileInfo, NoopFileStoreCache, NoopFileStoreCaches, Result as FileStoreCacheResult,
 };

@@ -20,8 +20,8 @@ use crate::repo::{Repo, RepoError};
 use crate::repository::{
     Branch, BranchListEntry, Branches, BranchesEntry, BranchesType, ChunkFilePart, DirEntry,
     Directory, DirectoryPart, DirectoryType, File, FileEntry, FileFilePart, FilePart, FileType,
-    ObjectId, PartialDirectory, RepoObject, MAX_BRANCH_LIST_ENTRIES, MAX_DIRECTORY_ENTRIES,
-    MAX_FILE_PARTS,
+    MAX_BRANCH_LIST_ENTRIES, MAX_DIRECTORY_ENTRIES, MAX_FILE_PARTS, ObjectId, PartialDirectory,
+    RepoObject,
 };
 use crate::util::{Complete, Completes};
 
@@ -557,7 +557,9 @@ impl<C: ListBuilderConfig> ListBuilder<C> {
         let hash_for_stored = hash.clone();
         tokio::spawn(async move {
             if completes_for_stored.complete().await.is_ok() {
-                let _ = cache_for_stored.set_object_fully_stored(&hash_for_stored).await;
+                let _ = cache_for_stored
+                    .set_object_fully_stored(&hash_for_stored)
+                    .await;
             }
         });
 

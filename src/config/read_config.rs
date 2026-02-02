@@ -360,20 +360,18 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
     }
     config.cache.no_cache = parse_bool(ini, "cache", "no-cache", config.cache.no_cache)?;
     if let Some(val) = ini.get("cache", "pending_writes_flush_period_ms") {
-        config.cache.pending_writes_flush_period_ms = val.parse().map_err(|e| {
-            ConfigError::InvalidInteger {
+        config.cache.pending_writes_flush_period_ms =
+            val.parse().map_err(|e| ConfigError::InvalidInteger {
                 value: val.clone(),
                 source: e,
-            }
-        })?;
+            })?;
     }
     if let Some(val) = ini.get("cache", "pending_writes_max_count") {
-        config.cache.pending_writes_max_count = val.parse().map_err(|e| {
-            ConfigError::InvalidInteger {
+        config.cache.pending_writes_max_count =
+            val.parse().map_err(|e| ConfigError::InvalidInteger {
                 value: val.clone(),
                 source: e,
-            }
-        })?;
+            })?;
     }
     if let Some(val) = ini.get("cache", "pending_writes_max_size") {
         config.cache.pending_writes_max_size = ByteSize::parse(&val)?;

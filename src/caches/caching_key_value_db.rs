@@ -405,10 +405,7 @@ impl KeyValueDbTransaction for CachingTransaction {
     }
 
     async fn del(&mut self, key: Vec<u8>) {
-        self.local_pending
-            .lock()
-            .await
-            .push(WriteOp::Del { key });
+        self.local_pending.lock().await.push(WriteOp::Del { key });
     }
 
     async fn commit(self: Box<Self>) -> Result<()> {
@@ -439,8 +436,7 @@ struct CachingWrites {
 #[async_trait]
 impl KeyValueDbWrites for CachingWrites {
     async fn set(&mut self, key: Vec<u8>, val: Vec<u8>) {
-        self.local_pending
-            .push(WriteOp::Set { key, value: val });
+        self.local_pending.push(WriteOp::Set { key, value: val });
     }
 
     async fn del(&mut self, key: Vec<u8>) {
@@ -738,7 +734,9 @@ mod tests {
         // Write to underlying LMDB
         {
             let mut writes = lmdb.write().await.unwrap();
-            writes.set(b"prefix/a".to_vec(), b"old_value".to_vec()).await;
+            writes
+                .set(b"prefix/a".to_vec(), b"old_value".to_vec())
+                .await;
             writes.flush().await.unwrap();
         }
 
@@ -746,7 +744,9 @@ mod tests {
 
         // Override with pending write
         let mut writes = db.write().await.unwrap();
-        writes.set(b"prefix/a".to_vec(), b"new_value".to_vec()).await;
+        writes
+            .set(b"prefix/a".to_vec(), b"new_value".to_vec())
+            .await;
         writes.flush().await.unwrap();
 
         // list_entries should return the pending (new) value

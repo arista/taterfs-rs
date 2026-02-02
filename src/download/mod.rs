@@ -8,5 +8,6 @@
 mod download;
 
 pub use download::{
-    DownloadActions, DownloadError, DownloadRepoToStore, FileDestDownloadActions, Result,
+    DownloadActions, DownloadError, DownloadRepoToStore, DryRunDownloadActions,
+    FileDestDownloadActions, Result,
 };

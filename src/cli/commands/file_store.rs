@@ -151,7 +151,10 @@ impl SourceChunksArgs {
 
         while let Some(chunk) = contents.next().await {
             let chunk = chunk.map_err(|e| CliError::Other(e.to_string()))?;
-            output.push_str(&format!("{}+{}, hash: {}\n", chunk.offset, chunk.size, chunk.hash));
+            output.push_str(&format!(
+                "{}+{}, hash: {}\n",
+                chunk.offset, chunk.size, chunk.hash
+            ));
             total_size += chunk.size;
         }
 

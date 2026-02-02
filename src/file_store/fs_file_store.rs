@@ -51,9 +51,7 @@ impl FsFileStore {
     /// even if it appears to be absolute (starts with `/`).
     fn to_absolute(&self, path: &Path) -> PathBuf {
         // Strip leading "/" or root component to ensure path is treated as relative
-        let relative = path
-            .strip_prefix("/")
-            .unwrap_or(path);
+        let relative = path.strip_prefix("/").unwrap_or(path);
         self.root.join(relative)
     }
 
@@ -164,11 +162,15 @@ impl FileSource for FsFileStore {
         match tokio::fs::metadata(&start_path).await {
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => {
-                let path_str = path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                let path_str = path
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 return Err(Error::NotADirectory(path_str));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let path_str = path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                let path_str = path
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 return Err(Error::NotFound(path_str));
             }
             Err(e) => return Err(e.into()),
@@ -474,15 +476,8 @@ impl crate::file_store::FileDest for FsFileStore {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let temp_name = format!(
-            ".{}.{}.tmp",
-            file_name,
-            std::process::id(),
-        );
-        let temp_path = absolute
-            .parent()
-            .unwrap_or(&self.root)
-            .join(&temp_name);
+        let temp_name = format!(".{}.{}.tmp", file_name, std::process::id(),);
+        let temp_path = absolute.parent().unwrap_or(&self.root).join(&temp_name);
 
         let mut file: fs::File = fs::File::create(&temp_path).await?;
 
@@ -552,9 +547,7 @@ impl crate::file_store::FileDest for FsFileStore {
         // Check if a file exists at the path
         match fs::metadata(&absolute).await {
             Ok(m) if m.is_file() => {
-                return Err(Error::NotADirectory(
-                    path.to_string_lossy().into_owned(),
-                ));
+                return Err(Error::NotADirectory(path.to_string_lossy().into_owned()));
             }
             Ok(_) => return Ok(()), // Already a directory
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1026,19 +1019,13 @@ mod tests {
             .unwrap();
 
         // Create a symlink to the file
-        std::os::unix::fs::symlink(
-            temp.path().join("real.txt"),
-            temp.path().join("link.txt"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(temp.path().join("real.txt"), temp.path().join("link.txt"))
+            .unwrap();
 
         // Create a directory and a symlink to it
         std::fs::create_dir(temp.path().join("realdir")).unwrap();
-        std::os::unix::fs::symlink(
-            temp.path().join("realdir"),
-            temp.path().join("linkdir"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(temp.path().join("realdir"), temp.path().join("linkdir"))
+            .unwrap();
 
         let store = FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache());
 
@@ -1133,7 +1120,11 @@ mod tests {
 
         let metadata = std::fs::metadata(temp.path().join("script.sh")).unwrap();
         let mode = metadata.permissions().mode();
-        assert!(mode & 0o111 != 0, "Expected executable bit set, got mode {:o}", mode);
+        assert!(
+            mode & 0o111 != 0,
+            "Expected executable bit set, got mode {:o}",
+            mode
+        );
     }
 
     #[cfg(unix)]
@@ -1164,7 +1155,11 @@ mod tests {
 
         let metadata = std::fs::metadata(&script_path).unwrap();
         let mode = metadata.permissions().mode();
-        assert!(mode & 0o111 == 0, "Expected no execute bits, got mode {:o}", mode);
+        assert!(
+            mode & 0o111 == 0,
+            "Expected no execute bits, got mode {:o}",
+            mode
+        );
     }
 
     #[tokio::test]
@@ -1263,7 +1258,11 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert!(mode & 0o111 != 0, "Expected executable, got mode {:o}", mode);
+        assert!(
+            mode & 0o111 != 0,
+            "Expected executable, got mode {:o}",
+            mode
+        );
 
         // Clear executable
         dest.set_executable(Path::new("script.sh"), false)
@@ -1273,7 +1272,11 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert!(mode & 0o111 == 0, "Expected not executable, got mode {:o}", mode);
+        assert!(
+            mode & 0o111 == 0,
+            "Expected not executable, got mode {:o}",
+            mode
+        );
     }
 
     #[tokio::test]

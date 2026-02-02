@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{App, upload_directory, upload_file};
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
-use crate::download::{DownloadRepoToStore, DryRunDownloadActions};
+use async_trait::async_trait;
+use crate::download::{DownloadActions, DownloadRepoToStore};
+use crate::repository::ObjectId;
 use crate::repo::RepoInitialize;
 use crate::util::ManagedBuffers;
 
@@ -553,9 +555,55 @@ pub struct DownloadDirectoryArgs {
     pub output: OutputSink,
 }
 
-#[derive(Serialize)]
-struct DownloadDirectoryOutput {
-    actions: Vec<String>,
+/// A [`DownloadActions`] implementation that streams actions to a callback
+/// without buffering. Used for dry-run mode.
+struct DryRunDownloadActions {
+    on_action: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl DryRunDownloadActions {
+    fn new(on_action: Box<dyn Fn(&str) + Send + Sync>) -> Self {
+        Self { on_action }
+    }
+}
+
+#[async_trait]
+impl DownloadActions for DryRunDownloadActions {
+    async fn rm(&self, path: &Path) -> crate::download::Result<()> {
+        (self.on_action)(&format!("rm {}", path.display()));
+        Ok(())
+    }
+
+    async fn mkdir(&self, path: &Path) -> crate::download::Result<()> {
+        (self.on_action)(&format!("mkdir {}", path.display()));
+        Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> crate::download::Result<()> {
+        let exec_marker = if executable { "+x" } else { "" };
+        (self.on_action)(&format!(
+            "download {} <- {}{}",
+            path.display(),
+            file_id,
+            exec_marker
+        ));
+        Ok(())
+    }
+
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+    ) -> crate::download::Result<()> {
+        let mode = if executable { "+x" } else { "-x" };
+        (self.on_action)(&format!("chmod {} {}", mode, path.display()));
+        Ok(())
+    }
 }
 
 impl DownloadDirectoryArgs {
@@ -574,7 +622,40 @@ impl DownloadDirectoryArgs {
 
         let store_path = self.path.as_deref().map(PathBuf::from).unwrap_or_default();
 
-        let actions = DryRunDownloadActions::new();
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        let json = global.json;
+        let verbose = self.verbose;
+
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = match &self.output.file {
+            Some(path) => {
+                let file = std::fs::File::create(path)
+                    .map_err(|e| CliError::Other(format!("failed to create output file: {e}")))?;
+                Arc::new(Mutex::new(Box::new(std::io::BufWriter::new(file))))
+            }
+            None => Arc::new(Mutex::new(Box::new(std::io::stdout()))),
+        };
+
+        let on_action: Box<dyn Fn(&str) + Send + Sync> = if json {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                if let Ok(encoded) = serde_json::to_string(s) {
+                    let mut w = w.lock().unwrap();
+                    let _ = writeln!(w, "{encoded}");
+                }
+            })
+        } else if verbose {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                let mut w = w.lock().unwrap();
+                let _ = writeln!(w, "{s}");
+            })
+        } else {
+            Box::new(|_: &str| {})
+        };
+
+        let actions = DryRunDownloadActions::new(on_action);
         let download = DownloadRepoToStore::new(
             repo,
             self.directory_object_id.clone(),
@@ -589,17 +670,6 @@ impl DownloadDirectoryArgs {
             .download_repo_to_store()
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
-
-        let recorded = actions.get_actions();
-
-        if global.json {
-            self.output
-                .write(&DownloadDirectoryOutput { actions: recorded }, true)
-                .await?;
-        } else if self.verbose {
-            let text = recorded.join("\n");
-            self.output.write_str(&text).await?;
-        }
 
         Ok(())
     }

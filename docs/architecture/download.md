@@ -1,5 +1,11 @@
 # Download
 
+Downloading files and directories is a core function of the system.  Because downloading is a potentially destructive action on a filesystem, the system tries to minimize the sensitive time during which destructive operations are taking place.  It does this by "staging" files from a repo as they are being downloaded, then moving them into position as quickly as possible once all files are available.
+
+To do this, the download system has a concept of "Download Actions", which are run multiple times to support the "staging" concept.
+
+## Download Actions
+
 A repo Directory is downloaded recursively from a [repository](./repository_interface.md) to a location in a [file store](./file_stores.md), such that the resulting file store location has the same contents as the repo directory.  There may already be files and directories in that file store, so as the download proceeds, files and directories may need to be removed or replaced.
 
 The download process is built on the download_repo_to_store function, which handles the logic of determining what modifications need to be made to the store.  The actions are expressed as calls to the DownloadAction interface:
@@ -154,3 +160,30 @@ merge_entries(path, repo_entry, store_entry, file_dest) {
 }
 
 ```
+
+## Staged Download
+
+A DownloadStage is a temporary area of a FileStore that allows files to be downloaded separately witout modifying the files currently in the FileStore.  Once files have been fully downloaded, they can be moved into the FileStore in quick succession.  The stage, therefore, minimizes the amount of time that the directories and files in the FileStore are being disrupted.
+
+The interfaces involved:
+
+```
+DownloadStage {
+  async add_staged_file() -> StagedFile
+  async cleanup()
+}
+
+StagedFile {
+  async write_chunk(chunk: buffer)
+  async write_chunk(chunk: buffer)
+  async move_to_dest(dest: Path)
+}
+```
+
+The add_staged_file function creates a new StagedFile which can then be filled with content, and eventually moved to the given destination
+
+
+## Unstaged Download
+
+When downloading without the use of a stage, changes are performed in a single pass of Download Actions.
+

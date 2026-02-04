@@ -163,24 +163,7 @@ merge_entries(path, repo_entry, store_entry, file_dest) {
 
 ## Staged Download
 
-A DownloadStage is a temporary area of a FileStore that allows files to be downloaded separately witout modifying the files currently in the FileStore.  Once files have been fully downloaded, they can be moved into the FileStore in quick succession.  The stage, therefore, minimizes the amount of time that the directories and files in the FileStore are being disrupted.
-
-The interfaces involved:
-
-```
-DownloadStage {
-  async add_staged_file() -> StagedFile
-  async cleanup()
-}
-
-StagedFile {
-  async write_chunk(chunk: buffer)
-  async write_chunk(chunk: buffer)
-  async move_to_dest(dest: Path)
-}
-```
-
-The add_staged_file function creates a new StagedFile which can then be filled with content, and eventually moved to the given destination
+If a FileDest offers a [FileDestStage](./file_stores.md), then the download will proceed in two phases.  In the first phase, the download will run through all of the DownloadActions and store them in memory, but not actually act on them.  It will, however, create a list of all the files that it will need to download, indexed by object id (noting that multiple files with the same object id may need to be downloaded).
 
 
 ## Unstaged Download

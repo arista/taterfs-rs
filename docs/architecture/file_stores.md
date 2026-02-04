@@ -117,6 +117,8 @@ interface FileDest {
   async mkdir(path: Path)
   // Change the executable bit of a file, error if the path does not point to a file
   async set_executable(path: Path, executable: bool)
+  
+  async create_stage() -> Option<FileDestStage>
 }
 
 interface DirectoryList {
@@ -129,6 +131,25 @@ interface DirectoryList {
 A FileDest implementation should do its best to avoid leaving a partially-written file, even if it's interrupted during a write_file_from_chunks operation.  Some implementations will, for example, build the file in a temporary location, then move the file to its final location atomically.
 
 The list_directory() function (and its recursive DirectoryList.list_directory function) should respect ignore directives the same way that FileSource.scan does.
+
+### FileDestStage
+
+Some FileDests will implement a "stage" for downloading files.  This is a mechanism for downloading multiple files into temporary locations without modifying any existing directories or files in the FileStore.  Once all files have been downloaded into the stage, they can be moved into their final locations in quick succession, thereby minimizing the time that the FileStore is being disrupted.
+
+```
+FileDestStage {
+  async add_staged_file(id: ObjectId) -> StagedFile
+  async cleanup()
+}
+
+StagedFile {
+  async write_chunk(chunk: buffer)
+  async close()
+  async move_to_dest(dest: Path)
+}
+```
+
+The add_staged_file function creates a new StagedFile which can be filled with content, and eventually moved to the given destination.  The cleanup function removes any remaining temporary files or directories in the stage.
 
 ## Implementation Helpers
 
@@ -177,7 +198,7 @@ Note that the ignore rules only come into play as part of the FileSource's scan(
 
 ### MemoryFileStore
 
-This implementation stores an in-memory representation of a filesystem and exposes both FileSource and FileDest to it.  This will most likely be used for testing.
+This implementation stores an in-memory representation of a filesystem and exposes both FileSource and FileDest to it.  Its FileDest does not provide a FileDestStage.  This will most likely be used for testing.
 
 The implementation provides a builder API for defining the file hierarchy in memory:
 
@@ -226,6 +247,13 @@ get_source_chunk_contents() should not attempt any concurrency, but should just 
 ```
 
 TODO: The FileDest.write_file_from_chunks() implementation is more complicated, as it involves downloading multiple chunks simultaneously into a temporary location (possibly with some flow control), assembling those chunks into the final file, then moving that file into its final location.
+
+The FileDest implementation should offer a FileDestStage implementation:
+
+* Each create_stage() should create a directory "{file store root}/.tfs/tmp/stage-{temp filename}/"
+* Each add_staged_file should create a file within that directory "{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}-{temp filename}"
+* The close() function should close the file and disallow any more writing
+* The move_to_dest() should atomically move the file to its final destination, error if close() has not been called
 
 ### S3FileStore
 

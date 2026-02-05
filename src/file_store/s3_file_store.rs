@@ -302,45 +302,28 @@ impl SourceChunkList for S3SourceChunkList {
 }
 
 // =============================================================================
-// Chunk Content Implementation (with deadlock-safe ordering)
+// Chunk Content Implementation
 // =============================================================================
 
-/// Default concurrency limit for parallel downloads.
-const DEFAULT_CONCURRENCY: usize = 10;
-
-/// Downloaded chunk data (before being wrapped in a ManagedBuffer).
-struct DownloadedChunk {
-    offset: u64,
-    size: u64,
-    data: Vec<u8>,
-    hash: String,
-}
-
-/// SourceChunkWithContentList for S3 with concurrent downloads and deadlock prevention.
+/// SourceChunkWithContentList for S3.
 ///
-/// This implementation:
-/// 1. Chunks are computed iteratively as needed
-/// 2. Downloads happen in the background WITHOUT acquiring ManagedBuffers
-/// 3. When next() is called, we acquire a ManagedBuffer IN ORDER
-/// 4. Then wait for the download to complete and wrap in the buffer
+/// Each call to next():
+/// 1. Computes the next chunk
+/// 2. Acquires buffer capacity (applies backpressure)
+/// 3. Spawns a download task that applies flow control and downloads
+/// 4. Returns immediately with a SourceChunkWithContent containing the future
 ///
-/// This ordering prevents deadlock because buffers are always acquired
-/// in chunk order during next() calls, not in the download tasks.
+/// The caller controls concurrency by how many next() calls they make before
+/// awaiting content(). Flow control (rate limiting, concurrent request limits)
+/// naturally limits actual S3 request concurrency.
 struct S3SourceChunkWithContentList {
     client: Client,
     bucket: String,
     key: String,
     file_size: u64,
     current_offset: u64,
-    /// Index of the current chunk being returned by next()
-    current_index: usize,
-    /// How many chunks we've computed and potentially spawned downloads for
-    computed_chunks: Vec<SourceChunk>,
     managed_buffers: ManagedBuffers,
     flow_control: FlowControl,
-    /// Background download tasks that have been spawned.
-    /// Downloads happen WITHOUT buffer acquisition to avoid deadlock.
-    pending_downloads: Vec<Option<tokio::task::JoinHandle<Result<DownloadedChunk>>>>,
 }
 
 impl S3SourceChunkWithContentList {
@@ -358,117 +341,8 @@ impl S3SourceChunkWithContentList {
             key,
             file_size,
             current_offset: 0,
-            current_index: 0,
-            computed_chunks: Vec::new(),
             managed_buffers,
             flow_control,
-            pending_downloads: Vec::new(),
-        }
-    }
-
-    /// Compute the next chunk if there is one, returning its index.
-    fn compute_next_chunk(&mut self) -> Option<usize> {
-        if self.current_offset >= self.file_size {
-            return None;
-        }
-        let remaining = self.file_size - self.current_offset;
-        let size = next_chunk_size(remaining);
-        let chunk = SourceChunk {
-            offset: self.current_offset,
-            size,
-        };
-        self.current_offset += size;
-        let index = self.computed_chunks.len();
-        self.computed_chunks.push(chunk);
-        self.pending_downloads.push(None);
-        Some(index)
-    }
-
-    /// Ensure we have computed chunks up to and including the given index.
-    fn ensure_chunks_computed(&mut self, up_to: usize) {
-        while self.computed_chunks.len() <= up_to {
-            if self.compute_next_chunk().is_none() {
-                break;
-            }
-        }
-    }
-
-    /// Spawn background downloads for chunks that haven't been started yet,
-    /// up to the concurrency limit ahead of the current index.
-    /// IMPORTANT: Downloads do NOT acquire ManagedBuffers - that happens in next().
-    fn spawn_pending_downloads(&mut self) {
-        let target_end = self.current_index + DEFAULT_CONCURRENCY;
-
-        // Ensure we have computed enough chunks
-        self.ensure_chunks_computed(target_end.saturating_sub(1));
-
-        let end = target_end.min(self.computed_chunks.len());
-
-        for i in self.current_index..end {
-            if self.pending_downloads[i].is_none() {
-                // Spawn a download task for this chunk
-                let client = self.client.clone();
-                let bucket = self.bucket.clone();
-                let key = self.key.clone();
-                let chunk = self.computed_chunks[i].clone();
-                let flow_control = self.flow_control.clone();
-
-                let handle = tokio::spawn(async move {
-                    // Apply flow control (but NOT buffer acquisition!)
-                    let _rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let _concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-                    let _read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
-                        Some(limiter.use_capacity(chunk.size).await)
-                    } else {
-                        None
-                    };
-                    let _total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
-                        Some(limiter.use_capacity(chunk.size).await)
-                    } else {
-                        None
-                    };
-
-                    // Download the chunk (without buffer acquisition)
-                    let range = format!("bytes={}-{}", chunk.offset, chunk.offset + chunk.size - 1);
-
-                    let response = client
-                        .get_object()
-                        .bucket(&bucket)
-                        .key(&key)
-                        .range(range)
-                        .send()
-                        .await
-                        .map_err(|e| Error::Other(e.to_string()))?;
-
-                    let body = response.body.collect().await;
-                    let aggregated = body.map_err(|e| Error::Other(e.to_string()))?;
-                    let bytes = aggregated.into_bytes();
-
-                    let hash = {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&bytes);
-                        format!("{:x}", hasher.finalize())
-                    };
-
-                    Ok(DownloadedChunk {
-                        offset: chunk.offset,
-                        size: chunk.size,
-                        data: bytes.to_vec(),
-                        hash,
-                    })
-                });
-
-                self.pending_downloads[i] = Some(handle);
-            }
         }
     }
 }
@@ -476,60 +350,87 @@ impl S3SourceChunkWithContentList {
 #[async_trait]
 impl SourceChunkWithContentList for S3SourceChunkWithContentList {
     async fn next(&mut self) -> Option<Result<SourceChunkWithContent>> {
-        // First, spawn any pending downloads up to concurrency limit
-        // (downloads do NOT acquire buffers)
-        self.spawn_pending_downloads();
-
-        // Check if we have a chunk at the current index
-        if self.current_index >= self.computed_chunks.len() && self.current_offset >= self.file_size
-        {
+        if self.current_offset >= self.file_size {
             return None;
         }
 
-        // Ensure we have computed the current chunk
-        self.ensure_chunks_computed(self.current_index);
+        // Compute this chunk
+        let remaining = self.file_size - self.current_offset;
+        let size = next_chunk_size(remaining);
+        let offset = self.current_offset;
+        self.current_offset += size;
 
-        if self.current_index >= self.computed_chunks.len() {
-            return None;
-        }
+        // Acquire buffer capacity before spawning the download.
+        // This applies backpressure if buffer capacity is exhausted.
+        let acquired = self.managed_buffers.acquire(size).await;
 
-        let chunk_index = self.current_index;
-        let chunk = self.computed_chunks[chunk_index].clone();
-        self.current_index += 1;
+        // Clone what we need for the spawned task
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let key = self.key.clone();
+        let flow_control = self.flow_control.clone();
+        let managed_buffers = self.managed_buffers.clone();
 
-        // KEY DEADLOCK FIX: Acquire the ManagedBuffer HERE, in order.
-        // This is what prevents the deadlock - buffers are acquired
-        // strictly in chunk order during next() calls, not in download tasks.
+        // Spawn the download task
+        let handle = tokio::spawn(async move {
+            // Apply flow control
+            let _rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                Some(limiter.use_capacity(1).await)
+            } else {
+                None
+            };
+            let _concurrent = if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                Some(limiter.use_capacity(1).await)
+            } else {
+                None
+            };
+            let _read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
+                Some(limiter.use_capacity(size).await)
+            } else {
+                None
+            };
+            let _total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+                Some(limiter.use_capacity(size).await)
+            } else {
+                None
+            };
 
-        // Wait for this chunk's download to complete
-        let downloaded = if let Some(handle) = self.pending_downloads[chunk_index].take() {
-            match handle.await {
-                Ok(Ok(downloaded)) => downloaded,
-                Ok(Err(e)) => return Some(Err(e)),
-                Err(e) => return Some(Err(Error::Other(format!("Download task failed: {}", e)))),
-            }
-        } else {
-            // Download wasn't started - this shouldn't happen
-            return Some(Err(Error::Other("Download not started".to_string())));
-        };
+            // Download the chunk
+            let range = format!("bytes={}-{}", offset, offset + size - 1);
 
-        // NOW acquire the buffer (in order!) and wrap the downloaded data
-        let managed_buffer = self
-            .managed_buffers
-            .get_buffer_with_data(downloaded.data)
-            .await;
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .range(range)
+                .send()
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
 
-        let content = SourceChunkContent {
-            offset: downloaded.offset,
-            size: downloaded.size,
-            bytes: Arc::new(managed_buffer),
-            hash: downloaded.hash,
-        };
+            let body = response.body.collect().await;
+            let aggregated = body.map_err(|e| Error::Other(e.to_string()))?;
+            let bytes = aggregated.into_bytes();
 
-        Some(Ok(SourceChunkWithContent::new_immediate(
-            chunk.offset,
-            chunk.size,
-            content,
+            // Compute hash
+            let hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                format!("{:x}", hasher.finalize())
+            };
+
+            // Create buffer with the acquired capacity
+            let managed_buffer = managed_buffers.create_buffer_with_acquired(bytes.to_vec(), acquired);
+
+            Ok(SourceChunkContent {
+                offset,
+                size,
+                bytes: Arc::new(managed_buffer),
+                hash,
+            })
+        });
+
+        Some(Ok(SourceChunkWithContent::new_with_download(
+            offset, size, handle,
         )))
     }
 }

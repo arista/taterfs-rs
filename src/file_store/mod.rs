@@ -217,6 +217,8 @@ pub struct SourceChunkWithContent {
     pub size: u64,
     /// The content, fetched lazily and cached.
     content_cell: Arc<OnceCell<Result<SourceChunkContent>>>,
+    /// Optional JoinHandle for background download (used by S3).
+    download_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<SourceChunkContent>>>>,
 }
 
 impl SourceChunkWithContent {
@@ -229,17 +231,60 @@ impl SourceChunkWithContent {
             offset,
             size,
             content_cell: cell,
+            download_handle: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Create a new SourceChunkWithContent with a background download task.
+    ///
+    /// The download will be awaited when `content()` is called.
+    pub fn new_with_download(
+        offset: u64,
+        size: u64,
+        handle: tokio::task::JoinHandle<Result<SourceChunkContent>>,
+    ) -> Self {
+        Self {
+            offset,
+            size,
+            content_cell: Arc::new(OnceCell::new()),
+            download_handle: tokio::sync::Mutex::new(Some(handle)),
         }
     }
 
     /// Get the content of this chunk.
     ///
+    /// If the content was created with a background download, this awaits the download.
     /// The result is cached, so subsequent calls return immediately.
     pub async fn content(&self) -> Result<&SourceChunkContent> {
+        // Fast path: content already available
         if let Some(result) = self.content_cell.get() {
             return result.as_ref().map_err(|e| Error::Other(e.to_string()));
         }
-        // Content should always be set for new_immediate
+
+        // Slow path: await the download handle if present
+        let download_result = {
+            let mut guard = self.download_handle.lock().await;
+            if let Some(handle) = guard.take() {
+                match handle.await {
+                    Ok(result) => Some(result),
+                    Err(e) => Some(Err(Error::Other(format!("Download task failed: {}", e)))),
+                }
+            } else {
+                None
+            }
+        };
+
+        // Set the content if we got a result from the download
+        if let Some(result) = download_result {
+            // Ignore error if another task set it first (race condition)
+            let _ = self.content_cell.set(result);
+        }
+
+        // Now try to get the content
+        if let Some(result) = self.content_cell.get() {
+            return result.as_ref().map_err(|e| Error::Other(e.to_string()));
+        }
+
         Err(Error::Other("Content not available".to_string()))
     }
 }

@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use crate::caches::{DbId, FileStoreCache};
-use crate::file_store::{self, DirectoryList, FileStore};
+use crate::file_store::{self, DirectoryList, FileStore, SourceChunkWithContent, SourceChunkContent};
 use crate::repo::{self, Repo, RepoError};
 use crate::repository::ObjectId;
+use crate::util::ManagedBuffers;
 
 // Type aliases to disambiguate between repo and file_store DirectoryEntry types.
 type RepoDirectoryEntry = repo::DirectoryEntry;
@@ -105,36 +107,39 @@ impl DownloadActions for FileDestDownloadActions {
     }
 
     async fn download_file(&self, path: &Path, file_id: &ObjectId, executable: bool) -> Result<()> {
-        // Read file chunks from the repo and collect them into SourceChunk items.
+        // Read file chunks from the repo and collect them into chunk info.
         let mut chunk_list = self.repo.list_file_chunks(file_id).await?;
-        let mut chunks: Vec<
-            std::result::Result<Box<dyn file_store::SourceChunk>, file_store::Error>,
-        > = Vec::new();
+        let mut chunk_infos: Vec<RepoChunkInfo> = Vec::new();
         let mut offset: u64 = 0;
 
         loop {
             match chunk_list.next().await {
                 Ok(Some(chunk_part)) => {
-                    let chunk: Box<dyn file_store::SourceChunk> = Box::new(RepoSourceChunk {
-                        repo: self.repo.clone(),
+                    chunk_infos.push(RepoChunkInfo {
                         offset,
                         size: chunk_part.size,
                         content_id: chunk_part.content.clone(),
                     });
                     offset += chunk_part.size;
-                    chunks.push(Ok(chunk));
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    chunks.push(Err(file_store::Error::Other(e.to_string())));
-                    break;
+                    return Err(DownloadError::Repo(e));
                 }
             }
         }
 
-        let source_chunks: file_store::SourceChunks = Box::pin(futures::stream::iter(chunks));
+        let managed_buffers = ManagedBuffers::new();
+        let chunks_with_content: file_store::SourceChunksWithContent =
+            Box::new(RepoSourceChunkWithContentList {
+                repo: self.repo.clone(),
+                chunk_infos,
+                index: 0,
+                managed_buffers,
+            });
+
         self.dest()
-            .write_file_from_chunks(path, source_chunks, executable)
+            .write_file_from_chunks(path, chunks_with_content, executable)
             .await?;
         Ok(())
     }
@@ -145,37 +150,61 @@ impl DownloadActions for FileDestDownloadActions {
     }
 }
 
-/// A [`SourceChunk`] that reads its content from a repository object.
-struct RepoSourceChunk {
-    repo: Arc<Repo>,
+/// Information about a chunk to be downloaded from the repository.
+struct RepoChunkInfo {
     offset: u64,
     size: u64,
     content_id: ObjectId,
 }
 
+/// A [`SourceChunkWithContentList`] that reads chunks from a repository.
+struct RepoSourceChunkWithContentList {
+    repo: Arc<Repo>,
+    chunk_infos: Vec<RepoChunkInfo>,
+    index: usize,
+    managed_buffers: ManagedBuffers,
+}
+
 #[async_trait]
-impl file_store::SourceChunk for RepoSourceChunk {
-    fn offset(&self) -> u64 {
-        self.offset
-    }
+impl file_store::SourceChunkWithContentList for RepoSourceChunkWithContentList {
+    async fn next(&mut self) -> Option<file_store::Result<SourceChunkWithContent>> {
+        if self.index >= self.chunk_infos.len() {
+            return None;
+        }
 
-    fn size(&self) -> u64 {
-        self.size
-    }
+        let chunk_info = &self.chunk_infos[self.index];
+        self.index += 1;
 
-    async fn get(&self) -> file_store::Result<file_store::SourceChunkContent> {
-        let buffer = self
-            .repo
-            .read(&self.content_id, Some(self.size))
-            .await
-            .map_err(|e| file_store::Error::Other(e.to_string()))?;
+        // Read the chunk data from the repository
+        let buffer = match self.repo.read(&chunk_info.content_id, Some(chunk_info.size)).await {
+            Ok(buf) => buf,
+            Err(e) => return Some(Err(file_store::Error::Other(e.to_string()))),
+        };
 
-        Ok(file_store::SourceChunkContent {
-            offset: self.offset,
-            size: self.size,
-            hash: self.content_id.clone(),
-            bytes: buffer,
-        })
+        // Compute hash of the content
+        let data: &[u8] = &buffer;
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = hex::encode(hasher.finalize());
+
+        // Copy data into a managed buffer
+        let managed_buffer = self
+            .managed_buffers
+            .get_buffer_with_data(data.to_vec())
+            .await;
+
+        let content = SourceChunkContent {
+            offset: chunk_info.offset,
+            size: chunk_info.size,
+            hash,
+            bytes: Arc::new(managed_buffer),
+        };
+
+        Some(Ok(SourceChunkWithContent::new_immediate(
+            chunk_info.offset,
+            chunk_info.size,
+            content,
+        )))
     }
 }
 
@@ -691,7 +720,7 @@ mod tests {
         async fn write_file_from_chunks(
             &self,
             _path: &Path,
-            _chunks: file_store::SourceChunks,
+            _chunks: file_store::SourceChunksWithContent,
             _executable: bool,
         ) -> file_store::Result<()> {
             Ok(())

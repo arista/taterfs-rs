@@ -9,7 +9,8 @@ use super::scan_ignore_helper::{
 };
 use crate::file_store::{
     DirEntry, DirectoryEntry, Error, FileEntry, FileSource, Result, ScanEvent, ScanEvents,
-    SourceChunk, SourceChunkContent, SourceChunkContents, SourceChunks,
+    SourceChunk, SourceChunkContent, SourceChunkList, SourceChunkWithContent,
+    SourceChunkWithContentList, SourceChunks, SourceChunksWithContent, VecScanEventList,
 };
 use crate::repo::FlowControl;
 use crate::util::ManagedBuffers;
@@ -17,7 +18,6 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
-use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
@@ -264,63 +264,262 @@ impl S3FileSource {
 }
 
 // =============================================================================
-// SourceChunk Implementation
+// Chunk List Implementation
 // =============================================================================
 
-/// A chunk from an S3 object.
-struct S3SourceChunk {
+/// SourceChunkList implementation for S3FileSource.
+///
+/// Holds the S3 client, bucket, key, and chunk metadata so that
+/// get_source_chunks_with_content can use it.
+pub struct S3SourceChunkList {
     client: Client,
     bucket: String,
     key: String,
-    offset: u64,
-    size: u64,
+    chunks: Vec<SourceChunk>,
+    index: usize,
     managed_buffers: ManagedBuffers,
+    flow_control: FlowControl,
+}
+
+impl S3SourceChunkList {
+    fn new(
+        client: Client,
+        bucket: String,
+        key: String,
+        file_size: u64,
+        managed_buffers: ManagedBuffers,
+        flow_control: FlowControl,
+    ) -> Self {
+        // Compute all chunk metadata upfront
+        let mut chunks = Vec::new();
+        let mut offset = 0u64;
+        while offset < file_size {
+            let remaining = file_size - offset;
+            let chunk_size = next_chunk_size(remaining);
+            chunks.push(SourceChunk {
+                offset,
+                size: chunk_size,
+            });
+            offset += chunk_size;
+        }
+
+        Self {
+            client,
+            bucket,
+            key,
+            chunks,
+            index: 0,
+            managed_buffers,
+            flow_control,
+        }
+    }
 }
 
 #[async_trait]
-impl SourceChunk for S3SourceChunk {
-    fn offset(&self) -> u64 {
-        self.offset
+impl SourceChunkList for S3SourceChunkList {
+    async fn next(&mut self) -> Option<Result<SourceChunk>> {
+        if self.index < self.chunks.len() {
+            let chunk = self.chunks[self.index].clone();
+            self.index += 1;
+            Some(Ok(chunk))
+        } else {
+            None
+        }
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
-    async fn get(&self) -> Result<SourceChunkContent> {
-        let range = format!("bytes={}-{}", self.offset, self.offset + self.size - 1);
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
 
-        let response = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .range(range)
-            .send()
-            .await
-            .map_err(|e| Error::Other(e.to_string()))?;
+// =============================================================================
+// Chunk Content Implementation (with deadlock-safe ordering)
+// =============================================================================
 
-        let body = response.body.collect().await;
-        let aggregated = body.map_err(|e| Error::Other(e.to_string()))?;
-        let bytes = aggregated.into_bytes();
+/// Default concurrency limit for parallel downloads.
+const DEFAULT_CONCURRENCY: usize = 10;
 
-        let hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            format!("{:x}", hasher.finalize())
+/// Downloaded chunk data (before being wrapped in a ManagedBuffer).
+struct DownloadedChunk {
+    offset: u64,
+    size: u64,
+    data: Vec<u8>,
+    hash: String,
+}
+
+/// SourceChunkWithContentList for S3 with concurrent downloads and deadlock prevention.
+///
+/// This implementation:
+/// 1. Downloads happen in the background WITHOUT acquiring ManagedBuffers
+/// 2. When next() is called, we acquire a ManagedBuffer IN ORDER
+/// 3. Then wait for the download to complete and wrap in the buffer
+///
+/// This ordering prevents deadlock because buffers are always acquired
+/// in chunk order during next() calls, not in the download tasks.
+struct S3SourceChunkWithContentList {
+    client: Client,
+    bucket: String,
+    key: String,
+    chunks: Vec<SourceChunk>,
+    index: usize,
+    managed_buffers: ManagedBuffers,
+    flow_control: FlowControl,
+    /// Background download tasks that have been spawned.
+    /// Downloads happen WITHOUT buffer acquisition to avoid deadlock.
+    pending_downloads: Vec<Option<tokio::task::JoinHandle<Result<DownloadedChunk>>>>,
+}
+
+impl S3SourceChunkWithContentList {
+    fn new(
+        client: Client,
+        bucket: String,
+        key: String,
+        chunks: Vec<SourceChunk>,
+        managed_buffers: ManagedBuffers,
+        flow_control: FlowControl,
+    ) -> Self {
+        let len = chunks.len();
+        Self {
+            client,
+            bucket,
+            key,
+            chunks,
+            index: 0,
+            managed_buffers,
+            flow_control,
+            pending_downloads: (0..len).map(|_| None).collect(),
+        }
+    }
+
+    /// Spawn background downloads for chunks that haven't been started yet,
+    /// up to the concurrency limit ahead of the current index.
+    /// IMPORTANT: Downloads do NOT acquire ManagedBuffers - that happens in next().
+    fn spawn_pending_downloads(&mut self) {
+        let start = self.index;
+        let end = (self.index + DEFAULT_CONCURRENCY).min(self.chunks.len());
+
+        for i in start..end {
+            if self.pending_downloads[i].is_none() {
+                // Spawn a download task for this chunk
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let chunk = self.chunks[i].clone();
+                let flow_control = self.flow_control.clone();
+
+                let handle = tokio::spawn(async move {
+                    // Apply flow control (but NOT buffer acquisition!)
+                    let _rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
+                        Some(limiter.use_capacity(1).await)
+                    } else {
+                        None
+                    };
+                    let _concurrent =
+                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
+                            Some(limiter.use_capacity(1).await)
+                        } else {
+                            None
+                        };
+                    let _read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
+                        Some(limiter.use_capacity(chunk.size).await)
+                    } else {
+                        None
+                    };
+                    let _total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
+                        Some(limiter.use_capacity(chunk.size).await)
+                    } else {
+                        None
+                    };
+
+                    // Download the chunk (without buffer acquisition)
+                    let range = format!("bytes={}-{}", chunk.offset, chunk.offset + chunk.size - 1);
+
+                    let response = client
+                        .get_object()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .range(range)
+                        .send()
+                        .await
+                        .map_err(|e| Error::Other(e.to_string()))?;
+
+                    let body = response.body.collect().await;
+                    let aggregated = body.map_err(|e| Error::Other(e.to_string()))?;
+                    let bytes = aggregated.into_bytes();
+
+                    let hash = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(&bytes);
+                        format!("{:x}", hasher.finalize())
+                    };
+
+                    Ok(DownloadedChunk {
+                        offset: chunk.offset,
+                        size: chunk.size,
+                        data: bytes.to_vec(),
+                        hash,
+                    })
+                });
+
+                self.pending_downloads[i] = Some(handle);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SourceChunkWithContentList for S3SourceChunkWithContentList {
+    async fn next(&mut self) -> Option<Result<SourceChunkWithContent>> {
+        if self.index >= self.chunks.len() {
+            return None;
+        }
+
+        let chunk_index = self.index;
+        let chunk = self.chunks[chunk_index].clone();
+        self.index += 1;
+
+        // First, spawn any pending downloads up to concurrency limit
+        // (downloads do NOT acquire buffers)
+        self.spawn_pending_downloads();
+
+        // KEY DEADLOCK FIX: Acquire the ManagedBuffer HERE, in order.
+        // This is what prevents the deadlock - buffers are acquired
+        // strictly in chunk order during next() calls, not in download tasks.
+
+        // Wait for this chunk's download to complete
+        let downloaded = if let Some(handle) = self.pending_downloads[chunk_index].take() {
+            match handle.await {
+                Ok(Ok(downloaded)) => downloaded,
+                Ok(Err(e)) => return Some(Err(e)),
+                Err(e) => return Some(Err(Error::Other(format!("Download task failed: {}", e)))),
+            }
+        } else {
+            // Download wasn't started - this shouldn't happen
+            return Some(Err(Error::Other("Download not started".to_string())));
         };
 
+        // NOW acquire the buffer (in order!) and wrap the downloaded data
         let managed_buffer = self
             .managed_buffers
-            .get_buffer_with_data(bytes.to_vec())
+            .get_buffer_with_data(downloaded.data)
             .await;
 
-        Ok(SourceChunkContent {
-            offset: self.offset,
-            size: self.size,
+        let content = SourceChunkContent {
+            offset: downloaded.offset,
+            size: downloaded.size,
             bytes: Arc::new(managed_buffer),
-            hash,
-        })
+            hash: downloaded.hash,
+        };
+
+        Some(Ok(SourceChunkWithContent::new_immediate(
+            chunk.offset,
+            chunk.size,
+            content,
+        )))
     }
 }
 
@@ -382,7 +581,7 @@ impl FileSource for S3FileSource {
         self.scan_directory(&start_prefix, &mut events, &mut helper, source.as_ref())
             .await?;
 
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        Ok(Box::new(VecScanEventList::new(events)))
     }
 
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>> {
@@ -410,110 +609,38 @@ impl FileSource for S3FileSource {
 
         let file_size = metadata.content_length().unwrap_or(0) as u64;
 
-        // Create lazy stream for chunks
-        let client = self.client.clone();
-        let bucket = self.config.bucket.clone();
-        let managed_buffers = self.managed_buffers.clone();
-
-        struct ChunkIterState {
-            client: Client,
-            bucket: String,
-            key: String,
-            file_size: u64,
-            offset: u64,
-            managed_buffers: ManagedBuffers,
-        }
-
-        let chunks_stream = stream::unfold(
-            ChunkIterState {
-                client,
-                bucket,
-                key,
-                file_size,
-                offset: 0,
-                managed_buffers,
-            },
-            |state| async move {
-                if state.offset >= state.file_size {
-                    return None;
-                }
-
-                let remaining = state.file_size - state.offset;
-                let chunk_size = next_chunk_size(remaining);
-
-                let chunk = S3SourceChunk {
-                    client: state.client.clone(),
-                    bucket: state.bucket.clone(),
-                    key: state.key.clone(),
-                    offset: state.offset,
-                    size: chunk_size,
-                    managed_buffers: state.managed_buffers.clone(),
-                };
-
-                let next_state = ChunkIterState {
-                    client: state.client,
-                    bucket: state.bucket,
-                    key: state.key,
-                    file_size: state.file_size,
-                    offset: state.offset + chunk_size,
-                    managed_buffers: state.managed_buffers,
-                };
-
-                Some((Ok(Box::new(chunk) as Box<dyn SourceChunk>), next_state))
-            },
-        );
-
-        Ok(Some(Box::pin(chunks_stream)))
+        Ok(Some(Box::new(S3SourceChunkList::new(
+            self.client.clone(),
+            self.config.bucket.clone(),
+            key,
+            file_size,
+            self.managed_buffers.clone(),
+            self.flow_control.clone(),
+        ))))
     }
 
-    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
-        // Concurrent implementation with flow control.
-        // We use buffered() to fetch chunks concurrently but yield them in order.
-        let flow_control = self.flow_control.clone();
+    async fn get_source_chunks_with_content(
+        &self,
+        chunks: SourceChunks,
+    ) -> Result<SourceChunksWithContent> {
+        // Try to downcast to S3SourceChunkList to get the S3 context
+        if let Some(s3_chunks) = chunks.as_any().downcast_ref::<S3SourceChunkList>() {
+            let remaining_chunks = s3_chunks.chunks[s3_chunks.index..].to_vec();
 
-        // Default concurrency limit if not specified by flow control
-        const DEFAULT_CONCURRENCY: usize = 10;
-
-        let contents_stream = chunks
-            .map(move |chunk_result| {
-                let flow_control = flow_control.clone();
-                async move {
-                    let chunk = chunk_result?;
-
-                    // Acquire flow control capacity before fetching
-                    let _rate = if let Some(ref limiter) = flow_control.request_rate_limiter {
-                        Some(limiter.use_capacity(1).await)
-                    } else {
-                        None
-                    };
-                    let _concurrent =
-                        if let Some(ref limiter) = flow_control.concurrent_request_limiter {
-                            Some(limiter.use_capacity(1).await)
-                        } else {
-                            None
-                        };
-
-                    let size = chunk.size();
-
-                    // Acquire read throughput capacity
-                    let _read = if let Some(ref limiter) = flow_control.read_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-                    let _total = if let Some(ref limiter) = flow_control.total_throughput_limiter {
-                        Some(limiter.use_capacity(size).await)
-                    } else {
-                        None
-                    };
-
-                    // Fetch the chunk content
-                    chunk.get().await
-                }
-            })
-            .buffered(DEFAULT_CONCURRENCY);
-
-        Ok(Box::pin(contents_stream))
+            Ok(Box::new(S3SourceChunkWithContentList::new(
+                s3_chunks.client.clone(),
+                s3_chunks.bucket.clone(),
+                s3_chunks.key.clone(),
+                remaining_chunks,
+                s3_chunks.managed_buffers.clone(),
+                s3_chunks.flow_control.clone(),
+            )))
+        } else {
+            Err(Error::Other(
+                "S3FileSource::get_source_chunks_with_content: chunks must come from this store's get_source_chunks"
+                    .to_string(),
+            ))
+        }
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {

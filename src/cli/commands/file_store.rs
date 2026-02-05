@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use clap::{Args, Subcommand};
-use futures::StreamExt;
 
 use crate::app::App;
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, Result};
@@ -69,8 +68,8 @@ impl ScanArgs {
         let mut output = String::new();
         let mut indent = 0usize;
 
-        while let Some(event) = events.next().await {
-            let event = event.map_err(|e| CliError::Other(e.to_string()))?;
+        while let Some(event_result) = events.next().await {
+            let event = event_result.map_err(|e| CliError::Other(e.to_string()))?;
 
             match event {
                 ScanEvent::EnterDirectory(dir) => {
@@ -142,20 +141,24 @@ impl SourceChunksArgs {
             .ok_or_else(|| CliError::Other(format!("path not found: {}", path_str)))?;
 
         let mut contents = source
-            .get_source_chunk_contents(chunks)
+            .get_source_chunks_with_content(chunks)
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
 
         let mut output = String::new();
         let mut total_size = 0u64;
 
-        while let Some(chunk) = contents.next().await {
-            let chunk = chunk.map_err(|e| CliError::Other(e.to_string()))?;
+        while let Some(chunk_result) = contents.next().await {
+            let chunk = chunk_result.map_err(|e| CliError::Other(e.to_string()))?;
+            let content = chunk
+                .content()
+                .await
+                .map_err(|e| CliError::Other(e.to_string()))?;
             output.push_str(&format!(
                 "{}+{}, hash: {}\n",
-                chunk.offset, chunk.size, chunk.hash
+                content.offset, content.size, content.hash
             ));
-            total_size += chunk.size;
+            total_size += content.size;
         }
 
         output.push_str(&format!("total: {}", total_size));

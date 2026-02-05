@@ -5,13 +5,13 @@ use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelp
 use crate::caches::{FileStoreCache, NoopFileStoreCache};
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileEntry, FileSource,
-    FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent, SourceChunkContents,
-    SourceChunks,
+    FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
+    SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
+    SourceChunksWithContent, VecScanEventList,
 };
 use crate::util::ManagedBuffers;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -352,41 +352,123 @@ impl MemoryFileStoreBuilder {
 }
 
 // =============================================================================
-// SourceChunk Implementation
+// Chunk List Implementation
 // =============================================================================
 
-/// A chunk from a memory file.
-struct MemorySourceChunk {
+/// SourceChunkList implementation for MemoryFileStore.
+///
+/// This holds both the chunk metadata and a reference to the file,
+/// allowing get_source_chunks_with_content to access the file data.
+pub struct MemorySourceChunkList {
     file: MemoryFile,
-    offset: u64,
-    size: u64,
+    chunks: Vec<SourceChunk>,
+    index: usize,
     managed_buffers: ManagedBuffers,
 }
 
+impl MemorySourceChunkList {
+    fn new(file: MemoryFile, chunks: Vec<SourceChunk>, managed_buffers: ManagedBuffers) -> Self {
+        Self {
+            file,
+            chunks,
+            index: 0,
+            managed_buffers,
+        }
+    }
+}
+
 #[async_trait]
-impl SourceChunk for MemorySourceChunk {
-    fn offset(&self) -> u64 {
-        self.offset
+impl SourceChunkList for MemorySourceChunkList {
+    async fn next(&mut self) -> Option<Result<SourceChunk>> {
+        if self.index < self.chunks.len() {
+            let chunk = self.chunks[self.index].clone();
+            self.index += 1;
+            Some(Ok(chunk))
+        } else {
+            None
+        }
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
-    async fn get(&self) -> Result<SourceChunkContent> {
-        let data = self.file.read_range(self.offset, self.size);
-        let hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(&data);
-            format!("{:x}", hasher.finalize())
-        };
-        let managed_buffer = self.managed_buffers.get_buffer_with_data(data).await;
-        Ok(SourceChunkContent {
-            offset: self.offset,
-            size: self.size,
-            bytes: Arc::new(managed_buffer),
-            hash,
-        })
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// =============================================================================
+// Chunk Content Helpers
+// =============================================================================
+
+/// Read a chunk from a memory file and create a SourceChunkContent.
+async fn read_chunk_content(
+    file: &MemoryFile,
+    offset: u64,
+    size: u64,
+    managed_buffers: &ManagedBuffers,
+) -> Result<SourceChunkContent> {
+    let data = file.read_range(offset, size);
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        format!("{:x}", hasher.finalize())
+    };
+    let managed_buffer = managed_buffers.get_buffer_with_data(data).await;
+    Ok(SourceChunkContent {
+        offset,
+        size,
+        bytes: Arc::new(managed_buffer),
+        hash,
+    })
+}
+
+/// Sequential implementation of SourceChunkWithContentList for MemoryFileStore.
+///
+/// This doesn't do any concurrency - it reads chunks sequentially.
+struct MemorySourceChunkWithContentList {
+    file: MemoryFile,
+    chunks: Vec<SourceChunk>,
+    index: usize,
+    managed_buffers: ManagedBuffers,
+}
+
+impl MemorySourceChunkWithContentList {
+    fn new(file: MemoryFile, chunks: Vec<SourceChunk>, managed_buffers: ManagedBuffers) -> Self {
+        Self {
+            file,
+            chunks,
+            index: 0,
+            managed_buffers,
+        }
+    }
+}
+
+#[async_trait]
+impl SourceChunkWithContentList for MemorySourceChunkWithContentList {
+    async fn next(&mut self) -> Option<Result<SourceChunkWithContent>> {
+        if self.index >= self.chunks.len() {
+            return None;
+        }
+
+        let chunk = self.chunks[self.index].clone();
+        self.index += 1;
+
+        // For MemoryFileStore, we read synchronously (no background download needed)
+        let content =
+            match read_chunk_content(&self.file, chunk.offset, chunk.size, &self.managed_buffers)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return Some(Err(e)),
+            };
+
+        Some(Ok(SourceChunkWithContent::new_immediate(
+            chunk.offset,
+            chunk.size,
+            content,
+        )))
     }
 }
 
@@ -435,7 +517,7 @@ impl FileSource for MemoryFileStore {
         )
         .await;
 
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        Ok(Box::new(VecScanEventList::new(events)))
     }
 
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>> {
@@ -454,21 +536,38 @@ impl FileSource for MemoryFileStore {
 
         drop(root);
 
-        let chunks = compute_chunks(&file, self.managed_buffers.clone());
-        Ok(Some(Box::pin(stream::iter(
-            chunks
-                .into_iter()
-                .map(|c| Ok(Box::new(c) as Box<dyn SourceChunk>)),
+        let chunks = compute_chunk_metadata(&file);
+        Ok(Some(Box::new(MemorySourceChunkList::new(
+            file,
+            chunks,
+            self.managed_buffers.clone(),
         ))))
     }
 
-    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents> {
-        // Sequential implementation - no concurrency for MemoryFileStore
-        let contents_stream = chunks.then(|chunk_result| async move {
-            let chunk = chunk_result?;
-            chunk.get().await
-        });
-        Ok(Box::pin(contents_stream))
+    async fn get_source_chunks_with_content(
+        &self,
+        chunks: SourceChunks,
+    ) -> Result<SourceChunksWithContent> {
+        // Try to downcast to our specific type to get the file reference
+        // We need to check if this is a MemorySourceChunkList from our get_source_chunks
+        if let Some(mem_chunks) = chunks.as_any().downcast_ref::<MemorySourceChunkList>() {
+            // Clone the data we need (we can't move out of the borrow)
+            let file = mem_chunks.file.clone();
+            let remaining_chunks = mem_chunks.chunks[mem_chunks.index..].to_vec();
+            let managed_buffers = mem_chunks.managed_buffers.clone();
+
+            Ok(Box::new(MemorySourceChunkWithContentList::new(
+                file,
+                remaining_chunks,
+                managed_buffers,
+            )))
+        } else {
+            // Not our type - this shouldn't happen if called correctly
+            Err(Error::Other(
+                "MemoryFileStore::get_source_chunks_with_content: chunks must come from this store's get_source_chunks"
+                    .to_string(),
+            ))
+        }
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
@@ -673,7 +772,7 @@ impl crate::file_store::FileDest for MemoryFileStore {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        chunks: SourceChunks,
+        mut chunks: SourceChunksWithContent,
         executable: bool,
     ) -> Result<()> {
         let components = path_components(path);
@@ -683,10 +782,9 @@ impl crate::file_store::FileDest for MemoryFileStore {
 
         // Collect all chunk data before acquiring the write lock
         let mut data = Vec::new();
-        let mut chunks = chunks;
         while let Some(chunk_result) = chunks.next().await {
             let chunk = chunk_result?;
-            let content = chunk.get().await?;
+            let content = chunk.content().await?;
             data.extend_from_slice(&content.bytes[..]);
         }
 
@@ -846,8 +944,8 @@ async fn scan_tree_with_ignore<S: super::scan_ignore_helper::ScanFileSource + ?S
     }
 }
 
-/// Compute the chunk boundaries for a file.
-fn compute_chunks(file: &MemoryFile, managed_buffers: ManagedBuffers) -> Vec<MemorySourceChunk> {
+/// Compute the chunk metadata for a file.
+fn compute_chunk_metadata(file: &MemoryFile) -> Vec<SourceChunk> {
     let total_size = file.size();
     let mut chunks = Vec::new();
     let mut offset = 0u64;
@@ -856,11 +954,9 @@ fn compute_chunks(file: &MemoryFile, managed_buffers: ManagedBuffers) -> Vec<Mem
         let remaining = total_size - offset;
         let chunk_size = next_chunk_size(remaining);
 
-        chunks.push(MemorySourceChunk {
-            file: file.clone(),
+        chunks.push(SourceChunk {
             offset,
             size: chunk_size,
-            managed_buffers: managed_buffers.clone(),
         });
 
         offset += chunk_size;
@@ -876,7 +972,29 @@ fn compute_chunks(file: &MemoryFile, managed_buffers: ManagedBuffers) -> Vec<Mem
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+
+    /// Helper to collect all events from a ScanEventList.
+    async fn collect_scan_events(mut events: ScanEvents) -> Vec<ScanEvent> {
+        let mut result = Vec::new();
+        while let Some(event) = events.next().await {
+            result.push(event.unwrap());
+        }
+        result
+    }
+
+    /// Helper to collect all chunks from a SourceChunkList.
+    async fn collect_chunks(mut chunks: SourceChunks) -> Vec<SourceChunk> {
+        let mut result = Vec::new();
+        while let Some(chunk) = chunks.next().await {
+            result.push(chunk.unwrap());
+        }
+        result
+    }
+
+    /// Helper to get entry using FileSource trait (avoids ambiguity with FileDest).
+    async fn get_source_entry(store: &MemoryFileStore, path: &Path) -> Result<Option<DirectoryEntry>> {
+        FileSource::get_entry(store, path).await
+    }
 
     #[tokio::test]
     async fn test_empty_store() {
@@ -887,11 +1005,11 @@ mod tests {
         assert!(events.next().await.is_none());
 
         // Root should exist
-        let root = store.get_entry(Path::new("")).await.unwrap();
+        let root = get_source_entry(&store,Path::new("")).await.unwrap();
         assert!(matches!(root, Some(DirectoryEntry::Dir(_))));
 
         // Non-existent path
-        let missing = store.get_entry(Path::new("missing")).await.unwrap();
+        let missing = get_source_entry(&store,Path::new("missing")).await.unwrap();
         assert!(missing.is_none());
     }
 
@@ -902,7 +1020,7 @@ mod tests {
             .build();
 
         // Check entry
-        let entry = store.get_entry(Path::new("hello.txt")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("hello.txt")).await.unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => {
                 assert_eq!(f.name, "hello.txt");
@@ -917,13 +1035,7 @@ mod tests {
         assert_eq!(&contents[..], b"Hello, World!");
 
         // Scan
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ScanEvent::File(f) if f.name == "hello.txt"));
     }
@@ -936,21 +1048,15 @@ mod tests {
             .build();
 
         // Check nested file
-        let entry = store.get_entry(Path::new("a/b/c.txt")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("a/b/c.txt")).await.unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::File(_))));
 
         // Check directory
-        let dir = store.get_entry(Path::new("a/b")).await.unwrap();
+        let dir = get_source_entry(&store,Path::new("a/b")).await.unwrap();
         assert!(matches!(dir, Some(DirectoryEntry::Dir(_))));
 
         // Scan should be depth-first, lexicographic
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         // Expected order: EnterDir(a), EnterDir(b), File(c.txt), ExitDir, File(d.txt), ExitDir
         assert_eq!(events.len(), 6);
@@ -968,7 +1074,7 @@ mod tests {
             .add("script.sh", MemoryFsEntry::executable("#!/bin/bash"))
             .build();
 
-        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => {
                 assert!(f.executable);
@@ -999,21 +1105,24 @@ mod tests {
             .add("small.txt", MemoryFsEntry::file("tiny"))
             .build();
 
-        let mut chunks = store
+        let chunks = store
             .get_source_chunks(Path::new("small.txt"))
             .await
             .unwrap()
             .unwrap();
 
-        let chunk = chunks.next().await.unwrap().unwrap();
-        assert_eq!(chunk.offset(), 0);
-        assert_eq!(chunk.size(), 4);
+        // Get chunks with content
+        let mut chunks_with_content = store.get_source_chunks_with_content(chunks).await.unwrap();
 
-        let content = chunk.get().await.unwrap();
+        let chunk = chunks_with_content.next().await.unwrap().unwrap();
+        assert_eq!(chunk.offset, 0);
+        assert_eq!(chunk.size, 4);
+
+        let content = chunk.content().await.unwrap();
         assert_eq!(&content.bytes[..], b"tiny");
 
         // Should be only one chunk
-        assert!(chunks.next().await.is_none());
+        assert!(chunks_with_content.next().await.is_none());
     }
 
     #[tokio::test]
@@ -1024,25 +1133,36 @@ mod tests {
             .add("large.bin", MemoryFsEntry::repeated(b"X", size))
             .build();
 
-        let chunks: Vec<_> = store
-            .get_source_chunks(Path::new("large.bin"))
-            .await
-            .unwrap()
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        // First, check chunk metadata
+        let chunks = collect_chunks(
+            store
+                .get_source_chunks(Path::new("large.bin"))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .await;
 
         // First chunk should be 4MB
-        assert_eq!(chunks[0].offset(), 0);
-        assert_eq!(chunks[0].size(), 4_194_304);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].size, 4_194_304);
 
         // Remaining ~806KB should be broken down further
-        let total_size: u64 = chunks.iter().map(|c| c.size()).sum();
+        let total_size: u64 = chunks.iter().map(|c| c.size).sum();
         assert_eq!(total_size, size);
 
         // Verify chunk content hashes are computed
-        let content = chunks[0].get().await.unwrap();
+        let chunks_for_content = store
+            .get_source_chunks(Path::new("large.bin"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut chunks_with_content = store
+            .get_source_chunks_with_content(chunks_for_content)
+            .await
+            .unwrap();
+        let first_chunk = chunks_with_content.next().await.unwrap().unwrap();
+        let content = first_chunk.content().await.unwrap();
         assert!(!content.hash.is_empty());
         assert_eq!(content.hash.len(), 64); // SHA-256 hex
     }
@@ -1055,13 +1175,7 @@ mod tests {
             .add("m.txt", MemoryFsEntry::file("m"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1120,13 +1234,7 @@ mod tests {
             .add("src/main.rs", MemoryFsEntry::file("fn main() {}"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         // .git directory should not appear in scan
         let names: Vec<_> = events
@@ -1150,13 +1258,7 @@ mod tests {
             .add("file.txt", MemoryFsEntry::file("content"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1180,13 +1282,7 @@ mod tests {
             .add("target/debug/app", MemoryFsEntry::file("binary"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1214,13 +1310,7 @@ mod tests {
             .add("data.txt", MemoryFsEntry::file("permanent"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1246,13 +1336,7 @@ mod tests {
             .add("src/app.log", MemoryFsEntry::file("also ignored"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1280,13 +1364,7 @@ mod tests {
             .add("important.log", MemoryFsEntry::file("not ignored"))
             .build();
 
-        let events: Vec<_> = store
-            .scan(None)
-            .await
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
         let names: Vec<_> = events
             .iter()
@@ -1467,17 +1545,18 @@ mod tests {
     // =========================================================================
 
     /// Helper to create a simple SourceChunks stream from bytes.
-    fn chunks_from_bytes(data: &[u8]) -> SourceChunks {
+    /// Helper to create a SourceChunksWithContent from bytes for testing write_file_from_chunks.
+    fn chunks_with_content_from_bytes(data: &[u8]) -> SourceChunksWithContent {
         let managed_buffers = ManagedBuffers::new();
         let file = MemoryFile {
             contents: MemoryFileContents::Explicit(Arc::new(data.to_vec())),
             executable: false,
         };
-        let chunks = super::compute_chunks(&file, managed_buffers);
-        Box::pin(futures::stream::iter(
-            chunks
-                .into_iter()
-                .map(|c| Ok(Box::new(c) as Box<dyn SourceChunk>)),
+        let chunks = super::compute_chunk_metadata(&file);
+        Box::new(super::MemorySourceChunkWithContentList::new(
+            file,
+            chunks,
+            managed_buffers,
         ))
     }
 
@@ -1487,7 +1566,7 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let data = b"Hello, World!";
-        let chunks = chunks_from_bytes(data);
+        let chunks = chunks_with_content_from_bytes(data);
         dest.write_file_from_chunks(Path::new("hello.txt"), chunks, false)
             .await
             .unwrap();
@@ -1502,7 +1581,7 @@ mod tests {
         let store = MemoryFileStore::builder().build();
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let chunks = chunks_from_bytes(b"nested");
+        let chunks = chunks_with_content_from_bytes(b"nested");
         dest.write_file_from_chunks(Path::new("a/b/c.txt"), chunks, false)
             .await
             .unwrap();
@@ -1511,7 +1590,7 @@ mod tests {
         assert_eq!(&contents[..], b"nested");
 
         // Parent directories should exist
-        let dir = store.get_entry(Path::new("a/b")).await.unwrap();
+        let dir = get_source_entry(&store,Path::new("a/b")).await.unwrap();
         assert!(matches!(dir, Some(DirectoryEntry::Dir(_))));
     }
 
@@ -1520,12 +1599,12 @@ mod tests {
         let store = MemoryFileStore::builder().build();
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let chunks = chunks_from_bytes(b"#!/bin/bash");
+        let chunks = chunks_with_content_from_bytes(b"#!/bin/bash");
         dest.write_file_from_chunks(Path::new("script.sh"), chunks, true)
             .await
             .unwrap();
 
-        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => assert!(f.executable),
             _ => panic!("Expected file entry"),
@@ -1539,7 +1618,7 @@ mod tests {
             .build();
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let chunks = chunks_from_bytes(b"new content");
+        let chunks = chunks_with_content_from_bytes(b"new content");
         dest.write_file_from_chunks(Path::new("file.txt"), chunks, false)
             .await
             .unwrap();
@@ -1557,7 +1636,7 @@ mod tests {
 
         dest.rm(Path::new("file.txt")).await.unwrap();
 
-        let entry = store.get_entry(Path::new("file.txt")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("file.txt")).await.unwrap();
         assert!(entry.is_none());
     }
 
@@ -1571,7 +1650,7 @@ mod tests {
 
         dest.rm(Path::new("dir")).await.unwrap();
 
-        let entry = store.get_entry(Path::new("dir")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("dir")).await.unwrap();
         assert!(entry.is_none());
     }
 
@@ -1591,7 +1670,7 @@ mod tests {
 
         dest.mkdir(Path::new("a/b/c")).await.unwrap();
 
-        let entry = store.get_entry(Path::new("a/b/c")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("a/b/c")).await.unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
     }
 
@@ -1632,7 +1711,7 @@ mod tests {
         dest.set_executable(Path::new("script.sh"), true)
             .await
             .unwrap();
-        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => assert!(f.executable),
             _ => panic!("Expected file entry"),
@@ -1642,7 +1721,7 @@ mod tests {
         dest.set_executable(Path::new("script.sh"), false)
             .await
             .unwrap();
-        let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => assert!(!f.executable),
             _ => panic!("Expected file entry"),

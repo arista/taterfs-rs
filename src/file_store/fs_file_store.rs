@@ -128,52 +128,17 @@ impl SourceChunkList for FsSourceChunkList {
 // Chunk Content Implementation
 // =============================================================================
 
-/// Read a chunk from a file and return SourceChunkContent.
-///
-/// Uses the acquire-then-read pattern: acquires buffer capacity BEFORE
-/// reading the content, ensuring backpressure is applied before I/O.
-async fn read_chunk_content(
-    path: &Path,
-    offset: u64,
-    size: u64,
-    managed_buffers: &ManagedBuffers,
-) -> Result<SourceChunkContent> {
-    // 1. Acquire capacity before reading (waits if capacity limit is reached)
-    let acquired = managed_buffers.acquire(size).await;
-
-    // 2. Read the data
-    let mut file = fs::File::open(path).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-
-    let mut buffer = vec![0u8; size as usize];
-    file.read_exact(&mut buffer).await?;
-
-    // 3. Compute hash
-    let hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(&buffer);
-        format!("{:x}", hasher.finalize())
-    };
-
-    // 4. Create buffer using the acquired capacity (doesn't wait)
-    let managed_buffer = managed_buffers.create_buffer_with_acquired(buffer, acquired);
-
-    Ok(SourceChunkContent {
-        offset,
-        size,
-        bytes: Arc::new(managed_buffer),
-        hash,
-    })
-}
-
 /// Sequential implementation of SourceChunkWithContentList for FsFileStore.
 ///
-/// Computes chunks iteratively as next() is called.
+/// Opens the file once on first call to next() and reuses the handle for
+/// subsequent chunks. Computes chunks iteratively as next() is called.
 struct FsSourceChunkWithContentList {
     path: PathBuf,
     file_size: u64,
     current_offset: u64,
     managed_buffers: ManagedBuffers,
+    /// Cached file handle, opened lazily on first next() call.
+    file: Option<fs::File>,
 }
 
 impl FsSourceChunkWithContentList {
@@ -183,6 +148,7 @@ impl FsSourceChunkWithContentList {
             file_size,
             current_offset: 0,
             managed_buffers,
+            file: None,
         }
     }
 }
@@ -199,11 +165,43 @@ impl SourceChunkWithContentList for FsSourceChunkWithContentList {
         let offset = self.current_offset;
         self.current_offset += size;
 
-        // For FsFileStore, we read sequentially (no background download)
-        let content = match read_chunk_content(&self.path, offset, size, &self.managed_buffers).await
-        {
-            Ok(c) => c,
-            Err(e) => return Some(Err(e)),
+        // 1. Acquire capacity before reading (waits if capacity limit is reached)
+        let acquired = self.managed_buffers.acquire(size).await;
+
+        // 2. Open file if not already open
+        if self.file.is_none() {
+            match fs::File::open(&self.path).await {
+                Ok(f) => self.file = Some(f),
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+        let file = self.file.as_mut().unwrap();
+
+        // 3. Seek and read
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+            return Some(Err(e.into()));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        if let Err(e) = file.read_exact(&mut buffer).await {
+            return Some(Err(e.into()));
+        }
+
+        // 4. Compute hash
+        let hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(&buffer);
+            format!("{:x}", hasher.finalize())
+        };
+
+        // 5. Create buffer using the acquired capacity (doesn't wait)
+        let managed_buffer = self.managed_buffers.create_buffer_with_acquired(buffer, acquired);
+
+        let content = SourceChunkContent {
+            offset,
+            size,
+            bytes: Arc::new(managed_buffer),
+            hash,
         };
 
         Some(Ok(SourceChunkWithContent::new_immediate(

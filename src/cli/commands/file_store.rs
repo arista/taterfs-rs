@@ -7,7 +7,6 @@ use clap::{Args, Subcommand};
 use crate::app::App;
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, Result};
 use crate::file_store::ScanEvent;
-use crate::util::ManagedBuffers;
 
 // =============================================================================
 // FileStore Subcommands
@@ -136,7 +135,7 @@ impl SourceChunksArgs {
         let path = Path::new(&path_str);
 
         let mut contents = source
-            .get_source_chunks_with_content(path, ManagedBuffers::new())
+            .get_source_chunks_with_content(path, app.managed_buffers())
             .await
             .map_err(|e| CliError::Other(e.to_string()))?
             .ok_or_else(|| CliError::Other(format!("path not found: {}", path_str)))?;

@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use crate::download::{DownloadActions, DownloadRepoToStore};
 use crate::repository::ObjectId;
 use crate::repo::RepoInitialize;
-use crate::util::ManagedBuffers;
 
 // =============================================================================
 // Repo Subcommands
@@ -382,8 +381,7 @@ impl WriteArgs {
         let id = hex::encode(hash);
 
         // Create a ManagedBuffer for the data
-        let managed_buffers = ManagedBuffers::new();
-        let buffer = managed_buffers.get_buffer_with_data(data.to_vec()).await;
+        let buffer = app.managed_buffers().get_buffer_with_data(data.to_vec()).await;
 
         // Write to the repository
         let result = repo.write(&id, Arc::new(buffer)).await?;
@@ -439,7 +437,7 @@ impl UploadFileArgs {
         let file_store = app.create_file_store(fs_ctx).await?;
 
         let path = Path::new(&self.path);
-        let result = upload_file(file_store.as_ref(), repo, path, ManagedBuffers::new())
+        let result = upload_file(file_store.as_ref(), repo, path, app.managed_buffers())
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
 
@@ -500,7 +498,7 @@ impl UploadDirectoryArgs {
 
         let path = self.path.as_deref().map(Path::new);
         let result =
-            upload_directory(file_store.as_ref(), repo, cache, path, ManagedBuffers::new())
+            upload_directory(file_store.as_ref(), repo, cache, path, app.managed_buffers())
                 .await
                 .map_err(|e| CliError::Other(e.to_string()))?;
 

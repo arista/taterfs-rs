@@ -11,4 +11,4 @@ pub use complete::{
     WithComplete,
 };
 pub use dedup::Dedup;
-pub use managed_buffers::{ManagedBuffer, ManagedBuffers};
+pub use managed_buffers::{AcquiredCapacity, ManagedBuffer, ManagedBuffers};

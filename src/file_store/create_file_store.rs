@@ -359,13 +359,19 @@ impl CreateFileStoreContext {
                     s3_config = s3_config.with_region(region);
                 }
 
-                let source = S3FileSource::new(s3_config, flow_control).await;
+                let source = S3FileSource::new(
+                    s3_config,
+                    self.managed_buffers.clone(),
+                    flow_control,
+                )
+                .await;
 
                 Ok(Arc::new(S3FileStoreWrapper::new(source, cache)))
             }
 
             FileStoreType::FileSystem => {
-                let store = FsFileStore::new(&spec.location, cache);
+                let store =
+                    FsFileStore::new(&spec.location, self.managed_buffers.clone(), cache);
                 Ok(Arc::new(store))
             }
 

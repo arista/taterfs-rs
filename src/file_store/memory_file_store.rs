@@ -153,6 +153,8 @@ enum TreeNode {
 /// An in-memory FileStore implementation, primarily for testing.
 pub struct MemoryFileStore {
     root: RwLock<BTreeMap<String, TreeNode>>,
+    /// Buffer manager for chunk allocation.
+    managed_buffers: ManagedBuffers,
     /// Cache for this file store.
     cache: Arc<dyn FileStoreCache>,
 }
@@ -264,6 +266,7 @@ fn get_node_mut<'a>(
 pub struct MemoryFileStoreBuilder {
     root: BTreeMap<String, TreeNode>,
     cache: Option<Arc<dyn FileStoreCache>>,
+    managed_buffers: Option<ManagedBuffers>,
 }
 
 impl MemoryFileStoreBuilder {
@@ -271,12 +274,19 @@ impl MemoryFileStoreBuilder {
         Self {
             root: BTreeMap::new(),
             cache: None,
+            managed_buffers: None,
         }
     }
 
     /// Set the cache for this file store.
     pub fn with_cache(mut self, cache: Arc<dyn FileStoreCache>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Set the managed buffers for this file store.
+    pub fn with_managed_buffers(mut self, managed_buffers: ManagedBuffers) -> Self {
+        self.managed_buffers = Some(managed_buffers);
         self
     }
 
@@ -335,6 +345,7 @@ impl MemoryFileStoreBuilder {
     pub fn build(self) -> MemoryFileStore {
         MemoryFileStore {
             root: RwLock::new(self.root),
+            managed_buffers: self.managed_buffers.unwrap_or_default(),
             cache: self.cache.unwrap_or_else(|| Arc::new(NoopFileStoreCache)),
         }
     }
@@ -383,19 +394,31 @@ impl SourceChunkList for MemorySourceChunkList {
 // =============================================================================
 
 /// Read a chunk from a memory file and create a SourceChunkContent.
+///
+/// Uses the acquire-then-read pattern: acquires buffer capacity BEFORE
+/// reading the content, ensuring backpressure is applied before I/O.
 async fn read_chunk_content(
     file: &MemoryFile,
     offset: u64,
     size: u64,
     managed_buffers: &ManagedBuffers,
 ) -> Result<SourceChunkContent> {
+    // 1. Acquire capacity before reading (waits if capacity limit is reached)
+    let acquired = managed_buffers.acquire(size).await;
+
+    // 2. Read the data
     let data = file.read_range(offset, size);
+
+    // 3. Compute hash
     let hash = {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         format!("{:x}", hasher.finalize())
     };
-    let managed_buffer = managed_buffers.get_buffer_with_data(data).await;
+
+    // 4. Create buffer using the acquired capacity (doesn't wait)
+    let managed_buffer = managed_buffers.create_buffer_with_acquired(data, acquired);
+
     Ok(SourceChunkContent {
         offset,
         size,
@@ -519,7 +542,6 @@ impl FileSource for MemoryFileStore {
     async fn get_source_chunks_with_content(
         &self,
         path: &Path,
-        managed_buffers: ManagedBuffers,
     ) -> Result<Option<SourceChunksWithContent>> {
         let root = self.root.read().await;
         let node = match get_node(&root, path) {
@@ -539,7 +561,7 @@ impl FileSource for MemoryFileStore {
         Ok(Some(Box::new(MemorySourceChunkWithContentList::new(
             file,
             file_size,
-            managed_buffers,
+            self.managed_buffers.clone(),
         ))))
     }
 
@@ -1059,7 +1081,7 @@ mod tests {
 
         // Get chunks with content directly from path
         let mut chunks_with_content = store
-            .get_source_chunks_with_content(Path::new("small.txt"), ManagedBuffers::new())
+            .get_source_chunks_with_content(Path::new("small.txt"))
             .await
             .unwrap()
             .unwrap();
@@ -1103,7 +1125,7 @@ mod tests {
 
         // Verify chunk content hashes are computed
         let mut chunks_with_content = store
-            .get_source_chunks_with_content(Path::new("large.bin"), ManagedBuffers::new())
+            .get_source_chunks_with_content(Path::new("large.bin"))
             .await
             .unwrap()
             .unwrap();

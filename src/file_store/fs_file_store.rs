@@ -24,16 +24,23 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub struct FsFileStore {
     /// Root path on the filesystem.
     root: PathBuf,
+    /// Buffer manager for chunk allocation.
+    managed_buffers: ManagedBuffers,
     /// Cache for this file store.
     cache: Arc<dyn FileStoreCache>,
 }
 
 impl FsFileStore {
     /// Create a new FsFileStore rooted at the given path.
-    pub fn new(root: impl AsRef<Path>, cache: Arc<dyn FileStoreCache>) -> Self {
+    pub fn new(
+        root: impl AsRef<Path>,
+        managed_buffers: ManagedBuffers,
+        cache: Arc<dyn FileStoreCache>,
+    ) -> Self {
         let root_path = root.as_ref().to_path_buf();
         Self {
             root: root_path,
+            managed_buffers,
             cache,
         }
     }
@@ -122,26 +129,34 @@ impl SourceChunkList for FsSourceChunkList {
 // =============================================================================
 
 /// Read a chunk from a file and return SourceChunkContent.
+///
+/// Uses the acquire-then-read pattern: acquires buffer capacity BEFORE
+/// reading the content, ensuring backpressure is applied before I/O.
 async fn read_chunk_content(
     path: &Path,
     offset: u64,
     size: u64,
     managed_buffers: &ManagedBuffers,
 ) -> Result<SourceChunkContent> {
+    // 1. Acquire capacity before reading (waits if capacity limit is reached)
+    let acquired = managed_buffers.acquire(size).await;
+
+    // 2. Read the data
     let mut file = fs::File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
 
     let mut buffer = vec![0u8; size as usize];
     file.read_exact(&mut buffer).await?;
 
+    // 3. Compute hash
     let hash = {
         let mut hasher = Sha256::new();
         hasher.update(&buffer);
         format!("{:x}", hasher.finalize())
     };
 
-    // Wrap the buffer in a ManagedBuffer
-    let managed_buffer = managed_buffers.get_buffer_with_data(buffer).await;
+    // 4. Create buffer using the acquired capacity (doesn't wait)
+    let managed_buffer = managed_buffers.create_buffer_with_acquired(buffer, acquired);
 
     Ok(SourceChunkContent {
         offset,
@@ -262,7 +277,6 @@ impl FileSource for FsFileStore {
     async fn get_source_chunks_with_content(
         &self,
         path: &Path,
-        managed_buffers: ManagedBuffers,
     ) -> Result<Option<SourceChunksWithContent>> {
         let absolute = self.to_absolute(path);
 
@@ -281,7 +295,7 @@ impl FileSource for FsFileStore {
         Ok(Some(Box::new(FsSourceChunkWithContentList::new(
             absolute,
             file_size,
-            managed_buffers,
+            self.managed_buffers.clone(),
         ))))
     }
 
@@ -736,6 +750,10 @@ mod tests {
         Arc::new(NoopFileStoreCache)
     }
 
+    fn create_store(temp: &TempDir) -> FsFileStore {
+        FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache())
+    }
+
     /// Helper to collect all events from a ScanEventList.
     async fn collect_scan_events(mut events: ScanEvents) -> Vec<ScanEvent> {
         let mut result = Vec::new();
@@ -748,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_directory() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -763,7 +781,7 @@ mod tests {
             .write_all(b"Hello, World!")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         // Test get_entry
         let entry = store.get_entry(Path::new("hello.txt")).await.unwrap();
@@ -798,7 +816,7 @@ mod tests {
             .write_all(b"sibling")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -820,11 +838,11 @@ mod tests {
             .write_all(b"tiny")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         // Get chunks with content directly from path
         let mut chunks_with_content = store
-            .get_source_chunks_with_content(Path::new("small.txt"), ManagedBuffers::new())
+            .get_source_chunks_with_content(Path::new("small.txt"))
             .await
             .unwrap()
             .unwrap();
@@ -841,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_source_chunks_not_found() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let result = store
             .get_source_chunks(Path::new("missing.txt"))
@@ -855,7 +873,7 @@ mod tests {
         let temp = create_test_dir();
         std::fs::create_dir(temp.path().join("subdir")).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let result = store.get_source_chunks(Path::new("subdir")).await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
@@ -874,7 +892,7 @@ mod tests {
             .write_all(b"content")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -907,7 +925,7 @@ mod tests {
             .write_all(b"fn main() {}")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -931,7 +949,7 @@ mod tests {
         File::create(temp.path().join("a.txt")).unwrap();
         File::create(temp.path().join("m.txt")).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -949,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_file_not_found() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let result = store.get_file(Path::new("missing.txt")).await;
         assert!(matches!(result, Err(Error::NotFound(_))));
@@ -958,7 +976,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_entry_root() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let entry = store.get_entry(Path::new("")).await.unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
@@ -974,7 +992,7 @@ mod tests {
             .write_all(b"Hello")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         // Even with an absolute path, it should be relative to the store root
         let entry = store.get_entry(Path::new("/hello.txt")).await.unwrap();
@@ -1002,7 +1020,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let entry = store.get_entry(Path::new("script.sh")).await.unwrap();
         match entry {
@@ -1033,7 +1051,7 @@ mod tests {
         std::os::unix::fs::symlink(temp.path().join("realdir"), temp.path().join("linkdir"))
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
 
         let events = collect_scan_events(store.scan(None).await.unwrap()).await;
 
@@ -1066,7 +1084,7 @@ mod tests {
             .build();
 
         store
-            .get_source_chunks_with_content(Path::new("_data"), ManagedBuffers::new())
+            .get_source_chunks_with_content(Path::new("_data"))
             .await
             .unwrap()
             .unwrap()
@@ -1075,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn test_dest_write_file_from_chunks() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let data = b"Hello, World!";
@@ -1092,7 +1110,7 @@ mod tests {
     #[tokio::test]
     async fn test_dest_write_creates_parent_dirs() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let chunks = chunks_with_content_from_bytes(b"nested").await;
@@ -1110,7 +1128,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let chunks = chunks_with_content_from_bytes(b"#!/bin/bash").await;
@@ -1144,7 +1162,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         // Write non-executable over it
@@ -1170,7 +1188,7 @@ mod tests {
             .write_all(b"content")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         dest.rm(Path::new("file.txt")).await.unwrap();
@@ -1186,7 +1204,7 @@ mod tests {
             .write_all(b"content")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         dest.rm(Path::new("dir")).await.unwrap();
@@ -1196,7 +1214,7 @@ mod tests {
     #[tokio::test]
     async fn test_dest_rm_nonexistent_is_ok() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         dest.rm(Path::new("nonexistent")).await.unwrap();
@@ -1205,7 +1223,7 @@ mod tests {
     #[tokio::test]
     async fn test_dest_mkdir() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         dest.mkdir(Path::new("a/b/c")).await.unwrap();
@@ -1217,7 +1235,7 @@ mod tests {
         let temp = create_test_dir();
         std::fs::create_dir(temp.path().join("existing")).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         dest.mkdir(Path::new("existing")).await.unwrap();
@@ -1229,7 +1247,7 @@ mod tests {
         let temp = create_test_dir();
         File::create(temp.path().join("file.txt")).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let result = dest.mkdir(Path::new("file.txt")).await;
@@ -1247,7 +1265,7 @@ mod tests {
             .write_all(b"#!/bin/bash")
             .unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         // Set executable
@@ -1282,7 +1300,7 @@ mod tests {
     #[tokio::test]
     async fn test_dest_set_executable_not_found() {
         let temp = create_test_dir();
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let result = dest.set_executable(Path::new("missing"), true).await;
@@ -1294,7 +1312,7 @@ mod tests {
         let temp = create_test_dir();
         std::fs::create_dir(temp.path().join("dir")).unwrap();
 
-        let store = FsFileStore::new(temp.path(), noop_cache());
+        let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let result = dest.set_executable(Path::new("dir"), true).await;

@@ -174,6 +174,59 @@ impl ManagedBuffers {
     pub fn capacity(&self) -> Option<u64> {
         self.capacity_manager.as_ref().map(|cm| cm.capacity())
     }
+
+    /// Acquire capacity for a buffer of the given size.
+    ///
+    /// If a capacity manager is configured and capacity is not available,
+    /// this will wait until capacity becomes available.
+    ///
+    /// Use this when you want to wait for capacity BEFORE doing I/O,
+    /// then create the buffer after the I/O completes using
+    /// [`create_buffer_with_acquired`](Self::create_buffer_with_acquired).
+    pub async fn acquire(&self, size: u64) -> AcquiredCapacity {
+        let used_capacity = match &self.capacity_manager {
+            Some(cm) => Some(cm.use_capacity(size).await),
+            None => None,
+        };
+        AcquiredCapacity {
+            size,
+            used_capacity,
+        }
+    }
+
+    /// Create a buffer using previously acquired capacity.
+    ///
+    /// The data length must not exceed the acquired capacity size.
+    /// This does not wait for capacity since it was already acquired.
+    pub fn create_buffer_with_acquired(
+        &self,
+        data: impl Into<Vec<u8>>,
+        acquired: AcquiredCapacity,
+    ) -> ManagedBuffer {
+        let data = data.into();
+        debug_assert!(
+            data.len() as u64 <= acquired.size,
+            "data size {} exceeds acquired capacity {}",
+            data.len(),
+            acquired.size
+        );
+
+        let buf = BytesMut::from(data.as_slice());
+
+        ManagedBuffer {
+            buf,
+            _used_capacity: acquired.used_capacity,
+        }
+    }
+}
+
+/// Capacity that has been acquired but not yet used to create a buffer.
+///
+/// This is returned by [`ManagedBuffers::acquire`] and consumed by
+/// [`ManagedBuffers::create_buffer_with_acquired`].
+pub struct AcquiredCapacity {
+    size: u64,
+    used_capacity: Option<UsedCapacity>,
 }
 
 impl Default for ManagedBuffers {

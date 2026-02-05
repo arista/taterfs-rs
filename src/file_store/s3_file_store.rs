@@ -85,13 +85,19 @@ impl S3FileSourceConfig {
 pub struct S3FileSource {
     client: Client,
     config: S3FileSourceConfig,
+    /// Buffer manager for chunk allocation.
+    managed_buffers: ManagedBuffers,
     /// Flow control for rate limiting and concurrency.
     flow_control: FlowControl,
 }
 
 impl S3FileSource {
     /// Create a new S3FileSource with the given configuration.
-    pub async fn new(config: S3FileSourceConfig, flow_control: FlowControl) -> Self {
+    pub async fn new(
+        config: S3FileSourceConfig,
+        managed_buffers: ManagedBuffers,
+        flow_control: FlowControl,
+    ) -> Self {
         let mut aws_config_loader = aws_config::defaults(BehaviorVersion::latest());
 
         if let Some(ref region) = config.region {
@@ -114,6 +120,7 @@ impl S3FileSource {
         Self {
             client,
             config,
+            managed_buffers,
             flow_control,
         }
     }
@@ -619,7 +626,6 @@ impl FileSource for S3FileSource {
     async fn get_source_chunks_with_content(
         &self,
         path: &Path,
-        managed_buffers: ManagedBuffers,
     ) -> Result<Option<SourceChunksWithContent>> {
         let key = self.to_key(path);
 
@@ -650,7 +656,7 @@ impl FileSource for S3FileSource {
             self.config.bucket.clone(),
             key,
             file_size,
-            managed_buffers,
+            self.managed_buffers.clone(),
             self.flow_control.clone(),
         ))))
     }

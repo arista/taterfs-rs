@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::caches::FileStoreCache;
-use crate::util::{ManagedBuffer, ManagedBuffers};
+use crate::util::ManagedBuffer;
 
 /// Result type for file store operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -446,19 +446,19 @@ pub trait FileSource: Send + Sync {
     ///
     /// Returns an async iterator that yields chunks with content. Each call to
     /// `next()` on the returned list:
-    /// 1. Acquires a ManagedBuffer (blocking until one is available)
-    /// 2. Initiates a background download into that buffer
-    /// 3. Returns a `SourceChunkWithContent` handle immediately
+    /// 1. Acquires buffer capacity (blocking until available)
+    /// 2. Reads the chunk content
+    /// 3. Creates a ManagedBuffer with the content
+    /// 4. Returns a `SourceChunkWithContent` handle
     ///
-    /// Call `content()` on the returned handle to wait for the download to complete.
+    /// Call `content()` on the returned handle to get the content.
     ///
     /// Chunks are computed iteratively and returned in order. Because
-    /// ManagedBuffers are acquired in order, this prevents deadlock scenarios
-    /// where later chunks could block earlier ones.
+    /// buffer capacity is acquired before reading, this prevents unbounded
+    /// memory usage and ensures proper backpressure.
     async fn get_source_chunks_with_content(
         &self,
         path: &Path,
-        managed_buffers: ManagedBuffers,
     ) -> Result<Option<SourceChunksWithContent>>;
 
     /// Get information about a file or directory at the given path.

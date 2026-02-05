@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::caches::FileStoreCache;
-use crate::util::ManagedBuffer;
+use crate::util::{ManagedBuffer, ManagedBuffers};
 
 /// Result type for file store operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -469,6 +469,7 @@ pub trait FileSource: Send + Sync {
     async fn get_source_chunks_with_content(
         &self,
         chunks: SourceChunks,
+        managed_buffers: ManagedBuffers,
     ) -> Result<SourceChunksWithContent>;
 
     /// Get information about a file or directory at the given path.

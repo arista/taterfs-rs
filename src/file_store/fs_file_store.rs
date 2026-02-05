@@ -98,11 +98,10 @@ pub struct FsSourceChunkList {
     path: PathBuf,
     chunks: Vec<SourceChunk>,
     index: usize,
-    managed_buffers: ManagedBuffers,
 }
 
 impl FsSourceChunkList {
-    fn new(path: PathBuf, file_size: u64, managed_buffers: ManagedBuffers) -> Self {
+    fn new(path: PathBuf, file_size: u64) -> Self {
         // Compute all chunk metadata upfront
         let mut chunks = Vec::new();
         let mut offset = 0u64;
@@ -120,7 +119,6 @@ impl FsSourceChunkList {
             path,
             chunks,
             index: 0,
-            managed_buffers,
         }
     }
 }
@@ -285,22 +283,18 @@ impl FileSource for FsFileStore {
 
         let file_size = metadata.len();
 
-        Ok(Some(Box::new(FsSourceChunkList::new(
-            absolute,
-            file_size,
-            self.managed_buffers.clone(),
-        ))))
+        Ok(Some(Box::new(FsSourceChunkList::new(absolute, file_size))))
     }
 
     async fn get_source_chunks_with_content(
         &self,
         chunks: SourceChunks,
+        managed_buffers: ManagedBuffers,
     ) -> Result<SourceChunksWithContent> {
         // Try to downcast to FsSourceChunkList to get the file path
         if let Some(fs_chunks) = chunks.as_any().downcast_ref::<FsSourceChunkList>() {
             let path = fs_chunks.path.clone();
             let remaining_chunks = fs_chunks.chunks[fs_chunks.index..].to_vec();
-            let managed_buffers = fs_chunks.managed_buffers.clone();
 
             Ok(Box::new(FsSourceChunkWithContentList::new(
                 path,
@@ -859,7 +853,10 @@ mod tests {
             .unwrap();
 
         // Get chunks with content
-        let mut chunks_with_content = store.get_source_chunks_with_content(chunks).await.unwrap();
+        let mut chunks_with_content = store
+            .get_source_chunks_with_content(chunks, ManagedBuffers::new())
+            .await
+            .unwrap();
 
         let chunk = chunks_with_content.next().await.unwrap().unwrap();
         assert_eq!(chunk.offset, 0);
@@ -1103,7 +1100,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        store.get_source_chunks_with_content(chunks).await.unwrap()
+        store
+            .get_source_chunks_with_content(chunks, ManagedBuffers::new())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

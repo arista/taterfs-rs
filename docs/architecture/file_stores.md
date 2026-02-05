@@ -29,7 +29,7 @@ interface FileSource {
   // Yields the locations of a file's contents broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md)
   get_source_chunks(path: Path) -> SourceChunkList | null
   // Yields the contents of a file, broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md).
-  get_source_chunks_with_content(chunks: SourceChunks) -> SourceChunkWithContentList | null
+  get_source_chunks_with_content(path: Path) -> SourceChunkWithContentList | null
   // Return information about one file or directory
   get_entry(path: Path) -> DirectoryEntry | null
   // Retrieve an entire file's contents, error if the path is not a File.  This should only be used when the file is expected to be relatively small

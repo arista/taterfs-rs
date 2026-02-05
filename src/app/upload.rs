@@ -11,7 +11,7 @@ use crate::caches::{DbId, FileStoreCache, FingerprintedFileInfo};
 use crate::file_store::{FileStore, ScanEvent, ScanEvents};
 use crate::repo::{Repo, RepoError};
 use crate::repository::{ChunkFilePart, DirEntry, Directory, File, FileEntry, ObjectId};
-use crate::util::{Complete, NoopComplete, WithComplete};
+use crate::util::{Complete, ManagedBuffers, NoopComplete, WithComplete};
 
 // =============================================================================
 // Upload Result Types
@@ -86,7 +86,9 @@ pub async fn upload_file(
         .ok_or_else(|| UploadError::NotFound(path.display().to_string()))?;
 
     // Get the chunk contents list (with deadlock-safe ordering)
-    let mut chunk_contents = source.get_source_chunks_with_content(chunks).await?;
+    let mut chunk_contents = source
+        .get_source_chunks_with_content(chunks, ManagedBuffers::new())
+        .await?;
 
     // Create the file list builder
     let mut builder = FileListBuilder::new(repo.clone());

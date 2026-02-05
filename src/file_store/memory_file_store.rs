@@ -363,16 +363,14 @@ pub struct MemorySourceChunkList {
     file: MemoryFile,
     chunks: Vec<SourceChunk>,
     index: usize,
-    managed_buffers: ManagedBuffers,
 }
 
 impl MemorySourceChunkList {
-    fn new(file: MemoryFile, chunks: Vec<SourceChunk>, managed_buffers: ManagedBuffers) -> Self {
+    fn new(file: MemoryFile, chunks: Vec<SourceChunk>) -> Self {
         Self {
             file,
             chunks,
             index: 0,
-            managed_buffers,
         }
     }
 }
@@ -537,16 +535,13 @@ impl FileSource for MemoryFileStore {
         drop(root);
 
         let chunks = compute_chunk_metadata(&file);
-        Ok(Some(Box::new(MemorySourceChunkList::new(
-            file,
-            chunks,
-            self.managed_buffers.clone(),
-        ))))
+        Ok(Some(Box::new(MemorySourceChunkList::new(file, chunks))))
     }
 
     async fn get_source_chunks_with_content(
         &self,
         chunks: SourceChunks,
+        managed_buffers: ManagedBuffers,
     ) -> Result<SourceChunksWithContent> {
         // Try to downcast to our specific type to get the file reference
         // We need to check if this is a MemorySourceChunkList from our get_source_chunks
@@ -554,7 +549,6 @@ impl FileSource for MemoryFileStore {
             // Clone the data we need (we can't move out of the borrow)
             let file = mem_chunks.file.clone();
             let remaining_chunks = mem_chunks.chunks[mem_chunks.index..].to_vec();
-            let managed_buffers = mem_chunks.managed_buffers.clone();
 
             Ok(Box::new(MemorySourceChunkWithContentList::new(
                 file,
@@ -1112,7 +1106,10 @@ mod tests {
             .unwrap();
 
         // Get chunks with content
-        let mut chunks_with_content = store.get_source_chunks_with_content(chunks).await.unwrap();
+        let mut chunks_with_content = store
+            .get_source_chunks_with_content(chunks, ManagedBuffers::new())
+            .await
+            .unwrap();
 
         let chunk = chunks_with_content.next().await.unwrap().unwrap();
         assert_eq!(chunk.offset, 0);
@@ -1158,7 +1155,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut chunks_with_content = store
-            .get_source_chunks_with_content(chunks_for_content)
+            .get_source_chunks_with_content(chunks_for_content, ManagedBuffers::new())
             .await
             .unwrap();
         let first_chunk = chunks_with_content.next().await.unwrap().unwrap();

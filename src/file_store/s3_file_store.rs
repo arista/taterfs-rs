@@ -277,7 +277,6 @@ pub struct S3SourceChunkList {
     key: String,
     chunks: Vec<SourceChunk>,
     index: usize,
-    managed_buffers: ManagedBuffers,
     flow_control: FlowControl,
 }
 
@@ -287,7 +286,6 @@ impl S3SourceChunkList {
         bucket: String,
         key: String,
         file_size: u64,
-        managed_buffers: ManagedBuffers,
         flow_control: FlowControl,
     ) -> Self {
         // Compute all chunk metadata upfront
@@ -309,7 +307,6 @@ impl S3SourceChunkList {
             key,
             chunks,
             index: 0,
-            managed_buffers,
             flow_control,
         }
     }
@@ -614,7 +611,6 @@ impl FileSource for S3FileSource {
             self.config.bucket.clone(),
             key,
             file_size,
-            self.managed_buffers.clone(),
             self.flow_control.clone(),
         ))))
     }
@@ -622,6 +618,7 @@ impl FileSource for S3FileSource {
     async fn get_source_chunks_with_content(
         &self,
         chunks: SourceChunks,
+        managed_buffers: ManagedBuffers,
     ) -> Result<SourceChunksWithContent> {
         // Try to downcast to S3SourceChunkList to get the S3 context
         if let Some(s3_chunks) = chunks.as_any().downcast_ref::<S3SourceChunkList>() {
@@ -632,7 +629,7 @@ impl FileSource for S3FileSource {
                 s3_chunks.bucket.clone(),
                 s3_chunks.key.clone(),
                 remaining_chunks,
-                s3_chunks.managed_buffers.clone(),
+                managed_buffers,
                 s3_chunks.flow_control.clone(),
             )))
         } else {

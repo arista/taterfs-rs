@@ -7,6 +7,4 @@
 #[allow(clippy::module_inception)]
 mod download;
 
-pub use download::{
-    DownloadActions, DownloadError, DownloadRepoToStore, FileDestDownloadActions, Result,
-};
+pub use download::{DownloadActions, DownloadError, DownloadRepoToStore, Result};

@@ -153,8 +153,6 @@ enum TreeNode {
 /// An in-memory FileStore implementation, primarily for testing.
 pub struct MemoryFileStore {
     root: RwLock<BTreeMap<String, TreeNode>>,
-    /// Buffer manager for chunk allocation.
-    managed_buffers: ManagedBuffers,
     /// Cache for this file store.
     cache: Arc<dyn FileStoreCache>,
 }
@@ -265,7 +263,6 @@ fn get_node_mut<'a>(
 /// Builder for constructing a MemoryFileStore.
 pub struct MemoryFileStoreBuilder {
     root: BTreeMap<String, TreeNode>,
-    managed_buffers: ManagedBuffers,
     cache: Option<Arc<dyn FileStoreCache>>,
 }
 
@@ -273,15 +270,8 @@ impl MemoryFileStoreBuilder {
     fn new() -> Self {
         Self {
             root: BTreeMap::new(),
-            managed_buffers: ManagedBuffers::new(),
             cache: None,
         }
-    }
-
-    /// Set the ManagedBuffers for buffer allocation.
-    pub fn with_managed_buffers(mut self, managed_buffers: ManagedBuffers) -> Self {
-        self.managed_buffers = managed_buffers;
-        self
     }
 
     /// Set the cache for this file store.
@@ -345,7 +335,6 @@ impl MemoryFileStoreBuilder {
     pub fn build(self) -> MemoryFileStore {
         MemoryFileStore {
             root: RwLock::new(self.root),
-            managed_buffers: self.managed_buffers,
             cache: self.cache.unwrap_or_else(|| Arc::new(NoopFileStoreCache)),
         }
     }
@@ -357,20 +346,17 @@ impl MemoryFileStoreBuilder {
 
 /// SourceChunkList implementation for MemoryFileStore.
 ///
-/// This holds both the chunk metadata and a reference to the file,
-/// allowing get_source_chunks_with_content to access the file data.
+/// Computes chunks iteratively as next() is called.
 pub struct MemorySourceChunkList {
-    file: MemoryFile,
-    chunks: Vec<SourceChunk>,
-    index: usize,
+    file_size: u64,
+    current_offset: u64,
 }
 
 impl MemorySourceChunkList {
-    fn new(file: MemoryFile, chunks: Vec<SourceChunk>) -> Self {
+    fn new(file_size: u64) -> Self {
         Self {
-            file,
-            chunks,
-            index: 0,
+            file_size,
+            current_offset: 0,
         }
     }
 }
@@ -378,21 +364,17 @@ impl MemorySourceChunkList {
 #[async_trait]
 impl SourceChunkList for MemorySourceChunkList {
     async fn next(&mut self) -> Option<Result<SourceChunk>> {
-        if self.index < self.chunks.len() {
-            let chunk = self.chunks[self.index].clone();
-            self.index += 1;
-            Some(Ok(chunk))
-        } else {
-            None
+        if self.current_offset >= self.file_size {
+            return None;
         }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+        let remaining = self.file_size - self.current_offset;
+        let size = next_chunk_size(remaining);
+        let chunk = SourceChunk {
+            offset: self.current_offset,
+            size,
+        };
+        self.current_offset += size;
+        Some(Ok(chunk))
     }
 }
 
@@ -425,19 +407,20 @@ async fn read_chunk_content(
 /// Sequential implementation of SourceChunkWithContentList for MemoryFileStore.
 ///
 /// This doesn't do any concurrency - it reads chunks sequentially.
+/// Chunks are computed iteratively as next() is called.
 struct MemorySourceChunkWithContentList {
     file: MemoryFile,
-    chunks: Vec<SourceChunk>,
-    index: usize,
+    file_size: u64,
+    current_offset: u64,
     managed_buffers: ManagedBuffers,
 }
 
 impl MemorySourceChunkWithContentList {
-    fn new(file: MemoryFile, chunks: Vec<SourceChunk>, managed_buffers: ManagedBuffers) -> Self {
+    fn new(file: MemoryFile, file_size: u64, managed_buffers: ManagedBuffers) -> Self {
         Self {
             file,
-            chunks,
-            index: 0,
+            file_size,
+            current_offset: 0,
             managed_buffers,
         }
     }
@@ -446,26 +429,24 @@ impl MemorySourceChunkWithContentList {
 #[async_trait]
 impl SourceChunkWithContentList for MemorySourceChunkWithContentList {
     async fn next(&mut self) -> Option<Result<SourceChunkWithContent>> {
-        if self.index >= self.chunks.len() {
+        if self.current_offset >= self.file_size {
             return None;
         }
 
-        let chunk = self.chunks[self.index].clone();
-        self.index += 1;
+        let remaining = self.file_size - self.current_offset;
+        let size = next_chunk_size(remaining);
+        let offset = self.current_offset;
+        self.current_offset += size;
 
         // For MemoryFileStore, we read synchronously (no background download needed)
         let content =
-            match read_chunk_content(&self.file, chunk.offset, chunk.size, &self.managed_buffers)
-                .await
-            {
+            match read_chunk_content(&self.file, offset, size, &self.managed_buffers).await {
                 Ok(c) => c,
                 Err(e) => return Some(Err(e)),
             };
 
         Some(Ok(SourceChunkWithContent::new_immediate(
-            chunk.offset,
-            chunk.size,
-            content,
+            offset, size, content,
         )))
     }
 }
@@ -525,6 +506,27 @@ impl FileSource for MemoryFileStore {
             None => return Ok(None),
         };
 
+        let file_size = match node {
+            TreeNode::File(f) => f.size(),
+            TreeNode::Directory(_) => {
+                return Err(Error::NotAFile(Self::path_to_string(path)));
+            }
+        };
+
+        Ok(Some(Box::new(MemorySourceChunkList::new(file_size))))
+    }
+
+    async fn get_source_chunks_with_content(
+        &self,
+        path: &Path,
+        managed_buffers: ManagedBuffers,
+    ) -> Result<Option<SourceChunksWithContent>> {
+        let root = self.root.read().await;
+        let node = match get_node(&root, path) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
         let file = match node {
             TreeNode::File(f) => f.clone(),
             TreeNode::Directory(_) => {
@@ -532,36 +534,13 @@ impl FileSource for MemoryFileStore {
             }
         };
 
-        drop(root);
+        let file_size = file.size();
 
-        let chunks = compute_chunk_metadata(&file);
-        Ok(Some(Box::new(MemorySourceChunkList::new(file, chunks))))
-    }
-
-    async fn get_source_chunks_with_content(
-        &self,
-        chunks: SourceChunks,
-        managed_buffers: ManagedBuffers,
-    ) -> Result<SourceChunksWithContent> {
-        // Try to downcast to our specific type to get the file reference
-        // We need to check if this is a MemorySourceChunkList from our get_source_chunks
-        if let Some(mem_chunks) = chunks.as_any().downcast_ref::<MemorySourceChunkList>() {
-            // Clone the data we need (we can't move out of the borrow)
-            let file = mem_chunks.file.clone();
-            let remaining_chunks = mem_chunks.chunks[mem_chunks.index..].to_vec();
-
-            Ok(Box::new(MemorySourceChunkWithContentList::new(
-                file,
-                remaining_chunks,
-                managed_buffers,
-            )))
-        } else {
-            // Not our type - this shouldn't happen if called correctly
-            Err(Error::Other(
-                "MemoryFileStore::get_source_chunks_with_content: chunks must come from this store's get_source_chunks"
-                    .to_string(),
-            ))
-        }
+        Ok(Some(Box::new(MemorySourceChunkWithContentList::new(
+            file,
+            file_size,
+            managed_buffers,
+        ))))
     }
 
     async fn get_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>> {
@@ -938,27 +917,6 @@ async fn scan_tree_with_ignore<S: super::scan_ignore_helper::ScanFileSource + ?S
     }
 }
 
-/// Compute the chunk metadata for a file.
-fn compute_chunk_metadata(file: &MemoryFile) -> Vec<SourceChunk> {
-    let total_size = file.size();
-    let mut chunks = Vec::new();
-    let mut offset = 0u64;
-
-    while offset < total_size {
-        let remaining = total_size - offset;
-        let chunk_size = next_chunk_size(remaining);
-
-        chunks.push(SourceChunk {
-            offset,
-            size: chunk_size,
-        });
-
-        offset += chunk_size;
-    }
-
-    chunks
-}
-
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1099,16 +1057,11 @@ mod tests {
             .add("small.txt", MemoryFsEntry::file("tiny"))
             .build();
 
-        let chunks = store
-            .get_source_chunks(Path::new("small.txt"))
+        // Get chunks with content directly from path
+        let mut chunks_with_content = store
+            .get_source_chunks_with_content(Path::new("small.txt"), ManagedBuffers::new())
             .await
             .unwrap()
-            .unwrap();
-
-        // Get chunks with content
-        let mut chunks_with_content = store
-            .get_source_chunks_with_content(chunks, ManagedBuffers::new())
-            .await
             .unwrap();
 
         let chunk = chunks_with_content.next().await.unwrap().unwrap();
@@ -1149,14 +1102,10 @@ mod tests {
         assert_eq!(total_size, size);
 
         // Verify chunk content hashes are computed
-        let chunks_for_content = store
-            .get_source_chunks(Path::new("large.bin"))
+        let mut chunks_with_content = store
+            .get_source_chunks_with_content(Path::new("large.bin"), ManagedBuffers::new())
             .await
             .unwrap()
-            .unwrap();
-        let mut chunks_with_content = store
-            .get_source_chunks_with_content(chunks_for_content, ManagedBuffers::new())
-            .await
             .unwrap();
         let first_chunk = chunks_with_content.next().await.unwrap().unwrap();
         let content = first_chunk.content().await.unwrap();
@@ -1541,7 +1490,6 @@ mod tests {
     // FileDest Mutation Tests
     // =========================================================================
 
-    /// Helper to create a simple SourceChunks stream from bytes.
     /// Helper to create a SourceChunksWithContent from bytes for testing write_file_from_chunks.
     fn chunks_with_content_from_bytes(data: &[u8]) -> SourceChunksWithContent {
         let managed_buffers = ManagedBuffers::new();
@@ -1549,10 +1497,10 @@ mod tests {
             contents: MemoryFileContents::Explicit(Arc::new(data.to_vec())),
             executable: false,
         };
-        let chunks = super::compute_chunk_metadata(&file);
+        let file_size = file.size();
         Box::new(super::MemorySourceChunkWithContentList::new(
             file,
-            chunks,
+            file_size,
             managed_buffers,
         ))
     }

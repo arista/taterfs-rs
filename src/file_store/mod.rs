@@ -172,15 +172,9 @@ pub struct SourceChunk {
 
 /// Async iterator over source chunks.
 #[async_trait]
-pub trait SourceChunkList: Send + std::any::Any {
+pub trait SourceChunkList: Send {
     /// Get the next source chunk.
     async fn next(&mut self) -> Option<Result<SourceChunk>>;
-
-    /// Returns self as Any for downcasting.
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Returns self as mutable Any for downcasting.
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Boxed SourceChunkList for dynamic dispatch.
@@ -209,14 +203,6 @@ impl SourceChunkList for VecSourceChunkList {
         } else {
             None
         }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
@@ -453,7 +439,10 @@ pub trait FileSource: Send + Sync {
     /// Chunks are yielded lazily - this just returns chunk metadata.
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>>;
 
-    /// Get chunk contents for a file, given a list of chunks.
+    /// Get chunk contents for a file at the given path.
+    ///
+    /// Returns None if the path does not exist.
+    /// Returns an error if the path exists but is not a file.
     ///
     /// Returns an async iterator that yields chunks with content. Each call to
     /// `next()` on the returned list:
@@ -463,14 +452,14 @@ pub trait FileSource: Send + Sync {
     ///
     /// Call `content()` on the returned handle to wait for the download to complete.
     ///
-    /// The chunks are returned in the same order as the input list. Because
+    /// Chunks are computed iteratively and returned in order. Because
     /// ManagedBuffers are acquired in order, this prevents deadlock scenarios
     /// where later chunks could block earlier ones.
     async fn get_source_chunks_with_content(
         &self,
-        chunks: SourceChunks,
+        path: &Path,
         managed_buffers: ManagedBuffers,
-    ) -> Result<SourceChunksWithContent>;
+    ) -> Result<Option<SourceChunksWithContent>>;
 
     /// Get information about a file or directory at the given path.
     ///

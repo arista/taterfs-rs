@@ -79,16 +79,11 @@ pub async fn upload_file(
 ) -> Result<WithComplete<UploadFileResult>> {
     let source = store.get_source().ok_or(UploadError::NoFileSource)?;
 
-    // Get the source chunks for the file
-    let chunks = source
-        .get_source_chunks(path)
+    // Get the chunk contents list directly from path
+    let mut chunk_contents = source
+        .get_source_chunks_with_content(path, ManagedBuffers::new())
         .await?
         .ok_or_else(|| UploadError::NotFound(path.display().to_string()))?;
-
-    // Get the chunk contents list (with deadlock-safe ordering)
-    let mut chunk_contents = source
-        .get_source_chunks_with_content(chunks, ManagedBuffers::new())
-        .await?;
 
     // Create the file list builder
     let mut builder = FileListBuilder::new(repo.clone());

@@ -135,16 +135,11 @@ impl SourceChunksArgs {
         let path_str = self.input.read(self.path.as_deref()).await?;
         let path = Path::new(&path_str);
 
-        let chunks = source
-            .get_source_chunks(path)
+        let mut contents = source
+            .get_source_chunks_with_content(path, ManagedBuffers::new())
             .await
             .map_err(|e| CliError::Other(e.to_string()))?
             .ok_or_else(|| CliError::Other(format!("path not found: {}", path_str)))?;
-
-        let mut contents = source
-            .get_source_chunks_with_content(chunks, ManagedBuffers::new())
-            .await
-            .map_err(|e| CliError::Other(e.to_string()))?;
 
         let mut output = String::new();
         let mut total_size = 0u64;

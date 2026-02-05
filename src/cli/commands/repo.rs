@@ -439,7 +439,7 @@ impl UploadFileArgs {
         let file_store = app.create_file_store(fs_ctx).await?;
 
         let path = Path::new(&self.path);
-        let result = upload_file(file_store.as_ref(), repo, path)
+        let result = upload_file(file_store.as_ref(), repo, path, ManagedBuffers::new())
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
 
@@ -499,9 +499,10 @@ impl UploadDirectoryArgs {
         let cache = file_store.get_cache();
 
         let path = self.path.as_deref().map(Path::new);
-        let result = upload_directory(file_store.as_ref(), repo, cache, path)
-            .await
-            .map_err(|e| CliError::Other(e.to_string()))?;
+        let result =
+            upload_directory(file_store.as_ref(), repo, cache, path, ManagedBuffers::new())
+                .await
+                .map_err(|e| CliError::Other(e.to_string()))?;
 
         // Wait for upload to complete
         result

@@ -76,12 +76,13 @@ pub async fn upload_file(
     store: &dyn FileStore,
     repo: Arc<Repo>,
     path: &Path,
+    managed_buffers: ManagedBuffers,
 ) -> Result<WithComplete<UploadFileResult>> {
     let source = store.get_source().ok_or(UploadError::NoFileSource)?;
 
     // Get the chunk contents list directly from path
     let mut chunk_contents = source
-        .get_source_chunks_with_content(path, ManagedBuffers::new())
+        .get_source_chunks_with_content(path, managed_buffers)
         .await?
         .ok_or_else(|| UploadError::NotFound(path.display().to_string()))?;
 
@@ -132,6 +133,7 @@ pub async fn upload_directory(
     repo: Arc<Repo>,
     cache: Arc<dyn FileStoreCache>,
     path: Option<&Path>,
+    managed_buffers: ManagedBuffers,
 ) -> Result<WithComplete<UploadDirectoryResult>> {
     let source = store.get_source().ok_or(UploadError::NoFileSource)?;
 
@@ -153,9 +155,16 @@ pub async fn upload_directory(
 
     // Start the recursive upload
     let path_buf = path.map(PathBuf::from).unwrap_or_default();
-    let (result, _remaining) =
-        upload_directory_from_scan_events(store, repo, cache, path_buf, cache_path_id, scan_events)
-            .await?;
+    let (result, _remaining) = upload_directory_from_scan_events(
+        store,
+        repo,
+        cache,
+        path_buf,
+        cache_path_id,
+        scan_events,
+        managed_buffers,
+    )
+    .await?;
 
     Ok(result)
 }
@@ -178,6 +187,7 @@ async fn upload_directory_from_scan_events(
     path: PathBuf,
     cache_path_id: Option<DbId>,
     mut scan_events: ScanEvents,
+    managed_buffers: ManagedBuffers,
 ) -> Result<UploadDirResult> {
     // Create the directory list builder
     let mut builder = DirectoryListBuilder::new(repo.clone());
@@ -232,6 +242,7 @@ async fn upload_directory_from_scan_events(
                     new_path,
                     Some(new_cache_path_id),
                     scan_events,
+                    managed_buffers.clone(),
                 ))
                 .await?;
 
@@ -287,7 +298,9 @@ async fn upload_directory_from_scan_events(
                         path.join(&file_entry.name)
                     };
 
-                    let upload_result = upload_file(store, repo.clone(), &file_path).await?;
+                    let upload_result =
+                        upload_file(store, repo.clone(), &file_path, managed_buffers.clone())
+                            .await?;
 
                     let file_hash = upload_result.result.hash.clone();
                     let complete = upload_result.complete;

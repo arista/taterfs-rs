@@ -262,6 +262,180 @@ impl FileChunkList {
 }
 
 // =============================================================================
+// File Chunk With Content
+// =============================================================================
+
+/// A file chunk with lazily-loaded content.
+///
+/// The chunk metadata is available immediately. Call `content()` to retrieve
+/// the actual chunk data, which may block if the background download hasn't
+/// completed yet.
+pub struct FileChunkWithContent {
+    /// The chunk metadata.
+    pub chunk: ChunkFilePart,
+    /// JoinHandle for the background download task.
+    download_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<Arc<ManagedBuffer>>>>>,
+    /// Cached content after download completes.
+    content_cell: Arc<tokio::sync::OnceCell<Result<Arc<ManagedBuffer>>>>,
+}
+
+impl FileChunkWithContent {
+    /// Create a new FileChunkWithContent with a background download task.
+    fn new(
+        chunk: ChunkFilePart,
+        handle: tokio::task::JoinHandle<Result<Arc<ManagedBuffer>>>,
+    ) -> Self {
+        Self {
+            chunk,
+            download_handle: tokio::sync::Mutex::new(Some(handle)),
+            content_cell: Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    /// Get the content of this chunk.
+    ///
+    /// Blocks until the background download completes (if not already done).
+    /// The result is cached, so subsequent calls return immediately.
+    pub async fn content(&self) -> Result<Arc<ManagedBuffer>> {
+        // Fast path: content already available
+        if let Some(result) = self.content_cell.get() {
+            return result.clone();
+        }
+
+        // Slow path: await the download handle if present
+        let download_result = {
+            let mut guard = self.download_handle.lock().await;
+            if let Some(handle) = guard.take() {
+                match handle.await {
+                    Ok(result) => Some(result),
+                    Err(e) => Some(Err(RepoError::Other(format!("Download task failed: {}", e)))),
+                }
+            } else {
+                None
+            }
+        };
+
+        // Set the content if we got a result from the download
+        if let Some(result) = download_result {
+            // Ignore error if another task set it first (race condition)
+            let _ = self.content_cell.set(result);
+        }
+
+        // Now get the content
+        if let Some(result) = self.content_cell.get() {
+            return result.clone();
+        }
+
+        Err(RepoError::Other("Content not available".to_string()))
+    }
+}
+
+/// An iterator over file chunks that downloads content in the background.
+///
+/// This struct provides an async iterator interface that walks through all chunks
+/// in a file (handling `FileFilePart` recursion), and initiates background downloads
+/// for each chunk.
+///
+/// When `next()` is called:
+/// 1. It blocks until buffer capacity is available (backpressure)
+/// 2. It spawns a background download task
+/// 3. It returns a `FileChunkWithContent` immediately
+///
+/// Call `content()` on the returned `FileChunkWithContent` to wait for the
+/// download to complete and get the data.
+pub struct FileChunkWithContentList {
+    repo: Arc<Repo>,
+    /// Stack of pending file parts to process.
+    /// Each element is (file, index into parts).
+    pending: Vec<(File, usize)>,
+    /// ManagedBuffers for capacity management.
+    managed_buffers: ManagedBuffers,
+}
+
+impl FileChunkWithContentList {
+    /// Create a new file chunk with content list starting from the given file.
+    fn new(repo: Arc<Repo>, file: File, managed_buffers: ManagedBuffers) -> Self {
+        Self {
+            repo,
+            pending: vec![(file, 0)],
+            managed_buffers,
+        }
+    }
+
+    /// Get the next file chunk with content.
+    ///
+    /// Returns `None` when all chunks have been yielded.
+    /// Automatically handles `FileFilePart` entries by fetching and expanding them.
+    ///
+    /// This method:
+    /// 1. Blocks until buffer capacity is available
+    /// 2. Spawns a background download
+    /// 3. Returns the chunk handle immediately
+    pub async fn next(&mut self) -> Result<Option<FileChunkWithContent>> {
+        // Get the next chunk (handling FileFilePart recursion)
+        let chunk = loop {
+            // Get the current file and index from the stack
+            let Some((file, idx)) = self.pending.last_mut() else {
+                return Ok(None);
+            };
+
+            // Check if we've exhausted this file's parts
+            if *idx >= file.parts.len() {
+                self.pending.pop();
+                continue;
+            }
+
+            // Get the current part and advance the index
+            let part = file.parts[*idx].clone();
+            *idx += 1;
+
+            match part {
+                FilePart::Chunk(chunk) => {
+                    break chunk;
+                }
+                FilePart::File(file_part) => {
+                    // Fetch the nested file and push it onto the stack
+                    let nested_file = self.repo.read_file(&file_part.file).await?;
+                    self.pending.push((nested_file, 0));
+                    // Continue the loop to process parts from the nested file
+                }
+            }
+        };
+
+        // Acquire buffer capacity before spawning the download.
+        // This applies backpressure if buffer capacity is exhausted.
+        let acquired = self.managed_buffers.acquire(chunk.size).await;
+
+        // Clone what we need for the spawned task
+        let backend = Arc::clone(&self.repo.backend);
+        let flow_control = self.repo.flow_control.clone();
+        let chunk_id = chunk.content.clone();
+        let chunk_size = chunk.size;
+        let managed_buffers = self.managed_buffers.clone();
+
+        // Spawn the download task
+        // We apply flow control manually (minus ManagedBuffer acquisition, since we already did that)
+        let handle = tokio::spawn(async move {
+            // Apply request capacity (rate + concurrent)
+            let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
+
+            // Apply read throughput
+            let (_read, _total) = acquire_read_throughput(&flow_control, chunk_size).await;
+
+            // Read from backend
+            let data = backend.read_object(&chunk_id).await?;
+
+            // Create ManagedBuffer with the acquired capacity
+            let managed_buffer = managed_buffers.create_buffer_with_acquired(data, acquired);
+
+            Ok(Arc::new(managed_buffer))
+        });
+
+        Ok(Some(FileChunkWithContent::new(chunk, handle)))
+    }
+}
+
+// =============================================================================
 // Directory Scan
 // =============================================================================
 
@@ -962,6 +1136,38 @@ impl Repo {
     pub async fn list_file_chunks(self: &Arc<Self>, file_id: &ObjectId) -> Result<FileChunkList> {
         let file = self.read_file(file_id).await?;
         Ok(FileChunkList::new(Arc::clone(self), file))
+    }
+
+    /// List all chunks in a file with content, downloading in the background.
+    ///
+    /// Similar to [`list_file_chunks`](Self::list_file_chunks), but also retrieves
+    /// the content of each chunk. When `next()` is called on the resulting
+    /// [`FileChunkWithContentList`]:
+    ///
+    /// 1. It blocks until a ManagedBuffer of the required size is available
+    /// 2. It initiates a background download of the chunk
+    /// 3. It returns a [`FileChunkWithContent`] immediately
+    ///
+    /// Call `content()` on the returned `FileChunkWithContent` to wait for the
+    /// download to complete and get the data.
+    ///
+    /// This allows the caller to control concurrency by making multiple `next()`
+    /// calls before awaiting `content()`.
+    pub async fn read_file_chunks_with_content(
+        self: &Arc<Self>,
+        file_id: &ObjectId,
+    ) -> Result<FileChunkWithContentList> {
+        let file = self.read_file(file_id).await?;
+        let managed_buffers = self
+            .flow_control
+            .managed_buffers
+            .clone()
+            .unwrap_or_default();
+        Ok(FileChunkWithContentList::new(
+            Arc::clone(self),
+            file,
+            managed_buffers,
+        ))
     }
 
     /// Recursively scan a directory tree, emitting events for each entry.

@@ -42,6 +42,7 @@ async read_file(id: ObjectId) -> File
 
 async list_directory_entries(directory_id: ObjectId) -> DirectoryEntryList
 async list_file_chunks(file_id: ObjectId) -> FileChunkList
+async read_file_chunks_with_content(file_id: ObjectId) -> FileChunkWithContentList
 async scan_directory(directory_id: ObjectId) -> DirectoryScanEvent stream
 ```
 
@@ -50,8 +51,20 @@ DirectoryEntrylist {
   async next() -> Option<DirectoryEntry>
 }
 
-FileChunklist {
+FileChunkList {
   async next() -> Option<ChunkFilePart>
+}
+
+FileChunkWithContentList {
+  async next() -> Option<FileChunkWithContent>
+}
+
+FileChunkWithContent {
+  chunk: ChunkFilePart
+}
+
+impl FileChunkWithContent {
+  async content() -> ManagedBuffer
 }
 
 RepoScanEvents {
@@ -70,6 +83,8 @@ The expected_size passed to read is used when interacting with the throughput li
 The read_{object type} functions are convenience functions that effectively call read_object and "cast" to the appropriate object, erroring if the actual object doesn't match the requested type.
 
 The list_directory_entry and list_file_chunks functions are convenience functions that walk through the entries of a Directory or File, recursively handling PartialDirectory and FileFilePart entries.  The scan_directory() function is another convenience function that will recursively traverse an entire directory structure.
+
+The read_file_chunks_with_content function is similar to list_file_chunks, except that it also retrieves the contents of each chunk.  When next() is called on the resulting FileChunkWithContentList, it will block until a ManagedBuffer of the required size is available.  It will then return the FileChunkWitContent, but it will also initiate the download of the chunk into that ManagedBuffer in the background, using the same sorts of flow control mechanisms that read() uses (minus the use of the ManagedBuffer).  Later, when the application calls content() on the FileChunkWithContent, it will block until the download of that chunk is complete (if it isn't already), and return the ManagedBuffer.  The application is free to call content() as many times as it likes.
 
 The write functions return WithComplete structures very quickly, but are not actually finished until their WithComplete.complete is complete.
 

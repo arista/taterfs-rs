@@ -163,7 +163,7 @@ merge_entries(path, repo_entry, store_entry, file_dest) {
 
 ## Staged Download
 
-If a FileDest offers a [FileDestStage](./file_stores.md), then the download will proceed in three phases.  In the first phase, the download will run through all of the DownloadActions and store them in memory, but not actually act on them.  For each download file action, it will associated that action with a new StagedFile, and index it by its object id (keeping in mind that multiple StagedFiles might be associated with the same object id), collecting all of that into a DownloadingStagedFile structure:
+If a FileDest offers a [FileDestStage](./file_stores.md), then the download will proceed in three phases.  In the first phase, the download will run through all of the DownloadActions and store them in memory, but not actually act on them.  For each download file action, it will associate that action with a new StagedFile, and index it by its object id (keeping in mind that multiple StagedFiles might be associated with the same object id), collecting all of that into a DownloadingStagedFile structure:
 
 ```
 DownloadingStagedFile {
@@ -173,11 +173,11 @@ DownloadingStagedFile {
 }
 
 impl DownloadingStagedFile {
-  async download(repo: Repo, ) -> WithComplete<()>
+  async download() -> WithComplete<()>
 }
 ```
 
-In the second phase, all of those StagedFiles are downloaded.
+In the second phase, all of those StagedFiles are downloaded.  The system will walk through all of the StagedFiles one at a time.  For each StagedFile, it will call read_file_chunks_with_content, then walk through
 
 In the third phase, 
 

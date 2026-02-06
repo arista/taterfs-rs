@@ -24,8 +24,8 @@ pub use scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanFileSource, S
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::caches::FileStoreCache;
 use crate::util::ManagedBuffer;
@@ -108,7 +108,42 @@ pub enum ScanEvent {
 }
 
 /// Async iterator over scan events.
-pub type ScanEvents = Pin<Box<dyn futures::Stream<Item = Result<ScanEvent>> + Send>>;
+///
+/// Call `next()` to get the next scan event. Returns `None` when the scan is complete.
+#[async_trait]
+pub trait ScanEventList: Send {
+    /// Get the next scan event.
+    async fn next(&mut self) -> Option<Result<ScanEvent>>;
+}
+
+/// Boxed ScanEventList for dynamic dispatch.
+pub type ScanEvents = Box<dyn ScanEventList>;
+
+/// A simple ScanEventList implementation backed by a Vec.
+pub struct VecScanEventList {
+    events: Vec<ScanEvent>,
+    index: usize,
+}
+
+impl VecScanEventList {
+    /// Create a new VecScanEventList from a Vec of events.
+    pub fn new(events: Vec<ScanEvent>) -> Self {
+        Self { events, index: 0 }
+    }
+}
+
+#[async_trait]
+impl ScanEventList for VecScanEventList {
+    async fn next(&mut self) -> Option<Result<ScanEvent>> {
+        if self.index < self.events.len() {
+            let event = self.events[self.index].clone();
+            self.index += 1;
+            Some(Ok(event))
+        } else {
+            None
+        }
+    }
+}
 
 // =============================================================================
 // Chunk Types
@@ -126,30 +161,149 @@ pub struct SourceChunkContent {
     pub hash: String,
 }
 
-/// A chunk of a file that can be retrieved on demand.
-///
-/// The chunk metadata (offset, size) is available immediately,
-/// but the actual content is fetched lazily via `get()`.
-#[async_trait]
-pub trait SourceChunk: Send + Sync {
+/// Metadata about a source chunk.
+#[derive(Debug, Clone)]
+pub struct SourceChunk {
     /// Offset of this chunk within the file.
-    fn offset(&self) -> u64;
-
+    pub offset: u64,
     /// Size of this chunk in bytes.
-    fn size(&self) -> u64;
-
-    /// Retrieve the chunk content.
-    /// This may be called in any order, and multiple chunks may be
-    /// retrieved simultaneously.
-    async fn get(&self) -> Result<SourceChunkContent>;
+    pub size: u64,
 }
 
 /// Async iterator over source chunks.
-pub type SourceChunks = Pin<Box<dyn futures::Stream<Item = Result<Box<dyn SourceChunk>>> + Send>>;
+#[async_trait]
+pub trait SourceChunkList: Send {
+    /// Get the next source chunk.
+    async fn next(&mut self) -> Option<Result<SourceChunk>>;
+}
 
-/// Async iterator over source chunk contents.
-pub type SourceChunkContents =
-    Pin<Box<dyn futures::Stream<Item = Result<SourceChunkContent>> + Send>>;
+/// Boxed SourceChunkList for dynamic dispatch.
+pub type SourceChunks = Box<dyn SourceChunkList>;
+
+/// A simple SourceChunkList implementation backed by a Vec.
+pub struct VecSourceChunkList {
+    chunks: Vec<SourceChunk>,
+    index: usize,
+}
+
+impl VecSourceChunkList {
+    /// Create a new VecSourceChunkList from a Vec of chunks.
+    pub fn new(chunks: Vec<SourceChunk>) -> Self {
+        Self { chunks, index: 0 }
+    }
+}
+
+#[async_trait]
+impl SourceChunkList for VecSourceChunkList {
+    async fn next(&mut self) -> Option<Result<SourceChunk>> {
+        if self.index < self.chunks.len() {
+            let chunk = self.chunks[self.index].clone();
+            self.index += 1;
+            Some(Ok(chunk))
+        } else {
+            None
+        }
+    }
+}
+
+/// A chunk with content that can be retrieved on demand.
+///
+/// The chunk metadata (offset, size) is available immediately.
+/// Call `content()` to retrieve the content.
+pub struct SourceChunkWithContent {
+    /// Offset of this chunk within the file.
+    pub offset: u64,
+    /// Size of this chunk in bytes.
+    pub size: u64,
+    /// The content, fetched lazily and cached.
+    content_cell: Arc<OnceCell<Result<SourceChunkContent>>>,
+    /// Optional JoinHandle for background download (used by S3).
+    download_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<SourceChunkContent>>>>,
+}
+
+impl SourceChunkWithContent {
+    /// Create a new SourceChunkWithContent with pre-computed content.
+    pub fn new_immediate(offset: u64, size: u64, content: SourceChunkContent) -> Self {
+        let cell = Arc::new(OnceCell::new());
+        // We can't fail here since it's a new cell
+        let _ = cell.set(Ok(content));
+        Self {
+            offset,
+            size,
+            content_cell: cell,
+            download_handle: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Create a new SourceChunkWithContent with a background download task.
+    ///
+    /// The download will be awaited when `content()` is called.
+    pub fn new_with_download(
+        offset: u64,
+        size: u64,
+        handle: tokio::task::JoinHandle<Result<SourceChunkContent>>,
+    ) -> Self {
+        Self {
+            offset,
+            size,
+            content_cell: Arc::new(OnceCell::new()),
+            download_handle: tokio::sync::Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Get the content of this chunk.
+    ///
+    /// If the content was created with a background download, this awaits the download.
+    /// The result is cached, so subsequent calls return immediately.
+    pub async fn content(&self) -> Result<&SourceChunkContent> {
+        // Fast path: content already available
+        if let Some(result) = self.content_cell.get() {
+            return result.as_ref().map_err(|e| Error::Other(e.to_string()));
+        }
+
+        // Slow path: await the download handle if present
+        let download_result = {
+            let mut guard = self.download_handle.lock().await;
+            if let Some(handle) = guard.take() {
+                match handle.await {
+                    Ok(result) => Some(result),
+                    Err(e) => Some(Err(Error::Other(format!("Download task failed: {}", e)))),
+                }
+            } else {
+                None
+            }
+        };
+
+        // Set the content if we got a result from the download
+        if let Some(result) = download_result {
+            // Ignore error if another task set it first (race condition)
+            let _ = self.content_cell.set(result);
+        }
+
+        // Now try to get the content
+        if let Some(result) = self.content_cell.get() {
+            return result.as_ref().map_err(|e| Error::Other(e.to_string()));
+        }
+
+        Err(Error::Other("Content not available".to_string()))
+    }
+}
+
+/// Async iterator over source chunks with content.
+///
+/// Each call to `next()` acquires a ManagedBuffer and initiates a background download.
+/// Call `content()` on the returned `SourceChunkWithContent` to wait for the download.
+#[async_trait]
+pub trait SourceChunkWithContentList: Send {
+    /// Get the next chunk with content.
+    ///
+    /// This acquires a ManagedBuffer for the chunk and initiates a background download.
+    /// Returns the chunk handle immediately; call `content()` to wait for the download.
+    async fn next(&mut self) -> Option<Result<SourceChunkWithContent>>;
+}
+
+/// Boxed SourceChunkWithContentList for dynamic dispatch.
+pub type SourceChunksWithContent = Box<dyn SourceChunkWithContentList>;
 
 // =============================================================================
 // Directory Listing
@@ -327,18 +481,30 @@ pub trait FileSource: Send + Sync {
     /// Returns None if the path does not exist.
     /// Returns an error if the path exists but is not a file.
     ///
-    /// Chunks are yielded lazily - content is not fetched until
-    /// `SourceChunk::get()` is called.
+    /// Chunks are yielded lazily - this just returns chunk metadata.
     async fn get_source_chunks(&self, path: &Path) -> Result<Option<SourceChunks>>;
 
-    /// Get chunk contents for a file, given a stream of chunks.
+    /// Get chunk contents for a file at the given path.
     ///
-    /// Similar to iterating over `get_source_chunks` and calling `get()` on each,
-    /// but allows implementations to fetch multiple chunks concurrently while
-    /// still returning them in order.
+    /// Returns None if the path does not exist.
+    /// Returns an error if the path exists but is not a file.
     ///
-    /// The chunks are returned in the same order as the input stream.
-    async fn get_source_chunk_contents(&self, chunks: SourceChunks) -> Result<SourceChunkContents>;
+    /// Returns an async iterator that yields chunks with content. Each call to
+    /// `next()` on the returned list:
+    /// 1. Acquires buffer capacity (blocking until available)
+    /// 2. Reads the chunk content
+    /// 3. Creates a ManagedBuffer with the content
+    /// 4. Returns a `SourceChunkWithContent` handle
+    ///
+    /// Call `content()` on the returned handle to get the content.
+    ///
+    /// Chunks are computed iteratively and returned in order. Because
+    /// buffer capacity is acquired before reading, this prevents unbounded
+    /// memory usage and ensures proper backpressure.
+    async fn get_source_chunks_with_content(
+        &self,
+        path: &Path,
+    ) -> Result<Option<SourceChunksWithContent>>;
 
     /// Get information about a file or directory at the given path.
     ///
@@ -377,7 +543,7 @@ pub trait FileDest: Send + Sync {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        chunks: SourceChunks,
+        chunks: SourceChunksWithContent,
         executable: bool,
     ) -> Result<()>;
 

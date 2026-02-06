@@ -25,18 +25,18 @@ A FileSource's main purpose is to allow scanning through directories and files. 
 ```
 interface FileSource {
   // Walks depth-first through a directory structure yielding directory and file events in lexicographic order.  The scan starts at the given path, which must be a directory.  The resulting ScanEvents are yielded relative to the path.  If path is None, then scan through the entire FileStore
-  scan(Option<path>) -> ScanEvents
-  // Yields the contents of a file, broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md)
-  get_source_chunks(path: Path) -> SourceChunks | null
-  // Similar to get_source_chunks, except that multiple can be retrieved simultaneously but will still be returned in order
-  get_source_chunk_contents(chunks: SourceChunks) -> SourceChunkContents | null
+  scan(Option<path>) -> ScanEventList
+  // Yields the locations of a file's contents broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md)
+  get_source_chunks(path: Path) -> SourceChunkList | null
+  // Yields the contents of a file, broken down into chunks of CHUNK_SIZES according to the method specified in [backend_storage_model](./backend_storage_model.md).
+  get_source_chunks_with_content(path: Path) -> SourceChunkWithContentList | null
   // Return information about one file or directory
   get_entry(path: Path) -> DirectoryEntry | null
   // Retrieve an entire file's contents, error if the path is not a File.  This should only be used when the file is expected to be relatively small
   get_file(path: Path) -> Bytes
 }
 
-interface ScanEvents {
+interface ScanEventList {
   async next() -> Option<ScanEvent>
 }
 
@@ -60,25 +60,28 @@ interface FileEntry {
   fingerprint: Option<string>
 }
 
-interface SourceChunks {
+interface SourceChunkList {
   async next() -> Option<SourceChunk>
 }
 
 interface SourceChunk {
   offset: u64
   size: u64
-  async get() -> SoureChunkContent
+}
+
+interface SourceChunkWithContentList {
+  async next() -> Option<SourceChunkWithContent>
+}
+
+interface SourceChunkWithContent {
+  offset: u64
+  size: u64
+  async content() -> SourceChunkContent
 }
 
 interface SourceChunkContent {
-  offset: u64
-  size: u64
   bytes: Arc<ManagedBuffer>
   hash: "*sha-256 hash of the content in lower-case hexadecimal*"
-}
-
-interface SourceChunkContents {
-  async next() -> Option<SourceChunkContent>
 }
 
 enum DirectoryEntry {
@@ -94,9 +97,7 @@ impl DirectoryEntry {
 
 The fingerprint is used to quickly determine if a file has changed without reading the entire file's contents.  Each FileStore will implement this differently - the FSFileStore might include the last modified time, the S3FileStore might use the ETag, etc.  The fingerprint must be less than 128 characters, and must change when a file's content, **or executable bit**, *may* have changed.  If a FileStore cannot meet these requirements, then it should just leave this null.
 
-Note that get_source_chunks iterates over a set of SourceChunk items, but doesn't actually retrieve content until SourceChunk.get() is called.  An application may call SourceChunk.get() in any order, and may even make multiple SourceChunk.get() calls simultaneously.  If a FileSource requires any kind of flow control (e.g., limiting network throughput), that is the responsibility of the FileSource implementation.
-
-get_source_chunk_contents is similar to get_source_chunks, except that it doesn't require the two-step retrieval process.  It can use get_source_chunks underneath, and may initiate multiple concurrent chunk retrievals, but it must still return the chunks in order regardless of when the retrievals complete.
+get_source_chunks_with_content() is intended to return content chunks in order, but also start downloading those chunks in the background while adhering to the constraints of a ManagedBuffers.  When SourceChunkWithContentList.next() is called, it will block until a ManagedBuffer is acquired that will hold the SourceChunkWithContent's content.  Once that ManagedBuffer is acquired, the SourceChunkWithContent will be returned, but a download of that content into the ManagedBuffer will also be initiated in the background (subject to any flow control required by the FileStore implementation, keeping in mind that the ManagedBuffer has already been acquired).  When SourceChunkWithContent.content() is called later by the application, it will block (if necessary) until that background download completes, and then it will return the ManagedBuffer.  The application is free to call .content() as many times as it wishes - each call should return the same ManagedBuffer (or block until the buffer is downloaded).
 
 ### FileDest
 

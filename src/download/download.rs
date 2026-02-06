@@ -65,121 +65,6 @@ pub trait DownloadActions: Send + Sync {
 }
 
 // =============================================================================
-// FileDestDownloadActions
-// =============================================================================
-
-/// Default implementation of [`DownloadActions`] that wraps a [`FileDest`] and [`Repo`].
-///
-/// The `download_file` method reads file chunks from the repository and writes
-/// them to the file store via `FileDest::write_file_from_chunks`.
-pub struct FileDestDownloadActions {
-    file_store: Arc<dyn FileStore>,
-    repo: Arc<Repo>,
-}
-
-impl FileDestDownloadActions {
-    /// Create a new `FileDestDownloadActions`.
-    pub fn new(file_store: Arc<dyn FileStore>, repo: Arc<Repo>) -> Result<Self> {
-        // Verify the file store supports writing
-        if file_store.get_dest().is_none() {
-            return Err(DownloadError::NoFileDest);
-        }
-        Ok(Self { file_store, repo })
-    }
-
-    fn dest(&self) -> &dyn file_store::FileDest {
-        self.file_store.get_dest().unwrap()
-    }
-}
-
-#[async_trait]
-impl DownloadActions for FileDestDownloadActions {
-    async fn rm(&self, path: &Path) -> Result<()> {
-        self.dest().rm(path).await?;
-        Ok(())
-    }
-
-    async fn mkdir(&self, path: &Path) -> Result<()> {
-        self.dest().mkdir(path).await?;
-        Ok(())
-    }
-
-    async fn download_file(&self, path: &Path, file_id: &ObjectId, executable: bool) -> Result<()> {
-        // Read file chunks from the repo and collect them into SourceChunk items.
-        let mut chunk_list = self.repo.list_file_chunks(file_id).await?;
-        let mut chunks: Vec<
-            std::result::Result<Box<dyn file_store::SourceChunk>, file_store::Error>,
-        > = Vec::new();
-        let mut offset: u64 = 0;
-
-        loop {
-            match chunk_list.next().await {
-                Ok(Some(chunk_part)) => {
-                    let chunk: Box<dyn file_store::SourceChunk> = Box::new(RepoSourceChunk {
-                        repo: self.repo.clone(),
-                        offset,
-                        size: chunk_part.size,
-                        content_id: chunk_part.content.clone(),
-                    });
-                    offset += chunk_part.size;
-                    chunks.push(Ok(chunk));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    chunks.push(Err(file_store::Error::Other(e.to_string())));
-                    break;
-                }
-            }
-        }
-
-        let source_chunks: file_store::SourceChunks = Box::pin(futures::stream::iter(chunks));
-        self.dest()
-            .write_file_from_chunks(path, source_chunks, executable)
-            .await?;
-        Ok(())
-    }
-
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
-        self.dest().set_executable(path, executable).await?;
-        Ok(())
-    }
-}
-
-/// A [`SourceChunk`] that reads its content from a repository object.
-struct RepoSourceChunk {
-    repo: Arc<Repo>,
-    offset: u64,
-    size: u64,
-    content_id: ObjectId,
-}
-
-#[async_trait]
-impl file_store::SourceChunk for RepoSourceChunk {
-    fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    fn size(&self) -> u64 {
-        self.size
-    }
-
-    async fn get(&self) -> file_store::Result<file_store::SourceChunkContent> {
-        let buffer = self
-            .repo
-            .read(&self.content_id, Some(self.size))
-            .await
-            .map_err(|e| file_store::Error::Other(e.to_string()))?;
-
-        Ok(file_store::SourceChunkContent {
-            offset: self.offset,
-            size: self.size,
-            hash: self.content_id.clone(),
-            bytes: buffer,
-        })
-    }
-}
-
-// =============================================================================
 // DownloadRepoToStore
 // =============================================================================
 
@@ -691,7 +576,7 @@ mod tests {
         async fn write_file_from_chunks(
             &self,
             _path: &Path,
-            _chunks: file_store::SourceChunks,
+            _chunks: file_store::SourceChunksWithContent,
             _executable: bool,
         ) -> file_store::Result<()> {
             Ok(())

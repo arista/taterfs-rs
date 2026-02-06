@@ -6,8 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::StreamExt;
-
 use crate::app::{DirectoryLeaf, DirectoryListBuilder, FileListBuilder};
 use crate::caches::{DbId, FileStoreCache, FingerprintedFileInfo};
 use crate::file_store::{FileStore, ScanEvent, ScanEvents};
@@ -81,14 +79,11 @@ pub async fn upload_file(
 ) -> Result<WithComplete<UploadFileResult>> {
     let source = store.get_source().ok_or(UploadError::NoFileSource)?;
 
-    // Get the source chunks for the file
-    let chunks = source
-        .get_source_chunks(path)
+    // Get the chunk contents list directly from path
+    let mut chunk_contents = source
+        .get_source_chunks_with_content(path)
         .await?
         .ok_or_else(|| UploadError::NotFound(path.display().to_string()))?;
-
-    // Get the chunk contents stream
-    let mut chunk_contents = source.get_source_chunk_contents(chunks).await?;
 
     // Create the file list builder
     let mut builder = FileListBuilder::new(repo.clone());
@@ -96,14 +91,15 @@ pub async fn upload_file(
     // Process each chunk
     while let Some(chunk_result) = chunk_contents.next().await {
         let chunk = chunk_result?;
+        let content = chunk.content().await?;
 
         // Write the chunk to the repository
-        let write_result = repo.write(&chunk.hash, chunk.bytes.clone()).await?;
+        let write_result = repo.write(&content.hash, content.bytes.clone()).await?;
 
         // Create a ChunkFilePart
         let chunk_part = ChunkFilePart {
-            size: chunk.size,
-            content: chunk.hash,
+            size: content.size,
+            content: content.hash.clone(),
         };
 
         // Add to the builder
@@ -187,10 +183,11 @@ async fn upload_directory_from_scan_events(
     let mut builder = DirectoryListBuilder::new(repo.clone());
 
     loop {
-        let event = match scan_events.next().await.transpose()? {
-            Some(event) => event,
+        let event = match scan_events.next().await {
+            Some(Ok(event)) => event,
+            Some(Err(e)) => return Err(e.into()),
             None => {
-                // End of stream - finish this directory (happens for root directory)
+                // End of list - finish this directory (happens for root directory)
                 let result = builder.finish().await?;
                 let upload_result = UploadDirectoryResult {
                     directory: result.object,

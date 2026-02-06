@@ -224,6 +224,11 @@ impl App {
         &self.config
     }
 
+    /// Get the managed buffers for chunk allocation.
+    pub fn managed_buffers(&self) -> ManagedBuffers {
+        self.managed_buffers.clone()
+    }
+
     /// Get the file store caches.
     pub fn file_store_caches(&self) -> &Arc<dyn FileStoreCaches> {
         &self.file_store_caches

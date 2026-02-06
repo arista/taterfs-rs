@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use crate::download::{DownloadActions, DownloadRepoToStore};
 use crate::repository::ObjectId;
 use crate::repo::RepoInitialize;
-use crate::util::ManagedBuffers;
 
 // =============================================================================
 // Repo Subcommands
@@ -382,8 +381,7 @@ impl WriteArgs {
         let id = hex::encode(hash);
 
         // Create a ManagedBuffer for the data
-        let managed_buffers = ManagedBuffers::new();
-        let buffer = managed_buffers.get_buffer_with_data(data.to_vec()).await;
+        let buffer = app.managed_buffers().get_buffer_with_data(data.to_vec()).await;
 
         // Write to the repository
         let result = repo.write(&id, Arc::new(buffer)).await?;

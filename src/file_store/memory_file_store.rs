@@ -9,7 +9,7 @@ use crate::file_store::{
     SourceChunkContent, SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList,
     SourceChunks, SourceChunksWithContent, VecScanEventList,
 };
-use crate::repo::FileChunkWithContentList;
+use crate::repo::BoxedFileChunksWithContent;
 use crate::util::{Complete, ManagedBuffers, NoopComplete, WithComplete};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -768,7 +768,7 @@ impl crate::file_store::FileDest for MemoryFileStore {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        mut chunks: FileChunkWithContentList,
+        mut chunks: BoxedFileChunksWithContent,
         executable: bool,
     ) -> Result<WithComplete<()>> {
         let components = path_components(path);

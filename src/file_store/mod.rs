@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::caches::FileStoreCache;
-use crate::repo::FileChunkWithContentList;
+use crate::repo::BoxedFileChunksWithContent;
 use crate::repository::ObjectId;
 use crate::util::{ManagedBuffer, WithComplete};
 
@@ -554,7 +554,7 @@ pub trait FileDest: Send + Sync {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        chunks: FileChunkWithContentList,
+        chunks: BoxedFileChunksWithContent,
         executable: bool,
     ) -> Result<WithComplete<()>>;
 

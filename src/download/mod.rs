@@ -7,4 +7,7 @@
 #[allow(clippy::module_inception)]
 mod download;
 
-pub use download::{DownloadActions, DownloadError, DownloadRepoToStore, Result};
+pub use download::{
+    download_file, DownloadActions, DownloadError, DownloadRepoToStore, Result,
+    StagedFileChunkWithContentList,
+};

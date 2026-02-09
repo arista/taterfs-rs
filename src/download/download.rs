@@ -6,9 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::caches::{DbId, FileStoreCache};
-use crate::file_store::{self, DirectoryList, FileStore};
-use crate::repo::{self, Repo, RepoError};
-use crate::repository::ObjectId;
+use crate::file_store::{self, DirectoryList, FileDestStage, FileStore};
+use crate::repo::{self, FileChunkWithContent, FileChunksWithContent, Repo, RepoError};
+use crate::repository::{File, FilePart, ObjectId};
+use crate::util::{ManagedBuffers, WithComplete};
 
 // Type aliases to disambiguate between repo and file_store DirectoryEntry types.
 type RepoDirectoryEntry = repo::DirectoryEntry;
@@ -379,6 +380,144 @@ fn entry_name_store(entry: &StoreDirectoryEntry) -> &str {
 }
 
 // =============================================================================
+// StagedFileChunkWithContentList
+// =============================================================================
+
+/// An iterator over file chunks that checks a stage before downloading.
+///
+/// This implements [`FileChunksWithContent`] but looks in a [`FileDestStage`]
+/// for each chunk before falling back to downloading from the repository.
+/// This is used in the second phase of staged downloads.
+pub struct StagedFileChunkWithContentList {
+    repo: Arc<Repo>,
+    stage: Box<dyn FileDestStage>,
+    /// Stack of pending file parts to process.
+    /// Each element is (file, index into parts).
+    pending: Vec<(File, usize)>,
+    /// ManagedBuffers for capacity management when downloading.
+    managed_buffers: ManagedBuffers,
+}
+
+impl StagedFileChunkWithContentList {
+    /// Create a new staged file chunk list.
+    ///
+    /// # Arguments
+    /// * `repo` - The repository to download from if chunks are not in stage
+    /// * `stage` - The stage to check for cached chunks
+    /// * `file` - The file to iterate through
+    /// * `managed_buffers` - Buffer manager for backpressure control
+    pub fn new(
+        repo: Arc<Repo>,
+        stage: Box<dyn FileDestStage>,
+        file: File,
+        managed_buffers: ManagedBuffers,
+    ) -> Self {
+        Self {
+            repo,
+            stage,
+            pending: vec![(file, 0)],
+            managed_buffers,
+        }
+    }
+}
+
+#[async_trait]
+impl FileChunksWithContent for StagedFileChunkWithContentList {
+    async fn next(&mut self) -> repo::Result<Option<FileChunkWithContent>> {
+        // Get the next chunk (handling FileFilePart recursion)
+        let chunk = loop {
+            let Some((file, idx)) = self.pending.last_mut() else {
+                return Ok(None);
+            };
+
+            if *idx >= file.parts.len() {
+                self.pending.pop();
+                continue;
+            }
+
+            let part = file.parts[*idx].clone();
+            *idx += 1;
+
+            match part {
+                FilePart::Chunk(chunk) => {
+                    break chunk;
+                }
+                FilePart::File(file_part) => {
+                    let nested_file = self.repo.read_file(&file_part.file).await?;
+                    self.pending.push((nested_file, 0));
+                }
+            }
+        };
+
+        // Check if the chunk is in the stage
+        let chunk_id = &chunk.content;
+        if let Ok(Some(content)) = self.stage.read_chunk(chunk_id).await {
+            // Chunk is in stage - return it directly
+            return Ok(Some(FileChunkWithContent::new_with_content(chunk, content)));
+        }
+
+        // Chunk not in stage - download from repo
+        // Acquire buffer capacity for backpressure
+        let acquired = self.managed_buffers.acquire(chunk.size).await;
+
+        let repo = Arc::clone(&self.repo);
+        let chunk_id = chunk.content.clone();
+
+        let handle = tokio::spawn(async move { repo.read(&chunk_id, Some(acquired)).await });
+
+        Ok(Some(FileChunkWithContent::new(chunk, handle)))
+    }
+}
+
+// =============================================================================
+// Public Download Functions
+// =============================================================================
+
+/// Download a single file from a repository to a file store.
+///
+/// Downloads the file identified by `file_id` from the repository and writes it
+/// to `path` in the file store. If a file already exists at that path, it will
+/// be overwritten.
+///
+/// The function blocks until it has acquired all resources needed to complete
+/// the operation (usually ManagedBuffers for backpressure), then returns a
+/// `WithComplete` that signals when the download has finished.
+///
+/// # Arguments
+///
+/// * `repo` - The repository to download from
+/// * `file_id` - The ObjectId of the file to download
+/// * `store` - The file store to download to (must support FileDest)
+/// * `path` - The path within the store where the file should be written
+/// * `executable` - Whether the file should be marked as executable
+///
+/// # Errors
+///
+/// Returns an error if:
+/// * The file store does not support writing (`NoFileDest`)
+/// * The file cannot be read from the repository
+/// * The file cannot be written to the store
+pub async fn download_file(
+    repo: Arc<Repo>,
+    file_id: &ObjectId,
+    store: &dyn FileStore,
+    path: &Path,
+    executable: bool,
+) -> Result<WithComplete<()>> {
+    let dest = store.get_dest().ok_or(DownloadError::NoFileDest)?;
+
+    // Get chunks with content (this applies backpressure via ManagedBuffers)
+    let chunks = repo.read_file_chunks_with_content(file_id).await?;
+
+    // Write the file using the boxed chunks iterator
+    let with_complete = dest
+        .write_file_from_chunks(path, Box::new(chunks), executable)
+        .await?;
+
+    Ok(with_complete)
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -576,7 +715,7 @@ mod tests {
         async fn write_file_from_chunks(
             &self,
             _path: &Path,
-            _chunks: crate::repo::FileChunkWithContentList,
+            _chunks: crate::repo::BoxedFileChunksWithContent,
             _executable: bool,
         ) -> file_store::Result<crate::util::WithComplete<()>> {
             Ok(crate::util::WithComplete::new(

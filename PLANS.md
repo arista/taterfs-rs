@@ -4,24 +4,17 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
+As specified in download.md, implement the download_file and download_directory functions.  There are some small changes to the download_repo_to_store function which incorporate the use of a WithComplete.
 
+Perhaps a major change is the implied changes to FileChunkWithContent - namely the ability to look to a Stage for content.  It's worth thinking what the right approach is:
+
+* convert FileChunkWithContent to an interface with multiple implementations
+* allow an optional Stage to be passed to FileChunkWithContent (and subsequently to read_file_chunks_with_content).  Feels like an unnatural mixing of concerns though.
+* similar to above, but a more abstract interface than Stage, something like an abstract ChunkContentSource.  But if we're going to do that, why wouldn't the "normal" downloading of content from a repo backend also be a ChunkContentSource?
 
 ## Planned Features
 
 ## Completed
-
-- Implemented `FileDest.write_file_from_chunks` for FsFileStore with queue-based algorithm:
-  - Takes `FileChunkWithContentList` (from repo) instead of `SourceChunksWithContent`
-  - Returns `WithComplete<()>` to signal when background writes complete
-  - Uses mpsc channel to pass chunks from the main loop to a background writer task
-  - Temp files named `.download.{filename}-{pid}`, then atomically renamed
-- Implemented `FileDestStage` for FsFileStore:
-  - Stage directory at `{root}/.tfs/tmp/stage-{pid}/`
-  - Chunks stored at `chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}`
-  - Atomic writes via temp files named `.download.{id}-{pid}`
-  - `cleanup()` removes entire stage directory
-- Added `create_stage()` method to `FileDest` trait
-- Updated `MemoryFileStore` to match new trait (returns `NoopComplete`, `create_stage()` returns `None`)
 
 ## Ideas / Backlog
 

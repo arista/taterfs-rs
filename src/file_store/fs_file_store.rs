@@ -11,7 +11,7 @@ use crate::file_store::{
     SourceChunkContent, SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList,
     SourceChunks, SourceChunksWithContent, VecScanEventList,
 };
-use crate::repo::{FileChunkWithContent, FileChunkWithContentList};
+use crate::repo::{BoxedFileChunksWithContent, FileChunkWithContent};
 use crate::repository::ObjectId;
 use crate::util::{Complete, ManagedBuffer, ManagedBuffers, NotifyComplete, WithComplete};
 use async_trait::async_trait;
@@ -509,7 +509,7 @@ impl crate::file_store::FileDest for FsFileStore {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        mut chunks: FileChunkWithContentList,
+        mut chunks: BoxedFileChunksWithContent,
         executable: bool,
     ) -> Result<WithComplete<()>> {
         let absolute = self.to_absolute(path);

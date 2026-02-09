@@ -28,7 +28,9 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::caches::FileStoreCache;
-use crate::util::ManagedBuffer;
+use crate::repo::FileChunkWithContentList;
+use crate::repository::ObjectId;
+use crate::util::{ManagedBuffer, WithComplete};
 
 /// Result type for file store operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -50,6 +52,9 @@ pub enum Error {
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+
+    #[error("Repo error: {0}")]
+    Repo(#[from] crate::repo::RepoError),
 
     #[error("{0}")]
     Other(String),
@@ -538,14 +543,20 @@ pub trait FileDest: Send + Sync {
 
     /// Write a file whose contents are supplied by the given chunks.
     ///
-    /// The implementation should avoid leaving a partially-written file
-    /// even if interrupted (e.g., write to temp location then move atomically).
+    /// Downloads multiple chunks in parallel, then writes them to the file
+    /// in sequential order. The file is written to a temporary location,
+    /// then moved into its final location atomically.
+    ///
+    /// Returns once all chunks have started downloading (after `chunks.next()`
+    /// has been called for each chunk, which subjects it to ManagedBuffers
+    /// flow control). The `WithComplete` signals when all downloads have
+    /// completed and the file has been moved to its final location.
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        chunks: SourceChunksWithContent,
+        chunks: FileChunkWithContentList,
         executable: bool,
-    ) -> Result<()>;
+    ) -> Result<WithComplete<()>>;
 
     /// Remove the file or directory at the given path, if it exists.
     ///
@@ -562,6 +573,40 @@ pub trait FileDest: Send + Sync {
     ///
     /// Returns an error if the path does not point to a file.
     async fn set_executable(&self, path: &Path, executable: bool) -> Result<()>;
+
+    /// Create a staging area for downloading file chunks.
+    ///
+    /// Returns None if staging is not supported by this FileDest.
+    /// The stage allows temporarily caching downloaded file chunks before
+    /// assembling them into final files.
+    async fn create_stage(&self) -> Result<Option<Box<dyn FileDestStage>>>;
+}
+
+// =============================================================================
+// FileDestStage Trait
+// =============================================================================
+
+/// A staging area for temporarily caching downloaded file chunks.
+///
+/// This allows all required content to be pulled from a repo before modifying
+/// any existing files in the FileStore. Once all chunks have been downloaded
+/// to the stage, files can be assembled and moved to their final locations
+/// quickly, minimizing disruption.
+#[async_trait]
+pub trait FileDestStage: Send + Sync {
+    /// Write a chunk to the stage.
+    async fn write_chunk(&self, id: &ObjectId, chunk: Arc<ManagedBuffer>) -> Result<()>;
+
+    /// Read a chunk from the stage.
+    ///
+    /// Returns None if the chunk is not in the stage.
+    async fn read_chunk(&self, id: &ObjectId) -> Result<Option<Arc<ManagedBuffer>>>;
+
+    /// Check if a chunk exists in the stage.
+    async fn has_chunk(&self, id: &ObjectId) -> Result<bool>;
+
+    /// Remove the stage and all of its content.
+    async fn cleanup(&self) -> Result<()>;
 }
 
 // =============================================================================

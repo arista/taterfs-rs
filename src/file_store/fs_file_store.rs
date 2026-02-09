@@ -6,12 +6,14 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::FileStoreCache;
 use crate::file_store::{
-    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileEntry, FileSource,
-    FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
-    SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
-    SourceChunksWithContent, VecScanEventList,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage,
+    FileEntry, FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk,
+    SourceChunkContent, SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList,
+    SourceChunks, SourceChunksWithContent, VecScanEventList,
 };
-use crate::util::ManagedBuffers;
+use crate::repo::{FileChunkWithContent, FileChunkWithContentList};
+use crate::repository::ObjectId;
+use crate::util::{Complete, ManagedBuffer, ManagedBuffers, NotifyComplete, WithComplete};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -19,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 /// A FileStore backed by the local filesystem.
 pub struct FsFileStore {
@@ -506,9 +509,9 @@ impl crate::file_store::FileDest for FsFileStore {
     async fn write_file_from_chunks(
         &self,
         path: &Path,
-        mut chunks: SourceChunksWithContent,
+        mut chunks: FileChunkWithContentList,
         executable: bool,
-    ) -> Result<()> {
+    ) -> Result<WithComplete<()>> {
         let absolute = self.to_absolute(path);
 
         // Create parent directories
@@ -517,30 +520,22 @@ impl crate::file_store::FileDest for FsFileStore {
         }
 
         // Write to a temp file in the same directory for atomic rename.
-        // Use a unique name based on process id and a counter to avoid collisions.
+        // Format: .download.{filename}-{temp suffix}
         let file_name = absolute
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let temp_name = format!(".{}.{}.tmp", file_name, std::process::id(),);
+        let temp_name = format!(".download.{}-{}", file_name, std::process::id());
         let temp_path = absolute.parent().unwrap_or(&self.root).join(&temp_name);
 
-        let mut file: fs::File = fs::File::create(&temp_path).await?;
+        // Create the temp file
+        let file = fs::File::create(&temp_path).await?;
 
-        // Stream chunks into the temp file
-        while let Some(chunk_result) = chunks.next().await {
-            let chunk = chunk_result?;
-            let content = chunk.content().await?;
-            file.write_all(&content.bytes[..]).await?;
-        }
-        file.flush().await?;
-        drop(file);
-
-        // Set executable bit if needed
+        // Set executable bit on temp file if needed
         #[cfg(unix)]
         if executable {
             use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(&temp_path).await?;
+            let metadata = file.metadata().await?;
             let mut perms = metadata.permissions();
             let mode = perms.mode();
             // Add execute bits where read bits are set
@@ -548,24 +543,63 @@ impl crate::file_store::FileDest for FsFileStore {
             fs::set_permissions(&temp_path, perms).await?;
         }
 
-        // Atomic rename to final path
-        fs::rename(&temp_path, &absolute).await?;
+        // Create completion notifier
+        let complete = Arc::new(NotifyComplete::new());
+        let complete_for_task = Arc::clone(&complete);
 
-        // If not executable on unix, ensure execute bits are cleared
-        // (in case the destination previously had them)
-        #[cfg(unix)]
-        if !executable {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(&absolute).await?;
-            let mut perms = metadata.permissions();
-            let mode = perms.mode();
-            if mode & 0o111 != 0 {
-                perms.set_mode(mode & !0o111);
-                fs::set_permissions(&absolute, perms).await?;
+        // Create a channel for passing chunks to the writer task
+        // Use unbounded since we want to queue all chunks as they become available
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<FileChunkWithContent>>();
+
+        let temp_path_for_task = temp_path.clone();
+        let absolute_for_task = absolute.clone();
+
+        // Spawn the background writer task
+        tokio::spawn(async move {
+            let result = write_chunks_to_file(
+                file,
+                &mut rx,
+                &temp_path_for_task,
+                &absolute_for_task,
+                executable,
+            )
+            .await;
+
+            match result {
+                Ok(()) => complete_for_task.notify_complete(),
+                Err(e) => complete_for_task.notify_error(e.to_string()),
+            }
+        });
+
+        // Loop through chunks and send them to the writer task
+        loop {
+            match chunks.next().await {
+                Ok(Some(chunk)) => {
+                    // Send the chunk to the writer task
+                    if tx.send(Some(chunk)).is_err() {
+                        // Writer task has exited (likely due to error)
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // No more chunks - signal end to writer task
+                    let _ = tx.send(None);
+                    break;
+                }
+                Err(e) => {
+                    // Error getting next chunk - clean up temp file
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Err(e.into());
+                }
             }
         }
 
-        Ok(())
+        Ok(WithComplete::new((), complete as Arc<dyn Complete>))
+    }
+
+    async fn create_stage(&self) -> Result<Option<Box<dyn FileDestStage>>> {
+        let stage = FsFileDestStage::new(&self.root).await?;
+        Ok(Some(Box::new(stage)))
     }
 
     async fn rm(&self, path: &Path) -> Result<()> {
@@ -726,6 +760,161 @@ async fn scan_directory(
     }
 
     Ok(())
+}
+
+/// Helper function for writing chunks to a file from a channel.
+///
+/// Receives chunks from the channel, writes them to the file in order,
+/// then moves the file to its final location.
+async fn write_chunks_to_file(
+    mut file: fs::File,
+    rx: &mut mpsc::UnboundedReceiver<Option<FileChunkWithContent>>,
+    temp_path: &Path,
+    final_path: &Path,
+    executable: bool,
+) -> Result<()> {
+    // Process chunks from the channel
+    while let Some(chunk_option) = rx.recv().await {
+        match chunk_option {
+            Some(chunk) => {
+                // Wait for the chunk content and write it
+                let content = chunk.content().await.map_err(|e| Error::Other(e.to_string()))?;
+                file.write_all(&content[..])
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            None => {
+                // End of chunks - finalize the file
+                break;
+            }
+        }
+    }
+
+    // Flush and close the file
+    file.flush().await?;
+    drop(file);
+
+    // Atomic rename to final path
+    fs::rename(temp_path, final_path).await?;
+
+    // If not executable on unix, ensure execute bits are cleared
+    // (in case the destination previously had them)
+    #[cfg(unix)]
+    if !executable {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(final_path).await?;
+        let mut perms = metadata.permissions();
+        let mode = perms.mode();
+        if mode & 0o111 != 0 {
+            perms.set_mode(mode & !0o111);
+            fs::set_permissions(final_path, perms).await?;
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// FsFileDestStage Implementation
+// =============================================================================
+
+/// A staging area for temporarily caching downloaded file chunks on the filesystem.
+///
+/// Chunks are stored in a directory structure: `chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}`
+pub struct FsFileDestStage {
+    /// The root directory of the stage (e.g., `{file store root}/.tfs/tmp/stage-{temp}`)
+    stage_root: PathBuf,
+}
+
+impl FsFileDestStage {
+    /// Create a new staging area.
+    ///
+    /// Creates the stage directory at `{root}/.tfs/tmp/stage-{temp}/`
+    pub async fn new(file_store_root: &Path) -> Result<Self> {
+        let stage_name = format!("stage-{}", std::process::id());
+        let stage_root = file_store_root.join(".tfs/tmp").join(stage_name);
+        fs::create_dir_all(&stage_root).await?;
+        Ok(Self { stage_root })
+    }
+
+    /// Get the path for a chunk in the stage.
+    ///
+    /// Format: `chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}`
+    fn chunk_path(&self, id: &ObjectId) -> PathBuf {
+        let id_str = id.to_string();
+        self.stage_root
+            .join("chunks")
+            .join(&id_str[0..2])
+            .join(&id_str[2..4])
+            .join(&id_str[4..6])
+            .join(&id_str)
+    }
+
+    /// Get the temporary download path for a chunk.
+    ///
+    /// Format: `chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/.download.{id}-{temp}`
+    fn chunk_temp_path(&self, id: &ObjectId) -> PathBuf {
+        let id_str = id.to_string();
+        let temp_name = format!(".download.{}-{}", id_str, std::process::id());
+        self.stage_root
+            .join("chunks")
+            .join(&id_str[0..2])
+            .join(&id_str[2..4])
+            .join(&id_str[4..6])
+            .join(temp_name)
+    }
+}
+
+#[async_trait]
+impl FileDestStage for FsFileDestStage {
+    async fn write_chunk(&self, id: &ObjectId, chunk: Arc<ManagedBuffer>) -> Result<()> {
+        let final_path = self.chunk_path(id);
+        let temp_path = self.chunk_temp_path(id);
+
+        // Create parent directories
+        if let Some(parent) = temp_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Write to temp file
+        fs::write(&temp_path, &chunk[..]).await?;
+
+        // Atomic rename to final path
+        fs::rename(&temp_path, &final_path).await?;
+
+        Ok(())
+    }
+
+    async fn read_chunk(&self, id: &ObjectId) -> Result<Option<Arc<ManagedBuffer>>> {
+        let path = self.chunk_path(id);
+
+        match fs::read(&path).await {
+            Ok(data) => {
+                let buffer = ManagedBuffers::new().get_buffer_with_data(data).await;
+                Ok(Some(Arc::new(buffer)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn has_chunk(&self, id: &ObjectId) -> Result<bool> {
+        let path = self.chunk_path(id);
+        match fs::metadata(&path).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn cleanup(&self) -> Result<()> {
+        // Remove the entire stage directory
+        match fs::remove_dir_all(&self.stage_root).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 // =============================================================================
@@ -1073,110 +1262,8 @@ mod tests {
     // FileDest Tests
     // =========================================================================
 
-    /// Helper to create a SourceChunksWithContent from bytes using MemoryFileStore.
-    async fn chunks_with_content_from_bytes(data: &[u8]) -> SourceChunksWithContent {
-        use crate::file_store::{MemoryFileStore, MemoryFsEntry};
-
-        let store = MemoryFileStore::builder()
-            .add("_data", MemoryFsEntry::file(data))
-            .build();
-
-        store
-            .get_source_chunks_with_content(Path::new("_data"))
-            .await
-            .unwrap()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_dest_write_file_from_chunks() {
-        let temp = create_test_dir();
-        let store = create_store(&temp);
-        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
-
-        let data = b"Hello, World!";
-        let chunks = chunks_with_content_from_bytes(data).await;
-        dest.write_file_from_chunks(Path::new("hello.txt"), chunks, false)
-            .await
-            .unwrap();
-
-        // Verify the file was written
-        let contents = std::fs::read(temp.path().join("hello.txt")).unwrap();
-        assert_eq!(&contents, data);
-    }
-
-    #[tokio::test]
-    async fn test_dest_write_creates_parent_dirs() {
-        let temp = create_test_dir();
-        let store = create_store(&temp);
-        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
-
-        let chunks = chunks_with_content_from_bytes(b"nested").await;
-        dest.write_file_from_chunks(Path::new("a/b/c.txt"), chunks, false)
-            .await
-            .unwrap();
-
-        let contents = std::fs::read(temp.path().join("a/b/c.txt")).unwrap();
-        assert_eq!(&contents, b"nested");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_dest_write_executable() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = create_test_dir();
-        let store = create_store(&temp);
-        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
-
-        let chunks = chunks_with_content_from_bytes(b"#!/bin/bash").await;
-        dest.write_file_from_chunks(Path::new("script.sh"), chunks, true)
-            .await
-            .unwrap();
-
-        let metadata = std::fs::metadata(temp.path().join("script.sh")).unwrap();
-        let mode = metadata.permissions().mode();
-        assert!(
-            mode & 0o111 != 0,
-            "Expected executable bit set, got mode {:o}",
-            mode
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_dest_write_not_executable_clears_bits() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = create_test_dir();
-
-        // Create an executable file first
-        let script_path = temp.path().join("script.sh");
-        File::create(&script_path)
-            .unwrap()
-            .write_all(b"old")
-            .unwrap();
-        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms).unwrap();
-
-        let store = create_store(&temp);
-        let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
-
-        // Write non-executable over it
-        let chunks = chunks_with_content_from_bytes(b"new content").await;
-        dest.write_file_from_chunks(Path::new("script.sh"), chunks, false)
-            .await
-            .unwrap();
-
-        let metadata = std::fs::metadata(&script_path).unwrap();
-        let mode = metadata.permissions().mode();
-        assert!(
-            mode & 0o111 == 0,
-            "Expected no execute bits, got mode {:o}",
-            mode
-        );
-    }
+    // Note: write_file_from_chunks tests require a Repo to create FileChunkWithContentList
+    // and should be implemented as integration tests.
 
     #[tokio::test]
     async fn test_dest_rm_file() {

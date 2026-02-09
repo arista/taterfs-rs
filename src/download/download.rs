@@ -576,10 +576,14 @@ mod tests {
         async fn write_file_from_chunks(
             &self,
             _path: &Path,
-            _chunks: file_store::SourceChunksWithContent,
+            _chunks: crate::repo::FileChunkWithContentList,
             _executable: bool,
-        ) -> file_store::Result<()> {
-            Ok(())
+        ) -> file_store::Result<crate::util::WithComplete<()>> {
+            Ok(crate::util::WithComplete::new(
+                (),
+                std::sync::Arc::new(crate::util::NoopComplete)
+                    as std::sync::Arc<dyn crate::util::Complete>,
+            ))
         }
 
         async fn rm(&self, _path: &Path) -> file_store::Result<()> {
@@ -592,6 +596,12 @@ mod tests {
 
         async fn set_executable(&self, _path: &Path, _executable: bool) -> file_store::Result<()> {
             Ok(())
+        }
+
+        async fn create_stage(
+            &self,
+        ) -> file_store::Result<Option<Box<dyn file_store::FileDestStage>>> {
+            Ok(None)
         }
     }
 

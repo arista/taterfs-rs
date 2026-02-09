@@ -223,7 +223,8 @@ pub struct SourceChunkWithContent {
     /// The content, fetched lazily and cached.
     content_cell: Arc<OnceCell<Result<SourceChunkContent>>>,
     /// Optional JoinHandle for background download (used by S3).
-    download_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<SourceChunkContent>>>>,
+    download_handle:
+        tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<SourceChunkContent>>>>,
 }
 
 impl SourceChunkWithContent {

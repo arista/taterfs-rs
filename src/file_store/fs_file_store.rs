@@ -6,10 +6,10 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::FileStoreCache;
 use crate::file_store::{
-    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage,
-    FileEntry, FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk,
-    SourceChunkContent, SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList,
-    SourceChunks, SourceChunksWithContent, VecScanEventList,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
+    FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
+    SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
+    SourceChunksWithContent, VecScanEventList,
 };
 use crate::repo::{BoxedFileChunksWithContent, FileChunkWithContent};
 use crate::repository::ObjectId;
@@ -198,7 +198,9 @@ impl SourceChunkWithContentList for FsSourceChunkWithContentList {
         };
 
         // 5. Create buffer using the acquired capacity (doesn't wait)
-        let managed_buffer = self.managed_buffers.create_buffer_with_acquired(buffer, acquired);
+        let managed_buffer = self
+            .managed_buffers
+            .create_buffer_with_acquired(buffer, acquired);
 
         let content = SourceChunkContent {
             offset,
@@ -778,10 +780,11 @@ async fn write_chunks_to_file(
         match chunk_option {
             Some(chunk) => {
                 // Wait for the chunk content and write it
-                let content = chunk.content().await.map_err(|e| Error::Other(e.to_string()))?;
-                file.write_all(&content[..])
+                let content = chunk
+                    .content()
                     .await
-                    .map_err(Error::Io)?;
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                file.write_all(&content[..]).await.map_err(Error::Io)?;
             }
             None => {
                 // End of chunks - finalize the file

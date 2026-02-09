@@ -18,8 +18,8 @@ use crate::repository::{
     JsonError, ObjectId, RepoObject, Root, RootType, from_json, to_canonical_json,
 };
 use crate::util::{
-    CapacityManager, Complete, Completes, Dedup, ManagedBuffer, ManagedBuffers, NotifyComplete,
-    UsedCapacity, WithComplete,
+    AcquiredCapacity, CapacityManager, Complete, Completes, Dedup, ManagedBuffer, ManagedBuffers,
+    NotifyComplete, UsedCapacity, WithComplete,
 };
 
 // =============================================================================
@@ -407,28 +407,12 @@ impl FileChunkWithContentList {
         let acquired = self.managed_buffers.acquire(chunk.size).await;
 
         // Clone what we need for the spawned task
-        let backend = Arc::clone(&self.repo.backend);
-        let flow_control = self.repo.flow_control.clone();
+        let repo = Arc::clone(&self.repo);
         let chunk_id = chunk.content.clone();
-        let chunk_size = chunk.size;
-        let managed_buffers = self.managed_buffers.clone();
 
-        // Spawn the download task
-        // We apply flow control manually (minus ManagedBuffer acquisition, since we already did that)
+        // Spawn the download task using repo.read() with pre-acquired capacity
         let handle = tokio::spawn(async move {
-            // Apply request capacity (rate + concurrent)
-            let (_rate, _concurrent) = acquire_request_capacity(&flow_control).await;
-
-            // Apply read throughput
-            let (_read, _total) = acquire_read_throughput(&flow_control, chunk_size).await;
-
-            // Read from backend
-            let data = backend.read_object(&chunk_id).await?;
-
-            // Create ManagedBuffer with the acquired capacity
-            let managed_buffer = managed_buffers.create_buffer_with_acquired(data, acquired);
-
-            Ok(Arc::new(managed_buffer))
+            repo.read(&chunk_id, Some(acquired)).await
         });
 
         Ok(Some(FileChunkWithContent::new(chunk, handle)))
@@ -581,7 +565,7 @@ pub struct Repo {
     dedup_write_current_root: Dedup<ObjectId, (), RepoError>,
     dedup_object_exists: Dedup<ObjectId, bool, RepoError>,
     dedup_write: Dedup<ObjectId, (), RepoError>,
-    dedup_read: Dedup<ObjectId, Arc<ManagedBuffer>, RepoError>,
+    dedup_read: Dedup<ObjectId, Arc<Vec<u8>>, RepoError>,
 }
 
 impl Repo {
@@ -941,59 +925,65 @@ impl Repo {
 
     /// Read raw bytes from the repository.
     ///
-    /// If `expected_size` is provided, throughput limiting happens before the read.
-    /// Otherwise, it happens after the read completes.
+    /// If `acquired` is provided, it will be used to create the returned [`ManagedBuffer`],
+    /// and its size must match the actual data size read. This allows callers to control
+    /// when capacity is acquired for backpressure purposes.
     ///
-    /// Returns data wrapped in a [`ManagedBuffer`]. The ManagedBuffer is acquired
-    /// after other flow control handles are dropped to avoid deadlock.
+    /// If `acquired` is `None`, capacity is acquired internally after the read completes.
     ///
-    /// This operation is deduplicated.
+    /// Returns data wrapped in a [`ManagedBuffer`].
+    ///
+    /// This operation is deduplicated at the backend I/O level - concurrent reads of
+    /// the same object share one backend call. However, each caller gets their own
+    /// `ManagedBuffer` (with their own capacity tracking if `acquired` was provided).
     pub async fn read(
         &self,
         id: &ObjectId,
-        expected_size: Option<u64>,
+        acquired: Option<AcquiredCapacity>,
     ) -> Result<Arc<ManagedBuffer>> {
         let backend = Arc::clone(&self.backend);
         let flow_control = self.flow_control.clone();
         let id_owned = id.clone();
 
-        self.dedup_read
+        // Dedup returns raw bytes - each caller wraps in their own ManagedBuffer
+        let data = self
+            .dedup_read
             .call(id.clone(), || async move {
                 let (rate, concurrent) = acquire_request_capacity(&flow_control).await;
 
-                // Acquire read throughput if size is known
-                let (pre_read, pre_total) = if let Some(size) = expected_size {
-                    acquire_read_throughput(&flow_control, size).await
-                } else {
-                    (None, None)
-                };
-
+                // Acquire read throughput after we know the size
                 let data = backend.read_object(&id_owned).await?;
                 let size = data.len() as u64;
 
-                // Acquire read throughput after if size was unknown.
-                if expected_size.is_none() {
-                    let _ = acquire_read_throughput(&flow_control, size).await;
-                }
+                let _ = acquire_read_throughput(&flow_control, size).await;
 
-                // Drop all flow control handles BEFORE acquiring ManagedBuffer
-                // to avoid potential deadlock
+                // Drop flow control handles
                 drop(rate);
                 drop(concurrent);
-                drop(pre_read);
-                drop(pre_total);
 
-                // Wrap data in ManagedBuffer
-                let managed_buffer = if let Some(ref mb) = flow_control.managed_buffers {
-                    mb.get_buffer_with_data(data).await
-                } else {
-                    // No capacity management - create unmanaged buffer
-                    ManagedBuffers::new().get_buffer_with_data(data).await
-                };
-
-                Ok(Arc::new(managed_buffer))
+                Ok(Arc::new(data))
             })
-            .await
+            .await?;
+
+        // Create ManagedBuffer - either with provided capacity or acquire internally
+        let managed_buffer = if let Some(acq) = acquired {
+            if let Some(ref mb) = self.flow_control.managed_buffers {
+                mb.create_buffer_with_acquired(data.as_ref().clone(), acq)
+            } else {
+                // No capacity management configured, but caller provided AcquiredCapacity
+                // (likely from a different ManagedBuffers instance)
+                ManagedBuffers::new().create_buffer_with_acquired(data.as_ref().clone(), acq)
+            }
+        } else if let Some(ref mb) = self.flow_control.managed_buffers {
+            mb.get_buffer_with_data(data.as_ref().clone()).await
+        } else {
+            // No capacity management - create unmanaged buffer
+            ManagedBuffers::new()
+                .get_buffer_with_data(data.as_ref().clone())
+                .await
+        };
+
+        Ok(Arc::new(managed_buffer))
     }
 
     // =========================================================================

@@ -95,6 +95,7 @@ Calls upload_directory() from the filestore to the repo and prints the resulting
 tfs repo download-directory {repo spec} {directory object_id} {filestore spec} [{path}]
   [--dry-run / -n]
   [--verbose / -v]
+  [--no-stage]
   [--output-file / -o {output file}]
 ```
 Downloads the given directory from the given repo to the given path in the given filestore.  If --dry-run is specified, then the the system will still go through all the steps of seeing what actions would be taken, but no actual changes are made to the filestore.  If verbose is specified, then those actions will be printed as follows:
@@ -103,9 +104,14 @@ Downloads the given directory from the given repo to the given path in the given
 mkdir {path}
 rm {path}
 download {path} <- {object_id}{if executable then add "+x"}
+chmod {"+x" or "-x"} {path} 
 ```
-NOTE - currently it is an error to NOT specify --dry-run (the actual downoad isn't supported yet)
+If "--no-stage" is specified then the download will proceed without using a stage, meaning that files will be downloaded directly into their final destinations, as opposed to downloading all content into a temporary "stage" area before assembling and moving files into their final locations.
 
+```
+tfs repo download-file {repo spec} {directory object_id} {filestore spec} {path}
+```
+Downloads the given file object to the given path within the given filestore.
 
 ### tfs file-store
 

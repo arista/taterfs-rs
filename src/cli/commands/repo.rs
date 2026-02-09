@@ -58,6 +58,10 @@ pub enum RepoCommand {
     /// Download a directory from the repository to a file store.
     #[command(name = "download-directory")]
     DownloadDirectory(DownloadDirectoryArgs),
+
+    /// Download a file from the repository to a file store.
+    #[command(name = "download-file")]
+    DownloadFile(DownloadFileArgs),
 }
 
 impl RepoCommand {
@@ -74,6 +78,7 @@ impl RepoCommand {
             RepoCommand::UploadFile(args) => args.run(app, global).await,
             RepoCommand::UploadDirectory(args) => args.run(app, global).await,
             RepoCommand::DownloadDirectory(args) => args.run(app, global).await,
+            RepoCommand::DownloadFile(args) => args.run(app, global).await,
         }
     }
 }
@@ -553,18 +558,25 @@ pub struct DownloadDirectoryArgs {
     #[arg(long, short = 'v')]
     pub verbose: bool,
 
+    /// Download without using a staging area.
+    #[arg(long)]
+    pub no_stage: bool,
+
     #[command(flatten)]
     pub output: OutputSink,
 }
 
+/// Type alias for action callback functions used in verbose/dry-run modes.
+type ActionCallback = Box<dyn Fn(&str) + Send + Sync>;
+
 /// A [`DownloadActions`] implementation that streams actions to a callback
 /// without buffering. Used for dry-run mode.
 struct DryRunDownloadActions {
-    on_action: Box<dyn Fn(&str) + Send + Sync>,
+    on_action: ActionCallback,
 }
 
 impl DryRunDownloadActions {
-    fn new(on_action: Box<dyn Fn(&str) + Send + Sync>) -> Self {
+    fn new(on_action: ActionCallback) -> Self {
         Self { on_action }
     }
 }
@@ -620,14 +632,60 @@ impl DownloadActions for DryRunDownloadActions {
     }
 }
 
+/// A [`DownloadActions`] wrapper that prints actions and delegates to inner implementation.
+/// Used for verbose mode during actual downloads.
+struct VerboseDownloadActions<'a> {
+    inner: &'a dyn DownloadActions,
+    on_action: ActionCallback,
+}
+
+impl<'a> VerboseDownloadActions<'a> {
+    fn new(inner: &'a dyn DownloadActions, on_action: ActionCallback) -> Self {
+        Self { inner, on_action }
+    }
+}
+
+#[async_trait]
+impl<'a> DownloadActions for VerboseDownloadActions<'a> {
+    async fn rm(&self, path: &Path) -> crate::download::Result<WithComplete<()>> {
+        (self.on_action)(&format!("rm {}", path.display()));
+        self.inner.rm(path).await
+    }
+
+    async fn mkdir(&self, path: &Path) -> crate::download::Result<WithComplete<()>> {
+        (self.on_action)(&format!("mkdir {}", path.display()));
+        self.inner.mkdir(path).await
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> crate::download::Result<WithComplete<()>> {
+        let exec_marker = if executable { "+x" } else { "" };
+        (self.on_action)(&format!(
+            "download {} <- {}{}",
+            path.display(),
+            file_id,
+            exec_marker
+        ));
+        self.inner.download_file(path, file_id, executable).await
+    }
+
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+    ) -> crate::download::Result<WithComplete<()>> {
+        let mode = if executable { "+x" } else { "-x" };
+        (self.on_action)(&format!("chmod {} {}", mode, path.display()));
+        self.inner.set_executable(path, executable).await
+    }
+}
+
 impl DownloadDirectoryArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        if !self.dry_run {
-            return Err(CliError::Other(
-                "only --dry-run is currently supported".to_string(),
-            ));
-        }
-
         let repo_ctx = self.repo.to_create_repo_context(false);
         let repo = app.create_repo(repo_ctx).await?;
 
@@ -636,6 +694,123 @@ impl DownloadDirectoryArgs {
 
         let store_path = self.path.as_deref().map(PathBuf::from).unwrap_or_default();
 
+        if self.dry_run {
+            // Dry run mode - just print what would be done
+            self.run_dry_run(repo, file_store.as_ref(), store_path, global)
+                .await
+        } else {
+            // Actual download
+            self.run_download(repo, file_store.as_ref(), store_path, global)
+                .await
+        }
+    }
+
+    async fn run_download(
+        &self,
+        repo: Arc<crate::repo::Repo>,
+        file_store: &dyn crate::file_store::FileStore,
+        store_path: PathBuf,
+        global: &GlobalArgs,
+    ) -> Result<()> {
+        use crate::download::{DownloadRepoToStore, DownloadToFileStoreActions};
+
+        let dest = file_store
+            .get_dest()
+            .ok_or_else(|| CliError::Other("file store does not support writing".to_string()))?;
+
+        let base_actions = DownloadToFileStoreActions::new(Arc::clone(&repo), dest);
+
+        // Set up verbose output if requested
+        let on_action = self.create_action_callback(global)?;
+
+        if self.verbose || global.json {
+            // Use verbose wrapper
+            let verbose_actions = VerboseDownloadActions::new(&base_actions, on_action);
+            let download = DownloadRepoToStore::new(
+                repo,
+                self.directory_object_id.clone(),
+                file_store,
+                store_path,
+                &verbose_actions,
+            )
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
+
+            let result = download
+                .download_repo_to_store()
+                .await
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            result
+                .complete
+                .complete()
+                .await
+                .map_err(|e| CliError::Other(format!("download failed: {e}")))?;
+        } else {
+            // No verbose output - use download_directory directly
+            let with_stage = !self.no_stage;
+            let result = crate::download::download_directory(
+                repo,
+                &self.directory_object_id,
+                file_store,
+                store_path,
+                with_stage,
+            )
+            .await
+            .map_err(|e| CliError::Other(e.to_string()))?;
+
+            result
+                .complete
+                .complete()
+                .await
+                .map_err(|e| CliError::Other(format!("download failed: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    fn create_action_callback(
+        &self,
+        global: &GlobalArgs,
+    ) -> Result<ActionCallback> {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = match &self.output.file {
+            Some(path) => {
+                let file = std::fs::File::create(path)
+                    .map_err(|e| CliError::Other(format!("failed to create output file: {e}")))?;
+                Arc::new(Mutex::new(Box::new(std::io::BufWriter::new(file))))
+            }
+            None => Arc::new(Mutex::new(Box::new(std::io::stdout()))),
+        };
+
+        let on_action: ActionCallback = if global.json {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                if let Ok(encoded) = serde_json::to_string(s) {
+                    let mut w = w.lock().unwrap();
+                    let _ = writeln!(w, "{encoded}");
+                }
+            })
+        } else {
+            let w = writer.clone();
+            Box::new(move |s: &str| {
+                let mut w = w.lock().unwrap();
+                let _ = writeln!(w, "{s}");
+            })
+        };
+
+        Ok(on_action)
+    }
+
+    async fn run_dry_run(
+        &self,
+        repo: Arc<crate::repo::Repo>,
+        file_store: &dyn crate::file_store::FileStore,
+        store_path: PathBuf,
+        global: &GlobalArgs,
+    ) -> Result<()> {
         use std::io::Write;
         use std::sync::Mutex;
 
@@ -651,7 +826,7 @@ impl DownloadDirectoryArgs {
             None => Arc::new(Mutex::new(Box::new(std::io::stdout()))),
         };
 
-        let on_action: Box<dyn Fn(&str) + Send + Sync> = if json {
+        let on_action: ActionCallback = if json {
             let w = writer.clone();
             Box::new(move |s: &str| {
                 if let Ok(encoded) = serde_json::to_string(s) {
@@ -673,17 +848,77 @@ impl DownloadDirectoryArgs {
         let download = DownloadRepoToStore::new(
             repo,
             self.directory_object_id.clone(),
-            file_store.as_ref(),
+            file_store,
             store_path,
             &actions,
         )
         .await
         .map_err(|e| CliError::Other(e.to_string()))?;
 
-        download
+        let result = download
             .download_repo_to_store()
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
+
+        // Wait for dry-run to complete (should be immediate with NoopComplete)
+        result
+            .complete
+            .complete()
+            .await
+            .map_err(|e| CliError::Other(format!("dry-run failed: {e}")))?;
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// download-file command
+// =============================================================================
+
+/// Arguments for the download-file command.
+#[derive(Args, Debug)]
+pub struct DownloadFileArgs {
+    #[command(flatten)]
+    pub repo: RepoArgs,
+
+    /// The file object ID to download.
+    pub file_object_id: String,
+
+    #[command(flatten)]
+    pub file_store: FileStoreArgs,
+
+    /// Path within the file store to download to.
+    pub path: String,
+}
+
+impl DownloadFileArgs {
+    pub async fn run(self, app: &App, _global: &GlobalArgs) -> Result<()> {
+        let repo_ctx = self.repo.to_create_repo_context(false);
+        let repo = app.create_repo(repo_ctx).await?;
+
+        let fs_ctx = self.file_store.to_create_file_store_context();
+        let file_store = app.create_file_store(fs_ctx).await?;
+
+        let path = PathBuf::from(&self.path);
+
+        // Download the file (default to not executable - the file metadata will
+        // be determined from the File object in the repo)
+        let result = crate::download::download_file(
+            repo,
+            &self.file_object_id,
+            file_store.as_ref(),
+            &path,
+            false, // executable bit - will be set based on file metadata if needed
+        )
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
+
+        // Wait for the download to complete
+        result
+            .complete
+            .complete()
+            .await
+            .map_err(|e| CliError::Other(format!("download failed: {e}")))?;
 
         Ok(())
     }

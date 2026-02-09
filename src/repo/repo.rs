@@ -5,6 +5,7 @@
 //! - Request deduplication for concurrent identical requests
 //! - Flow control via [`CapacityManager`] instances
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -281,7 +282,7 @@ pub struct FileChunkWithContent {
 
 impl FileChunkWithContent {
     /// Create a new FileChunkWithContent with a background download task.
-    fn new(
+    pub fn new(
         chunk: ChunkFilePart,
         handle: tokio::task::JoinHandle<Result<Arc<ManagedBuffer>>>,
     ) -> Self {
@@ -289,6 +290,19 @@ impl FileChunkWithContent {
             chunk,
             download_handle: tokio::sync::Mutex::new(Some(handle)),
             content_cell: Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    /// Create a new FileChunkWithContent with pre-populated content.
+    ///
+    /// This is used when the content is already available (e.g., from a stage).
+    pub fn new_with_content(chunk: ChunkFilePart, content: Arc<ManagedBuffer>) -> Self {
+        let cell = Arc::new(tokio::sync::OnceCell::new());
+        let _ = cell.set(Ok(content));
+        Self {
+            chunk,
+            download_handle: tokio::sync::Mutex::new(None),
+            content_cell: cell,
         }
     }
 
@@ -329,6 +343,21 @@ impl FileChunkWithContent {
         Err(RepoError::Other("Content not available".to_string()))
     }
 }
+
+/// Trait for iterating over file chunks with content.
+///
+/// Implementations provide an async iterator interface that yields file chunks
+/// with their content available (either immediately or via background download).
+#[async_trait]
+pub trait FileChunksWithContent: Send {
+    /// Get the next file chunk with content.
+    ///
+    /// Returns `None` when all chunks have been yielded.
+    async fn next(&mut self) -> Result<Option<FileChunkWithContent>>;
+}
+
+/// Boxed trait object for dynamic dispatch of file chunks with content.
+pub type BoxedFileChunksWithContent = Box<dyn FileChunksWithContent>;
 
 /// An iterator over file chunks that downloads content in the background.
 ///
@@ -416,6 +445,13 @@ impl FileChunkWithContentList {
         });
 
         Ok(Some(FileChunkWithContent::new(chunk, handle)))
+    }
+}
+
+#[async_trait]
+impl FileChunksWithContent for FileChunkWithContentList {
+    async fn next(&mut self) -> Result<Option<FileChunkWithContent>> {
+        FileChunkWithContentList::next(self).await
     }
 }
 

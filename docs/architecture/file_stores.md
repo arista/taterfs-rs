@@ -110,13 +110,15 @@ interface FileDest {
   // List the contents of a directory, error if the path does not point to a directory
   async list_directory(path: Path) -> Option<DirectoryList>
   // Write a file whose contents are supplied asynchronously by the given FileChunks
-  async write_file_from_chunks(path: Path, chunks: SourceChunks, executable: bool)
+  async write_file_from_chunks(path: Path, chunks: FileChunkWithContentList, executable: bool) -> WithComplete<()>
   // Remove the file or directory at the given Path, if it exists
   async rm(path: Path)
   // Create a new directory at the given Path if there isn't yet a directory there, error if there is already a file there
   async mkdir(path: Path)
   // Change the executable bit of a file, error if the path does not point to a file
   async set_executable(path: Path, executable: bool)
+  
+  async create_stage() -> Option<FileDestStage>
 }
 
 interface DirectoryList {
@@ -129,6 +131,56 @@ interface DirectoryList {
 A FileDest implementation should do its best to avoid leaving a partially-written file, even if it's interrupted during a write_file_from_chunks operation.  Some implementations will, for example, build the file in a temporary location, then move the file to its final location atomically.
 
 The list_directory() function (and its recursive DirectoryList.list_directory function) should respect ignore directives the same way that FileSource.scan does.
+
+The write_file_from_chunks function will download multiple chunks in parallel, then write them to the file in sequential order.  The file should be written to a temporary location, then moved into its final location in the store atomically, if possible.  The function will return once all chunks have started downloading (i.e., after chunks.next() has successfully been called, which subjects it to ManagedBuffers flow control), and will then complete the WithComplete once all the downloads have completed.  The algorithm for this looks like:
+
+```
+async write_file_from_chunks(path: Path, chunks: FileChunkWithContentList, executable: bool) -> WithComplete<()> {
+  create a NotifyComplete
+  create a queue with elements Option<FileChunkWithContent>
+  open a temporary file
+  set the temporary file's executable bit according to "executable"
+
+  start a separate process that runs a loop {
+    wait to take the next Option<chunk> from the queue
+    if None {
+        close the temporary file
+        move the file to its final location
+        mark the NotifyComplete as complete
+    }
+    else {
+        wait for the chunk's content()
+        write the content to the temporary file
+    }
+  }
+
+  loop through the FileChunkWithContentList {
+    await next() to get the Option<chunk>
+    if None {
+      add None to the queue
+      return a WithComplete<()> holding the NotifyComplete
+    }
+    else {
+      add the chunk to the queue
+    }
+  }
+}
+```
+
+### FileDestStage
+
+Some FileDests will implement a "stage" for downloading files.  This is a mechanism for temporarily caching downloaded file chunks, allowing all required content to be pulled from a repo before modifying any existing directories or files in the FileStore.  Once all chunks have been downloaded to the stage, the files can be assembled and moved to their final locations in quick succession, thereby minimizing the time that the FileStore is being disrupted.
+
+```
+FileDestStage {
+  async write_chunk(id: ObjectId, chunk: ManagedBuffer) -> Result<()>
+  async read_chunk(id: ObjectId) -> Result<Option<ManagedBuffer>>
+  async has_chunk(id: ObjectId) -> Result<bool>
+  async cleanup() -> Result<()>
+}
+```
+
+The cleanup function removes the stage and all of its content.
 
 ## Implementation Helpers
 
@@ -177,7 +229,7 @@ Note that the ignore rules only come into play as part of the FileSource's scan(
 
 ### MemoryFileStore
 
-This implementation stores an in-memory representation of a filesystem and exposes both FileSource and FileDest to it.  This will most likely be used for testing.
+This implementation stores an in-memory representation of a filesystem and exposes both FileSource and FileDest to it.  Its FileDest does not provide a FileDestStage.  This will most likely be used for testing.
 
 The implementation provides a builder API for defining the file hierarchy in memory:
 
@@ -219,13 +271,18 @@ The FsFileSource implementation should use the ScanIgnoreHelper to implement the
 
 The FsFileStore should use a file fingerprint in the following format:
 
-get_source_chunk_contents() should not attempt any concurrency, but should just retrieve and return the results of get_source_chunks in order
-
 ```
 {last modified time in millis since the epoch}:{file size}:{executable bit, either "x" or "-"}
 ```
 
-TODO: The FileDest.write_file_from_chunks() implementation is more complicated, as it involves downloading multiple chunks simultaneously into a temporary location (possibly with some flow control), assembling those chunks into the final file, then moving that file into its final location.
+The FileDest.write_file_from_chunks() implementation should follow the write_file_from_chunks algorithm described above, storing its temporary file to `{destination path}/.download.{filename}-{temp filename}`
+
+The FileDest implementation should offer a FileDestStage implementation:
+
+* Each create_stage() should create a directory "{file store root}/.tfs/tmp/stage-{temp filename}/"
+* Chunks are stored in the stage under "chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/{id}"
+* While chunks are being written, they should first be written to a temporary file "chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/.download.{id}-{temp filename}", then moved atomically to their intended stage destination
+* The cleanup() function should remove the entire stage directory
 
 ### S3FileStore
 

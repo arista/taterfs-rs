@@ -275,7 +275,8 @@ pub struct FileChunkWithContent {
     /// The chunk metadata.
     pub chunk: ChunkFilePart,
     /// JoinHandle for the background download task.
-    download_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<Arc<ManagedBuffer>>>>>,
+    download_handle:
+        tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<Arc<ManagedBuffer>>>>>,
     /// Cached content after download completes.
     content_cell: Arc<tokio::sync::OnceCell<Result<Arc<ManagedBuffer>>>>,
 }
@@ -322,7 +323,10 @@ impl FileChunkWithContent {
             if let Some(handle) = guard.take() {
                 match handle.await {
                     Ok(result) => Some(result),
-                    Err(e) => Some(Err(RepoError::Other(format!("Download task failed: {}", e)))),
+                    Err(e) => Some(Err(RepoError::Other(format!(
+                        "Download task failed: {}",
+                        e
+                    )))),
                 }
             } else {
                 None
@@ -440,9 +444,7 @@ impl FileChunkWithContentList {
         let chunk_id = chunk.content.clone();
 
         // Spawn the download task using repo.read() with pre-acquired capacity
-        let handle = tokio::spawn(async move {
-            repo.read(&chunk_id, Some(acquired)).await
-        });
+        let handle = tokio::spawn(async move { repo.read(&chunk_id, Some(acquired)).await });
 
         Ok(Some(FileChunkWithContent::new(chunk, handle)))
     }

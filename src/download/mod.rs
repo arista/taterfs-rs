@@ -8,6 +8,7 @@
 mod download;
 
 pub use download::{
-    download_file, DownloadActions, DownloadError, DownloadRepoToStore, Result,
-    StagedFileChunkWithContentList,
+    DownloadActions, DownloadError, DownloadRepoToStore, DownloadToFileStoreActions,
+    DownloadToStageActions, DownloadWithStageActions, Result, StagedFileChunkWithContentList,
+    download_directory, download_file,
 };

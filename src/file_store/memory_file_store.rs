@@ -4,10 +4,10 @@ use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
 use crate::caches::{FileStoreCache, NoopFileStoreCache};
 use crate::file_store::{
-    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage,
-    FileEntry, FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk,
-    SourceChunkContent, SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList,
-    SourceChunks, SourceChunksWithContent, VecScanEventList,
+    DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
+    FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
+    SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
+    SourceChunksWithContent, VecScanEventList,
 };
 use crate::repo::BoxedFileChunksWithContent;
 use crate::util::{Complete, ManagedBuffers, NoopComplete, WithComplete};
@@ -779,7 +779,10 @@ impl crate::file_store::FileDest for MemoryFileStore {
         // Collect all chunk data before acquiring the write lock
         let mut data = Vec::new();
         while let Some(chunk) = chunks.next().await? {
-            let content = chunk.content().await.map_err(|e| Error::Other(e.to_string()))?;
+            let content = chunk
+                .content()
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
             data.extend_from_slice(&content[..]);
         }
 
@@ -975,7 +978,10 @@ mod tests {
     }
 
     /// Helper to get entry using FileSource trait (avoids ambiguity with FileDest).
-    async fn get_source_entry(store: &MemoryFileStore, path: &Path) -> Result<Option<DirectoryEntry>> {
+    async fn get_source_entry(
+        store: &MemoryFileStore,
+        path: &Path,
+    ) -> Result<Option<DirectoryEntry>> {
         FileSource::get_entry(store, path).await
     }
 
@@ -988,11 +994,13 @@ mod tests {
         assert!(events.next().await.is_none());
 
         // Root should exist
-        let root = get_source_entry(&store,Path::new("")).await.unwrap();
+        let root = get_source_entry(&store, Path::new("")).await.unwrap();
         assert!(matches!(root, Some(DirectoryEntry::Dir(_))));
 
         // Non-existent path
-        let missing = get_source_entry(&store,Path::new("missing")).await.unwrap();
+        let missing = get_source_entry(&store, Path::new("missing"))
+            .await
+            .unwrap();
         assert!(missing.is_none());
     }
 
@@ -1003,7 +1011,9 @@ mod tests {
             .build();
 
         // Check entry
-        let entry = get_source_entry(&store,Path::new("hello.txt")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("hello.txt"))
+            .await
+            .unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => {
                 assert_eq!(f.name, "hello.txt");
@@ -1031,11 +1041,13 @@ mod tests {
             .build();
 
         // Check nested file
-        let entry = get_source_entry(&store,Path::new("a/b/c.txt")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("a/b/c.txt"))
+            .await
+            .unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::File(_))));
 
         // Check directory
-        let dir = get_source_entry(&store,Path::new("a/b")).await.unwrap();
+        let dir = get_source_entry(&store, Path::new("a/b")).await.unwrap();
         assert!(matches!(dir, Some(DirectoryEntry::Dir(_))));
 
         // Scan should be depth-first, lexicographic
@@ -1057,7 +1069,9 @@ mod tests {
             .add("script.sh", MemoryFsEntry::executable("#!/bin/bash"))
             .build();
 
-        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("script.sh"))
+            .await
+            .unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => {
                 assert!(f.executable);
@@ -1533,7 +1547,9 @@ mod tests {
 
         dest.rm(Path::new("file.txt")).await.unwrap();
 
-        let entry = get_source_entry(&store,Path::new("file.txt")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("file.txt"))
+            .await
+            .unwrap();
         assert!(entry.is_none());
     }
 
@@ -1547,7 +1563,7 @@ mod tests {
 
         dest.rm(Path::new("dir")).await.unwrap();
 
-        let entry = get_source_entry(&store,Path::new("dir")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("dir")).await.unwrap();
         assert!(entry.is_none());
     }
 
@@ -1567,7 +1583,7 @@ mod tests {
 
         dest.mkdir(Path::new("a/b/c")).await.unwrap();
 
-        let entry = get_source_entry(&store,Path::new("a/b/c")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("a/b/c")).await.unwrap();
         assert!(matches!(entry, Some(DirectoryEntry::Dir(_))));
     }
 
@@ -1608,7 +1624,9 @@ mod tests {
         dest.set_executable(Path::new("script.sh"), true)
             .await
             .unwrap();
-        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("script.sh"))
+            .await
+            .unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => assert!(f.executable),
             _ => panic!("Expected file entry"),
@@ -1618,7 +1636,9 @@ mod tests {
         dest.set_executable(Path::new("script.sh"), false)
             .await
             .unwrap();
-        let entry = get_source_entry(&store,Path::new("script.sh")).await.unwrap();
+        let entry = get_source_entry(&store, Path::new("script.sh"))
+            .await
+            .unwrap();
         match entry {
             Some(DirectoryEntry::File(f)) => assert!(!f.executable),
             _ => panic!("Expected file entry"),

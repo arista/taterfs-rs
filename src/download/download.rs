@@ -9,7 +9,7 @@ use crate::caches::{DbId, FileStoreCache};
 use crate::file_store::{self, DirectoryList, FileDestStage, FileStore};
 use crate::repo::{self, FileChunkWithContent, FileChunksWithContent, Repo, RepoError};
 use crate::repository::{File, FilePart, ObjectId};
-use crate::util::{ManagedBuffers, WithComplete};
+use crate::util::{Complete, Completes, ManagedBuffers, WithComplete};
 
 // Type aliases to disambiguate between repo and file_store DirectoryEntry types.
 type RepoDirectoryEntry = repo::DirectoryEntry;
@@ -50,19 +50,28 @@ pub type Result<T> = std::result::Result<T, DownloadError>;
 ///
 /// This abstracts away how files are actually written, making the core
 /// download algorithm testable independently of the file store implementation.
+///
+/// Each method returns a `WithComplete<()>` that signals when the operation
+/// has finished. The caller should add the `Complete` to a `Completes` to
+/// track when all operations have finished.
 #[async_trait]
 pub trait DownloadActions: Send + Sync {
     /// Remove a file or directory at the given path.
-    async fn rm(&self, path: &Path) -> Result<()>;
+    async fn rm(&self, path: &Path) -> Result<WithComplete<()>>;
 
     /// Create a directory at the given path.
-    async fn mkdir(&self, path: &Path) -> Result<()>;
+    async fn mkdir(&self, path: &Path) -> Result<WithComplete<()>>;
 
     /// Download a file from the repository to the given path.
-    async fn download_file(&self, path: &Path, file_id: &ObjectId, executable: bool) -> Result<()>;
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> Result<WithComplete<()>>;
 
     /// Change the executable bit of a file.
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()>;
+    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>>;
 }
 
 // =============================================================================
@@ -81,6 +90,8 @@ pub struct DownloadRepoToStore<'a> {
     cache_path_id: Option<DbId>,
     repo_directory_id: ObjectId,
     store_entries: Option<DirectoryList>,
+    /// Tracks completion of all actions performed during this download.
+    completes: Completes,
 }
 
 impl<'a> DownloadRepoToStore<'a> {
@@ -108,6 +119,8 @@ impl<'a> DownloadRepoToStore<'a> {
             .await
             .map_err(|e| DownloadError::Cache(e.to_string()))?;
 
+        let completes = Completes::new();
+
         // Check what exists at the store path
         let entry = dest.get_entry(&store_path).await?;
         let store_entries = match entry {
@@ -117,13 +130,22 @@ impl<'a> DownloadRepoToStore<'a> {
             }
             None => {
                 // Nothing exists - create the directory
-                actions.mkdir(&store_path).await?;
+                let with_complete = actions.mkdir(&store_path).await?;
+                completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
                 None
             }
             Some(StoreDirectoryEntry::File(_)) => {
                 // File exists where we need a directory - remove and create
-                actions.rm(&store_path).await?;
-                actions.mkdir(&store_path).await?;
+                let with_complete = actions.rm(&store_path).await?;
+                completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
+                let with_complete = actions.mkdir(&store_path).await?;
+                completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
                 None
             }
         };
@@ -136,6 +158,7 @@ impl<'a> DownloadRepoToStore<'a> {
             cache_path_id,
             repo_directory_id,
             store_entries,
+            completes,
         })
     }
 
@@ -173,6 +196,7 @@ impl<'a> DownloadRepoToStore<'a> {
             cache_path_id: Some(child_cache_path_id),
             repo_directory_id,
             store_entries: child_store_entries,
+            completes: Completes::new(),
         })
     }
 
@@ -180,7 +204,9 @@ impl<'a> DownloadRepoToStore<'a> {
     ///
     /// This is the core merge algorithm that walks through both the repo entries
     /// and store entries in sorted order, determining what changes need to be made.
-    pub async fn download_repo_to_store(mut self) -> Result<()> {
+    ///
+    /// Returns a `WithComplete<()>` that signals when all actions have finished.
+    pub async fn download_repo_to_store(mut self) -> Result<WithComplete<()>> {
         let mut repo_entries = self
             .repo
             .list_directory_entries(&self.repo_directory_id)
@@ -239,15 +265,22 @@ impl<'a> DownloadRepoToStore<'a> {
             }
         }
 
-        Ok(())
+        self.completes.done();
+        Ok(WithComplete::new(
+            (),
+            Arc::new(self.completes) as Arc<dyn Complete>,
+        ))
     }
 
     /// Download a repo entry that doesn't exist in the store.
-    async fn download_repo_entry(&self, entry: &RepoDirectoryEntry) -> Result<()> {
+    async fn download_repo_entry(&mut self, entry: &RepoDirectoryEntry) -> Result<()> {
         match entry {
             RepoDirectoryEntry::Directory(dir_entry) => {
                 let child_path = self.store_path.join(&dir_entry.name);
-                self.actions.mkdir(&child_path).await?;
+                let with_complete = self.actions.mkdir(&child_path).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
                 let child = self
                     .for_child_with_store_entries(
                         &dir_entry.name,
@@ -255,22 +288,32 @@ impl<'a> DownloadRepoToStore<'a> {
                         &None,
                     )
                     .await?;
-                Box::pin(child.download_repo_to_store()).await?;
+                let with_complete = Box::pin(child.download_repo_to_store()).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
             }
             RepoDirectoryEntry::File(file_entry) => {
                 let file_path = self.store_path.join(&file_entry.name);
-                self.actions
+                let with_complete = self
+                    .actions
                     .download_file(&file_path, &file_entry.file, file_entry.executable)
                     .await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
             }
         }
         Ok(())
     }
 
     /// Remove a store entry that doesn't exist in the repo.
-    async fn remove_store_entry(&self, entry: &StoreDirectoryEntry) -> Result<()> {
+    async fn remove_store_entry(&mut self, entry: &StoreDirectoryEntry) -> Result<()> {
         let entry_path = self.store_path.join(entry_name_store(entry));
-        self.actions.rm(&entry_path).await?;
+        let with_complete = self.actions.rm(&entry_path).await?;
+        self.completes
+            .add(with_complete.complete)
+            .expect("done() not yet called");
         Ok(())
     }
 
@@ -290,13 +333,22 @@ impl<'a> DownloadRepoToStore<'a> {
                         &self.store_entries,
                     )
                     .await?;
-                Box::pin(child.download_repo_to_store()).await?;
+                let with_complete = Box::pin(child.download_repo_to_store()).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
             }
             // Dir -> File: replace store file with repo directory
             (RepoDirectoryEntry::Directory(dir_entry), StoreDirectoryEntry::File(_)) => {
                 let child_path = self.store_path.join(&dir_entry.name);
-                self.actions.rm(&child_path).await?;
-                self.actions.mkdir(&child_path).await?;
+                let with_complete = self.actions.rm(&child_path).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
+                let with_complete = self.actions.mkdir(&child_path).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
                 let child = self
                     .for_child_with_store_entries(
                         &dir_entry.name,
@@ -304,15 +356,25 @@ impl<'a> DownloadRepoToStore<'a> {
                         &None,
                     )
                     .await?;
-                Box::pin(child.download_repo_to_store()).await?;
+                let with_complete = Box::pin(child.download_repo_to_store()).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
             }
             // File -> Dir: replace store directory with repo file
             (RepoDirectoryEntry::File(file_entry), StoreDirectoryEntry::Dir(_)) => {
                 let file_path = self.store_path.join(&file_entry.name);
-                self.actions.rm(&file_path).await?;
-                self.actions
+                let with_complete = self.actions.rm(&file_path).await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
+                let with_complete = self
+                    .actions
                     .download_file(&file_path, &file_entry.file, file_entry.executable)
                     .await?;
+                self.completes
+                    .add(with_complete.complete)
+                    .expect("done() not yet called");
             }
             // File -> File: check if we can skip the download
             (RepoDirectoryEntry::File(file_entry), StoreDirectoryEntry::File(store_file)) => {
@@ -342,16 +404,27 @@ impl<'a> DownloadRepoToStore<'a> {
                 if file_matches {
                     // File content matches - just check executable bit
                     if store_file.executable != file_entry.executable {
-                        self.actions
+                        let with_complete = self
+                            .actions
                             .set_executable(&file_path, file_entry.executable)
                             .await?;
+                        self.completes
+                            .add(with_complete.complete)
+                            .expect("done() not yet called");
                     }
                 } else {
                     // File doesn't match - replace it
-                    self.actions.rm(&file_path).await?;
-                    self.actions
+                    let with_complete = self.actions.rm(&file_path).await?;
+                    self.completes
+                        .add(with_complete.complete)
+                        .expect("done() not yet called");
+                    let with_complete = self
+                        .actions
                         .download_file(&file_path, &file_entry.file, file_entry.executable)
                         .await?;
+                    self.completes
+                        .add(with_complete.complete)
+                        .expect("done() not yet called");
                 }
             }
         }
@@ -390,7 +463,7 @@ fn entry_name_store(entry: &StoreDirectoryEntry) -> &str {
 /// This is used in the second phase of staged downloads.
 pub struct StagedFileChunkWithContentList {
     repo: Arc<Repo>,
-    stage: Box<dyn FileDestStage>,
+    stage: Arc<dyn FileDestStage>,
     /// Stack of pending file parts to process.
     /// Each element is (file, index into parts).
     pending: Vec<(File, usize)>,
@@ -408,7 +481,7 @@ impl StagedFileChunkWithContentList {
     /// * `managed_buffers` - Buffer manager for backpressure control
     pub fn new(
         repo: Arc<Repo>,
-        stage: Box<dyn FileDestStage>,
+        stage: Arc<dyn FileDestStage>,
         file: File,
         managed_buffers: ManagedBuffers,
     ) -> Self {
@@ -518,6 +591,375 @@ pub async fn download_file(
 }
 
 // =============================================================================
+// DownloadToFileStoreActions
+// =============================================================================
+
+/// Implementation of [`DownloadActions`] that writes directly to a file store.
+///
+/// This is used for non-staged downloads where files are written directly to
+/// their final locations as they are downloaded.
+pub struct DownloadToFileStoreActions<'a> {
+    repo: Arc<Repo>,
+    dest: &'a dyn file_store::FileDest,
+}
+
+impl<'a> DownloadToFileStoreActions<'a> {
+    /// Create a new `DownloadToFileStoreActions`.
+    pub fn new(repo: Arc<Repo>, dest: &'a dyn file_store::FileDest) -> Self {
+        Self { repo, dest }
+    }
+}
+
+#[async_trait]
+impl<'a> DownloadActions for DownloadToFileStoreActions<'a> {
+    async fn rm(&self, path: &Path) -> Result<WithComplete<()>> {
+        self.dest.rm(path).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn mkdir(&self, path: &Path) -> Result<WithComplete<()>> {
+        self.dest.mkdir(path).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> Result<WithComplete<()>> {
+        let chunks = self.repo.read_file_chunks_with_content(file_id).await?;
+        let with_complete = self
+            .dest
+            .write_file_from_chunks(path, Box::new(chunks), executable)
+            .await?;
+        Ok(with_complete)
+    }
+
+    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
+        self.dest.set_executable(path, executable).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+}
+
+// =============================================================================
+// DownloadToStageActions
+// =============================================================================
+
+/// Implementation of [`DownloadActions`] for the first phase of a staged download.
+///
+/// In the first phase, we download all required chunks to the stage. The `rm`,
+/// `mkdir`, and `set_executable` methods are no-ops since we're just collecting
+/// chunks, not modifying the file store yet.
+pub struct DownloadToStageActions {
+    repo: Arc<Repo>,
+    stage: Arc<dyn FileDestStage>,
+    managed_buffers: ManagedBuffers,
+    /// Set of chunk IDs currently being downloaded, for deduplication.
+    downloading: std::sync::Mutex<std::collections::HashSet<ObjectId>>,
+}
+
+impl DownloadToStageActions {
+    /// Create a new `DownloadToStageActions`.
+    pub fn new(
+        repo: Arc<Repo>,
+        stage: Arc<dyn FileDestStage>,
+        managed_buffers: ManagedBuffers,
+    ) -> Self {
+        Self {
+            repo,
+            stage,
+            managed_buffers,
+            downloading: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl DownloadActions for DownloadToStageActions {
+    async fn rm(&self, _path: &Path) -> Result<WithComplete<()>> {
+        // No-op in phase 1
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn mkdir(&self, _path: &Path) -> Result<WithComplete<()>> {
+        // No-op in phase 1
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn download_file(
+        &self,
+        _path: &Path,
+        file_id: &ObjectId,
+        _executable: bool,
+    ) -> Result<WithComplete<()>> {
+        let completes = Completes::new();
+        let mut file_chunks = self.repo.list_file_chunks(file_id).await?;
+
+        while let Some(chunk) = file_chunks.next().await? {
+            let chunk_id = chunk.content.clone();
+
+            // Check if we're already downloading this chunk
+            {
+                let downloading = self.downloading.lock().unwrap();
+                if downloading.contains(&chunk_id) {
+                    continue;
+                }
+            }
+
+            // Check if chunk is in stage (outside the lock)
+            if self.stage.has_chunk(&chunk_id).await? {
+                continue;
+            }
+
+            // Mark as downloading - check again in case another task started
+            {
+                let mut downloading = self.downloading.lock().unwrap();
+                if !downloading.insert(chunk_id.clone()) {
+                    // Another task started downloading while we checked the stage
+                    continue;
+                }
+            }
+
+            // Acquire buffer capacity for backpressure
+            let acquired = self.managed_buffers.acquire(chunk.size).await;
+
+            // Create a NotifyComplete to track this download
+            let notify = Arc::new(crate::util::NotifyComplete::new());
+            completes
+                .add(notify.clone() as Arc<dyn Complete>)
+                .expect("done() not yet called");
+
+            // Spawn task to download and stage the chunk
+            let repo = Arc::clone(&self.repo);
+            let stage = Arc::clone(&self.stage);
+
+            tokio::spawn(async move {
+                let result = async {
+                    let buffer = repo.read(&chunk_id, Some(acquired)).await?;
+                    stage.write_chunk(&chunk_id, buffer).await?;
+                    Ok::<_, DownloadError>(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => notify.notify_complete(),
+                    Err(e) => notify.notify_error(e.to_string()),
+                }
+            });
+        }
+
+        completes.done();
+        Ok(WithComplete::new(
+            (),
+            Arc::new(completes) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<WithComplete<()>> {
+        // No-op in phase 1
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+}
+
+// =============================================================================
+// DownloadWithStageActions
+// =============================================================================
+
+/// Implementation of [`DownloadActions`] for the second phase of a staged download.
+///
+/// In the second phase, we assemble files from the staged chunks. We use
+/// [`StagedFileChunkWithContentList`] to read from the stage when possible,
+/// falling back to downloading from the repo if needed (in case the store changed
+/// between phases and new chunks are required).
+pub struct DownloadWithStageActions<'a> {
+    repo: Arc<Repo>,
+    dest: &'a dyn file_store::FileDest,
+    stage: Arc<dyn FileDestStage>,
+    managed_buffers: ManagedBuffers,
+}
+
+impl<'a> DownloadWithStageActions<'a> {
+    /// Create a new `DownloadWithStageActions`.
+    pub fn new(
+        repo: Arc<Repo>,
+        dest: &'a dyn file_store::FileDest,
+        stage: Arc<dyn FileDestStage>,
+        managed_buffers: ManagedBuffers,
+    ) -> Self {
+        Self {
+            repo,
+            dest,
+            stage,
+            managed_buffers,
+        }
+    }
+}
+
+#[async_trait]
+impl<'a> DownloadActions for DownloadWithStageActions<'a> {
+    async fn rm(&self, path: &Path) -> Result<WithComplete<()>> {
+        self.dest.rm(path).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn mkdir(&self, path: &Path) -> Result<WithComplete<()>> {
+        self.dest.mkdir(path).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> Result<WithComplete<()>> {
+        // Read the file to get its structure
+        let file = self.repo.read_file(file_id).await?;
+
+        // Create a StagedFileChunkWithContentList that reads from the stage when possible
+        let chunks = StagedFileChunkWithContentList::new(
+            Arc::clone(&self.repo),
+            self.stage.clone(),
+            file,
+            self.managed_buffers.clone(),
+        );
+
+        let with_complete = self
+            .dest
+            .write_file_from_chunks(path, Box::new(chunks), executable)
+            .await?;
+        Ok(with_complete)
+    }
+
+    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
+        self.dest.set_executable(path, executable).await?;
+        Ok(WithComplete::new(
+            (),
+            Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+        ))
+    }
+}
+
+// =============================================================================
+// download_directory function
+// =============================================================================
+
+/// Download a directory from a repository to a file store.
+///
+/// Recursively downloads the directory identified by `directory_id` from the
+/// repository and synchronizes it to `path` in the file store. The store must
+/// support [`FileDest`](file_store::FileDest).
+///
+/// If `with_stage` is false, files are downloaded directly to their final
+/// locations. This minimizes temporary storage requirements but may leave the
+/// file store in a disrupted state for longer.
+///
+/// If `with_stage` is true and the file store supports staging, the download
+/// proceeds in two phases:
+/// 1. All required chunks are downloaded to a temporary stage
+/// 2. Files are assembled from the staged chunks and moved to their final locations
+///
+/// This minimizes the time the file store is in a disrupted state.
+///
+/// # Arguments
+///
+/// * `repo` - The repository to download from
+/// * `directory_id` - The ObjectId of the directory to download
+/// * `store` - The file store to download to (must support FileDest)
+/// * `path` - The path within the store where the directory should be written
+/// * `with_stage` - Whether to use staged downloading
+///
+/// # Errors
+///
+/// Returns an error if:
+/// * The file store does not support writing (`NoFileDest`)
+/// * The directory cannot be read from the repository
+/// * Files cannot be written to the store
+pub async fn download_directory(
+    repo: Arc<Repo>,
+    directory_id: &ObjectId,
+    store: &dyn FileStore,
+    path: PathBuf,
+    with_stage: bool,
+) -> Result<WithComplete<()>> {
+    let dest = store.get_dest().ok_or(DownloadError::NoFileDest)?;
+
+    if with_stage {
+        // Try to create a stage
+        if let Some(stage) = dest.create_stage().await? {
+            // Stage is available - use two-phase download
+            let stage: Arc<dyn FileDestStage> = Arc::from(stage);
+            let managed_buffers = ManagedBuffers::new();
+
+            // Phase 1: Download all chunks to the stage
+            let phase1_actions = DownloadToStageActions::new(
+                Arc::clone(&repo),
+                Arc::clone(&stage),
+                managed_buffers.clone(),
+            );
+            let download = DownloadRepoToStore::new(
+                Arc::clone(&repo),
+                directory_id.clone(),
+                store,
+                path.clone(),
+                &phase1_actions,
+            )
+            .await?;
+            let phase1_result = download.download_repo_to_store().await?;
+            // Wait for phase 1 to complete
+            phase1_result
+                .complete
+                .complete()
+                .await
+                .map_err(|e| DownloadError::Cache(format!("Stage download failed: {}", e)))?;
+
+            // Phase 2: Assemble files from staged chunks
+            let phase2_actions = DownloadWithStageActions::new(
+                Arc::clone(&repo),
+                dest,
+                Arc::clone(&stage),
+                managed_buffers,
+            );
+            let download =
+                DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &phase2_actions)
+                    .await?;
+            return download.download_repo_to_store().await;
+        }
+    }
+
+    // Non-staged download or stage not available
+    let actions = DownloadToFileStoreActions::new(Arc::clone(&repo), dest);
+    let download =
+        DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &actions).await?;
+    download.download_repo_to_store().await
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -534,7 +976,7 @@ mod tests {
 
     use async_trait::async_trait;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use crate::caches::RepoCache;
 
@@ -598,20 +1040,26 @@ mod tests {
 
     #[async_trait]
     impl DownloadActions for RecordingActions {
-        async fn rm(&self, path: &Path) -> Result<()> {
+        async fn rm(&self, path: &Path) -> Result<WithComplete<()>> {
             self.actions
                 .lock()
                 .unwrap()
                 .push(format!("rm:{}", path.display()));
-            Ok(())
+            Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            ))
         }
 
-        async fn mkdir(&self, path: &Path) -> Result<()> {
+        async fn mkdir(&self, path: &Path) -> Result<WithComplete<()>> {
             self.actions
                 .lock()
                 .unwrap()
                 .push(format!("mkdir:{}", path.display()));
-            Ok(())
+            Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            ))
         }
 
         async fn download_file(
@@ -619,23 +1067,29 @@ mod tests {
             path: &Path,
             file_id: &ObjectId,
             executable: bool,
-        ) -> Result<()> {
+        ) -> Result<WithComplete<()>> {
             self.actions.lock().unwrap().push(format!(
                 "download:{}:{}:{}",
                 path.display(),
                 file_id,
                 executable
             ));
-            Ok(())
+            Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            ))
         }
 
-        async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
+        async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
             self.actions.lock().unwrap().push(format!(
                 "set_executable:{}:{}",
                 path.display(),
                 executable
             ));
-            Ok(())
+            Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            ))
         }
     }
 

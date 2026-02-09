@@ -419,7 +419,8 @@ impl SourceChunkWithContentList for S3SourceChunkWithContentList {
             };
 
             // Create buffer with the acquired capacity
-            let managed_buffer = managed_buffers.create_buffer_with_acquired(bytes.to_vec(), acquired);
+            let managed_buffer =
+                managed_buffers.create_buffer_with_acquired(bytes.to_vec(), acquired);
 
             Ok(SourceChunkContent {
                 offset,

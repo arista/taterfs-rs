@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{App, upload_directory, upload_file};
 use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
-use async_trait::async_trait;
 use crate::download::{DownloadActions, DownloadRepoToStore};
-use crate::repository::ObjectId;
 use crate::repo::RepoInitialize;
+use crate::repository::ObjectId;
+use crate::util::{Complete, NoopComplete, WithComplete};
+use async_trait::async_trait;
 
 // =============================================================================
 // Repo Subcommands
@@ -381,7 +382,10 @@ impl WriteArgs {
         let id = hex::encode(hash);
 
         // Create a ManagedBuffer for the data
-        let buffer = app.managed_buffers().get_buffer_with_data(data.to_vec()).await;
+        let buffer = app
+            .managed_buffers()
+            .get_buffer_with_data(data.to_vec())
+            .await;
 
         // Write to the repository
         let result = repo.write(&id, Arc::new(buffer)).await?;
@@ -567,14 +571,20 @@ impl DryRunDownloadActions {
 
 #[async_trait]
 impl DownloadActions for DryRunDownloadActions {
-    async fn rm(&self, path: &Path) -> crate::download::Result<()> {
+    async fn rm(&self, path: &Path) -> crate::download::Result<WithComplete<()>> {
         (self.on_action)(&format!("rm {}", path.display()));
-        Ok(())
+        Ok(WithComplete::new(
+            (),
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        ))
     }
 
-    async fn mkdir(&self, path: &Path) -> crate::download::Result<()> {
+    async fn mkdir(&self, path: &Path) -> crate::download::Result<WithComplete<()>> {
         (self.on_action)(&format!("mkdir {}", path.display()));
-        Ok(())
+        Ok(WithComplete::new(
+            (),
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        ))
     }
 
     async fn download_file(
@@ -582,7 +592,7 @@ impl DownloadActions for DryRunDownloadActions {
         path: &Path,
         file_id: &ObjectId,
         executable: bool,
-    ) -> crate::download::Result<()> {
+    ) -> crate::download::Result<WithComplete<()>> {
         let exec_marker = if executable { "+x" } else { "" };
         (self.on_action)(&format!(
             "download {} <- {}{}",
@@ -590,17 +600,23 @@ impl DownloadActions for DryRunDownloadActions {
             file_id,
             exec_marker
         ));
-        Ok(())
+        Ok(WithComplete::new(
+            (),
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        ))
     }
 
     async fn set_executable(
         &self,
         path: &Path,
         executable: bool,
-    ) -> crate::download::Result<()> {
+    ) -> crate::download::Result<WithComplete<()>> {
         let mode = if executable { "+x" } else { "-x" };
         (self.on_action)(&format!("chmod {} {}", mode, path.display()));
-        Ok(())
+        Ok(WithComplete::new(
+            (),
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        ))
     }
 }
 

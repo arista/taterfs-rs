@@ -10,6 +10,7 @@ use crate::file_store::{
     SourceChunksWithContent, VecScanEventList,
 };
 use crate::repo::BoxedFileChunksWithContent;
+use crate::repository::ObjectId;
 use crate::util::{Complete, ManagedBuffers, NoopComplete, WithComplete};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -770,6 +771,7 @@ impl crate::file_store::FileDest for MemoryFileStore {
         path: &Path,
         mut chunks: BoxedFileChunksWithContent,
         executable: bool,
+        _object_id: &ObjectId,
     ) -> Result<WithComplete<()>> {
         let components = path_components(path);
         if components.is_empty() {
@@ -863,7 +865,12 @@ impl crate::file_store::FileDest for MemoryFileStore {
         Ok(())
     }
 
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        _object_id: &ObjectId,
+    ) -> Result<()> {
         let mut root = self.root.write().await;
         let node = get_node_mut(&mut root, path)
             .ok_or_else(|| Error::NotFound(Self::path_to_string(path)))?;
@@ -1621,7 +1628,8 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         // Set executable
-        dest.set_executable(Path::new("script.sh"), true)
+        let test_object_id = "test_object_id".to_string();
+        dest.set_executable(Path::new("script.sh"), true, &test_object_id)
             .await
             .unwrap();
         let entry = get_source_entry(&store, Path::new("script.sh"))
@@ -1633,7 +1641,7 @@ mod tests {
         }
 
         // Clear executable
-        dest.set_executable(Path::new("script.sh"), false)
+        dest.set_executable(Path::new("script.sh"), false, &test_object_id)
             .await
             .unwrap();
         let entry = get_source_entry(&store, Path::new("script.sh"))
@@ -1650,7 +1658,8 @@ mod tests {
         let store = MemoryFileStore::builder().build();
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let result = dest.set_executable(Path::new("missing"), true).await;
+        let test_object_id = "test_object_id".to_string();
+        let result = dest.set_executable(Path::new("missing"), true, &test_object_id).await;
         assert!(matches!(result, Err(Error::NotFound(_))));
     }
 
@@ -1661,7 +1670,8 @@ mod tests {
             .build();
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let result = dest.set_executable(Path::new("dir"), true).await;
+        let test_object_id = "test_object_id".to_string();
+        let result = dest.set_executable(Path::new("dir"), true, &test_object_id).await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 }

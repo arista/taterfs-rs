@@ -132,6 +132,8 @@ A FileDest implementation should do its best to avoid leaving a partially-writte
 
 The list_directory() function (and its recursive DirectoryList.list_directory function) should respect ignore directives the same way that FileSource.scan does.
 
+A FileDest is also responsible for updating the [cache](./caches.md) associated with the FileStore.  When write_file_from_chunks or set_executable is called, the cache should be updated by calling set_fingerprinted_file_info with the information obtained by calling get_entry (if that returns a FileEntry).
+
 The write_file_from_chunks function will download multiple chunks in parallel, then write them to the file in sequential order.  The file should be written to a temporary location, then moved into its final location in the store atomically, if possible.  The function will return once all chunks have started downloading (i.e., after chunks.next() has successfully been called, which subjects it to ManagedBuffers flow control), and will then complete the WithComplete once all the downloads have completed.  The algorithm for this looks like:
 
 ```

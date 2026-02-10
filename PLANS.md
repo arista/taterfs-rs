@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at the changes to cli.md
+Look at the changes to file_stores.md around updating the cache when writing to the file store.
 
 ## Planned Features
 

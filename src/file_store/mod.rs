@@ -548,6 +548,9 @@ pub trait FileDest: Send + Sync {
     /// in sequential order. The file is written to a temporary location,
     /// then moved into its final location atomically.
     ///
+    /// The `object_id` is the repository object ID for this file, used to
+    /// update the file store's cache after the write completes.
+    ///
     /// Returns once all chunks have started downloading (after `chunks.next()`
     /// has been called for each chunk, which subjects it to ManagedBuffers
     /// flow control). The `WithComplete` signals when all downloads have
@@ -557,6 +560,7 @@ pub trait FileDest: Send + Sync {
         path: &Path,
         chunks: BoxedFileChunksWithContent,
         executable: bool,
+        object_id: &ObjectId,
     ) -> Result<WithComplete<()>>;
 
     /// Remove the file or directory at the given path, if it exists.
@@ -572,8 +576,12 @@ pub trait FileDest: Send + Sync {
 
     /// Change the executable bit of a file.
     ///
+    /// The `object_id` is the repository object ID for this file, used to
+    /// update the file store's cache after the executable bit is changed.
+    ///
     /// Returns an error if the path does not point to a file.
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()>;
+    async fn set_executable(&self, path: &Path, executable: bool, object_id: &ObjectId)
+        -> Result<()>;
 
     /// Create a staging area for downloading file chunks.
     ///

@@ -4,7 +4,7 @@
 
 use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
-use crate::caches::FileStoreCache;
+use crate::caches::{FileStoreCache, FingerprintedFileInfo};
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
     FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 /// A FileStore backed by the local filesystem.
+#[derive(Clone)]
 pub struct FsFileStore {
     /// Root path on the filesystem.
     root: PathBuf,
@@ -86,6 +87,35 @@ impl FsFileStore {
             "-"
         };
         Some(format!("{}:{}:{}", millis, metadata.len(), exec_bit))
+    }
+
+    /// Update the cache after writing a file or changing its executable bit.
+    ///
+    /// Uses `get_entry` to obtain the file's fingerprint, ensuring consistency
+    /// with how fingerprints are computed elsewhere.
+    async fn update_cache_after_write(
+        &self,
+        path: &Path,
+        object_id: &ObjectId,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Get the file entry to obtain its fingerprint
+        let entry = FileSource::get_entry(self, path).await?;
+
+        if let Some(DirectoryEntry::File(file_entry)) = entry
+            && let Some(fingerprint) = file_entry.fingerprint
+        {
+            // Get the path ID from the cache
+            let path_str = path.to_string_lossy();
+            if let Some(path_id) = self.cache.get_path_id(&path_str).await? {
+                let info = FingerprintedFileInfo {
+                    fingerprint,
+                    object_id: object_id.clone(),
+                };
+                self.cache.set_fingerprinted_file_info(path_id, &info).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -513,6 +543,7 @@ impl crate::file_store::FileDest for FsFileStore {
         path: &Path,
         mut chunks: BoxedFileChunksWithContent,
         executable: bool,
+        object_id: &ObjectId,
     ) -> Result<WithComplete<()>> {
         let absolute = self.to_absolute(path);
 
@@ -556,6 +587,11 @@ impl crate::file_store::FileDest for FsFileStore {
         let temp_path_for_task = temp_path.clone();
         let absolute_for_task = absolute.clone();
 
+        // Clone self and data needed for cache update in background task
+        let store = self.clone();
+        let path_for_task = path.to_path_buf();
+        let object_id_for_task = object_id.clone();
+
         // Spawn the background writer task
         tokio::spawn(async move {
             let result = write_chunks_to_file(
@@ -568,7 +604,13 @@ impl crate::file_store::FileDest for FsFileStore {
             .await;
 
             match result {
-                Ok(()) => complete_for_task.notify_complete(),
+                Ok(()) => {
+                    // Update the cache with the new file's fingerprint using get_entry
+                    let _ = store
+                        .update_cache_after_write(&path_for_task, &object_id_for_task)
+                        .await;
+                    complete_for_task.notify_complete();
+                }
                 Err(e) => complete_for_task.notify_error(e.to_string()),
             }
         });
@@ -639,7 +681,12 @@ impl crate::file_store::FileDest for FsFileStore {
         Ok(())
     }
 
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<()> {
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<()> {
         let absolute = self.to_absolute(path);
 
         let metadata = match fs::metadata(&absolute).await {
@@ -668,6 +715,9 @@ impl crate::file_store::FileDest for FsFileStore {
             }
             fs::set_permissions(&absolute, perms).await?;
         }
+
+        // Update the cache with the new fingerprint (executable bit changed)
+        let _ = self.update_cache_after_write(path, object_id).await;
 
         Ok(())
     }
@@ -1357,7 +1407,8 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         // Set executable
-        dest.set_executable(Path::new("script.sh"), true)
+        let test_object_id = "test_object_id".to_string();
+        dest.set_executable(Path::new("script.sh"), true, &test_object_id)
             .await
             .unwrap();
         let mode = std::fs::metadata(temp.path().join("script.sh"))
@@ -1371,7 +1422,7 @@ mod tests {
         );
 
         // Clear executable
-        dest.set_executable(Path::new("script.sh"), false)
+        dest.set_executable(Path::new("script.sh"), false, &test_object_id)
             .await
             .unwrap();
         let mode = std::fs::metadata(temp.path().join("script.sh"))
@@ -1391,7 +1442,8 @@ mod tests {
         let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let result = dest.set_executable(Path::new("missing"), true).await;
+        let test_object_id = "test_object_id".to_string();
+        let result = dest.set_executable(Path::new("missing"), true, &test_object_id).await;
         assert!(matches!(result, Err(Error::NotFound(_))));
     }
 
@@ -1403,7 +1455,8 @@ mod tests {
         let store = create_store(&temp);
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
-        let result = dest.set_executable(Path::new("dir"), true).await;
+        let test_object_id = "test_object_id".to_string();
+        let result = dest.set_executable(Path::new("dir"), true, &test_object_id).await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 }

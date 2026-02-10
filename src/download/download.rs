@@ -71,7 +71,12 @@ pub trait DownloadActions: Send + Sync {
     ) -> Result<WithComplete<()>>;
 
     /// Change the executable bit of a file.
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>>;
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<WithComplete<()>>;
 }
 
 // =============================================================================
@@ -406,7 +411,7 @@ impl<'a> DownloadRepoToStore<'a> {
                     if store_file.executable != file_entry.executable {
                         let with_complete = self
                             .actions
-                            .set_executable(&file_path, file_entry.executable)
+                            .set_executable(&file_path, file_entry.executable, &file_entry.file)
                             .await?;
                         self.completes
                             .add(with_complete.complete)
@@ -584,7 +589,7 @@ pub async fn download_file(
 
     // Write the file using the boxed chunks iterator
     let with_complete = dest
-        .write_file_from_chunks(path, Box::new(chunks), executable)
+        .write_file_from_chunks(path, Box::new(chunks), executable, file_id)
         .await?;
 
     Ok(with_complete)
@@ -637,13 +642,18 @@ impl<'a> DownloadActions for DownloadToFileStoreActions<'a> {
         let chunks = self.repo.read_file_chunks_with_content(file_id).await?;
         let with_complete = self
             .dest
-            .write_file_from_chunks(path, Box::new(chunks), executable)
+            .write_file_from_chunks(path, Box::new(chunks), executable, file_id)
             .await?;
         Ok(with_complete)
     }
 
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
-        self.dest.set_executable(path, executable).await?;
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<WithComplete<()>> {
+        self.dest.set_executable(path, executable, object_id).await?;
         Ok(WithComplete::new(
             (),
             Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
@@ -771,7 +781,12 @@ impl DownloadActions for DownloadToStageActions {
         ))
     }
 
-    async fn set_executable(&self, _path: &Path, _executable: bool) -> Result<WithComplete<()>> {
+    async fn set_executable(
+        &self,
+        _path: &Path,
+        _executable: bool,
+        _object_id: &ObjectId,
+    ) -> Result<WithComplete<()>> {
         // No-op in phase 1
         Ok(WithComplete::new(
             (),
@@ -851,13 +866,18 @@ impl<'a> DownloadActions for DownloadWithStageActions<'a> {
 
         let with_complete = self
             .dest
-            .write_file_from_chunks(path, Box::new(chunks), executable)
+            .write_file_from_chunks(path, Box::new(chunks), executable, file_id)
             .await?;
         Ok(with_complete)
     }
 
-    async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
-        self.dest.set_executable(path, executable).await?;
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<WithComplete<()>> {
+        self.dest.set_executable(path, executable, object_id).await?;
         Ok(WithComplete::new(
             (),
             Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
@@ -1080,7 +1100,12 @@ mod tests {
             ))
         }
 
-        async fn set_executable(&self, path: &Path, executable: bool) -> Result<WithComplete<()>> {
+        async fn set_executable(
+            &self,
+            path: &Path,
+            executable: bool,
+            _object_id: &ObjectId,
+        ) -> Result<WithComplete<()>> {
             self.actions.lock().unwrap().push(format!(
                 "set_executable:{}:{}",
                 path.display(),
@@ -1171,6 +1196,7 @@ mod tests {
             _path: &Path,
             _chunks: crate::repo::BoxedFileChunksWithContent,
             _executable: bool,
+            _object_id: &ObjectId,
         ) -> file_store::Result<crate::util::WithComplete<()>> {
             Ok(crate::util::WithComplete::new(
                 (),
@@ -1187,7 +1213,12 @@ mod tests {
             Ok(())
         }
 
-        async fn set_executable(&self, _path: &Path, _executable: bool) -> file_store::Result<()> {
+        async fn set_executable(
+            &self,
+            _path: &Path,
+            _executable: bool,
+            _object_id: &ObjectId,
+        ) -> file_store::Result<()> {
             Ok(())
         }
 

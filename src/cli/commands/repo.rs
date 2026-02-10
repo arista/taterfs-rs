@@ -622,6 +622,7 @@ impl DownloadActions for DryRunDownloadActions {
         &self,
         path: &Path,
         executable: bool,
+        _object_id: &ObjectId,
     ) -> crate::download::Result<WithComplete<()>> {
         let mode = if executable { "+x" } else { "-x" };
         (self.on_action)(&format!("chmod {} {}", mode, path.display()));
@@ -677,10 +678,11 @@ impl<'a> DownloadActions for VerboseDownloadActions<'a> {
         &self,
         path: &Path,
         executable: bool,
+        object_id: &ObjectId,
     ) -> crate::download::Result<WithComplete<()>> {
         let mode = if executable { "+x" } else { "-x" };
         (self.on_action)(&format!("chmod {} {}", mode, path.display()));
-        self.inner.set_executable(path, executable).await
+        self.inner.set_executable(path, executable, object_id).await
     }
 }
 

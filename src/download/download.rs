@@ -80,6 +80,104 @@ pub trait DownloadActions: Send + Sync {
 }
 
 // =============================================================================
+// ActionCallback Type
+// =============================================================================
+
+/// A callback for reporting download actions.
+///
+/// Used for verbose output and dry-run mode to report what actions are being
+/// (or would be) performed.
+pub type ActionCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+// =============================================================================
+// VerboseDownloadActions
+// =============================================================================
+
+/// A [`DownloadActions`] wrapper that reports actions via a callback.
+///
+/// When `inner` is `Some`, actions are printed then delegated to the inner
+/// implementation. When `inner` is `None`, actions are printed but not executed
+/// (dry-run mode).
+pub struct VerboseDownloadActions<'a> {
+    inner: Option<&'a dyn DownloadActions>,
+    on_action: ActionCallback,
+}
+
+impl<'a> VerboseDownloadActions<'a> {
+    /// Create a new `VerboseDownloadActions`.
+    ///
+    /// If `inner` is `Some`, actions are delegated after printing.
+    /// If `inner` is `None`, only printing occurs (dry-run mode).
+    pub fn new(inner: Option<&'a dyn DownloadActions>, on_action: ActionCallback) -> Self {
+        Self { inner, on_action }
+    }
+}
+
+#[async_trait]
+impl<'a> DownloadActions for VerboseDownloadActions<'a> {
+    async fn rm(&self, path: &Path) -> Result<WithComplete<()>> {
+        (self.on_action)(&format!("rm {}", path.display()));
+        match &self.inner {
+            Some(inner) => inner.rm(path).await,
+            None => Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            )),
+        }
+    }
+
+    async fn mkdir(&self, path: &Path) -> Result<WithComplete<()>> {
+        (self.on_action)(&format!("mkdir {}", path.display()));
+        match &self.inner {
+            Some(inner) => inner.mkdir(path).await,
+            None => Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            )),
+        }
+    }
+
+    async fn download_file(
+        &self,
+        path: &Path,
+        file_id: &ObjectId,
+        executable: bool,
+    ) -> Result<WithComplete<()>> {
+        let exec_marker = if executable { "+x" } else { "" };
+        (self.on_action)(&format!(
+            "download {} <- {}{}",
+            path.display(),
+            file_id,
+            exec_marker
+        ));
+        match &self.inner {
+            Some(inner) => inner.download_file(path, file_id, executable).await,
+            None => Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            )),
+        }
+    }
+
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<WithComplete<()>> {
+        let mode = if executable { "+x" } else { "-x" };
+        (self.on_action)(&format!("chmod {} {}", mode, path.display()));
+        match &self.inner {
+            Some(inner) => inner.set_executable(path, executable, object_id).await,
+            None => Ok(WithComplete::new(
+                (),
+                Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
+            )),
+        }
+    }
+}
+
+// =============================================================================
 // DownloadRepoToStore
 // =============================================================================
 
@@ -906,13 +1004,23 @@ impl<'a> DownloadActions for DownloadWithStageActions<'a> {
 ///
 /// This minimizes the time the file store is in a disrupted state.
 ///
+/// If `dry_run` is true, no actual changes are made to the file store. Actions
+/// are reported via the `on_action` callback if provided. Staging is skipped
+/// in dry-run mode.
+///
+/// If `on_action` is provided, each action is reported via the callback before
+/// being executed. This enables verbose output while still performing actual
+/// downloads.
+///
 /// # Arguments
 ///
 /// * `repo` - The repository to download from
 /// * `directory_id` - The ObjectId of the directory to download
 /// * `store` - The file store to download to (must support FileDest)
 /// * `path` - The path within the store where the directory should be written
-/// * `with_stage` - Whether to use staged downloading
+/// * `with_stage` - Whether to use staged downloading (ignored if dry_run is true)
+/// * `dry_run` - If true, don't make actual changes, just report what would be done
+/// * `on_action` - Optional callback for reporting actions (for verbose/dry-run output)
 ///
 /// # Errors
 ///
@@ -926,9 +1034,22 @@ pub async fn download_directory(
     store: &dyn FileStore,
     path: PathBuf,
     with_stage: bool,
+    dry_run: bool,
+    on_action: Option<ActionCallback>,
 ) -> Result<WithComplete<()>> {
     let dest = store.get_dest().ok_or(DownloadError::NoFileDest)?;
 
+    // For dry-run, skip staging and use no-op actions
+    if dry_run {
+        let callback = on_action.unwrap_or_else(|| Arc::new(|_: &str| {}));
+        let actions = VerboseDownloadActions::new(None, callback);
+        let download =
+            DownloadRepoToStore::new(Arc::clone(&repo), directory_id.clone(), store, path, &actions)
+                .await?;
+        return download.download_repo_to_store().await;
+    }
+
+    // Real download - may use staging
     if with_stage {
         // Try to create a stage
         if let Some(stage) = dest.create_stage().await? {
@@ -937,20 +1058,34 @@ pub async fn download_directory(
             let managed_buffers = ManagedBuffers::new();
 
             // Phase 1: Download all chunks to the stage
-            let phase1_actions = DownloadToStageActions::new(
+            let phase1_base = DownloadToStageActions::new(
                 Arc::clone(&repo),
                 Arc::clone(&stage),
                 managed_buffers.clone(),
             );
-            let download = DownloadRepoToStore::new(
-                Arc::clone(&repo),
-                directory_id.clone(),
-                store,
-                path.clone(),
-                &phase1_actions,
-            )
-            .await?;
-            let phase1_result = download.download_repo_to_store().await?;
+            let phase1_result = if let Some(ref cb) = on_action {
+                let phase1_actions = VerboseDownloadActions::new(Some(&phase1_base), Arc::clone(cb));
+                let download = DownloadRepoToStore::new(
+                    Arc::clone(&repo),
+                    directory_id.clone(),
+                    store,
+                    path.clone(),
+                    &phase1_actions,
+                )
+                .await?;
+                download.download_repo_to_store().await?
+            } else {
+                let download = DownloadRepoToStore::new(
+                    Arc::clone(&repo),
+                    directory_id.clone(),
+                    store,
+                    path.clone(),
+                    &phase1_base,
+                )
+                .await?;
+                download.download_repo_to_store().await?
+            };
+
             // Wait for phase 1 to complete
             phase1_result
                 .complete
@@ -959,24 +1094,45 @@ pub async fn download_directory(
                 .map_err(|e| DownloadError::Cache(format!("Stage download failed: {}", e)))?;
 
             // Phase 2: Assemble files from staged chunks
-            let phase2_actions = DownloadWithStageActions::new(
+            let phase2_base = DownloadWithStageActions::new(
                 Arc::clone(&repo),
                 dest,
                 Arc::clone(&stage),
                 managed_buffers,
             );
-            let download =
-                DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &phase2_actions)
-                    .await?;
-            return download.download_repo_to_store().await;
+            if let Some(ref cb) = on_action {
+                let phase2_actions = VerboseDownloadActions::new(Some(&phase2_base), Arc::clone(cb));
+                let download = DownloadRepoToStore::new(
+                    repo,
+                    directory_id.clone(),
+                    store,
+                    path,
+                    &phase2_actions,
+                )
+                .await?;
+                return download.download_repo_to_store().await;
+            } else {
+                let download =
+                    DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &phase2_base)
+                        .await?;
+                return download.download_repo_to_store().await;
+            }
         }
     }
 
     // Non-staged download or stage not available
-    let actions = DownloadToFileStoreActions::new(Arc::clone(&repo), dest);
-    let download =
-        DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &actions).await?;
-    download.download_repo_to_store().await
+    let base_actions = DownloadToFileStoreActions::new(Arc::clone(&repo), dest);
+    if let Some(cb) = on_action {
+        let actions = VerboseDownloadActions::new(Some(&base_actions), cb);
+        let download =
+            DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &actions).await?;
+        download.download_repo_to_store().await
+    } else {
+        let download =
+            DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &base_actions)
+                .await?;
+        download.download_repo_to_store().await
+    }
 }
 
 // =============================================================================

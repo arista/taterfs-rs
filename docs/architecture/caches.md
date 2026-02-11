@@ -64,6 +64,19 @@ The basic operations of the LocalChunksCache are:
 * invalidate local chunks file - notify the cache that any entries associated with the given file should be removed
 * invalidate local chunks directory - notify the cache that any entries recursively found under the given directory should be removed
 
+```
+interface LocalChunksCache {
+  async get_path_id(path: Path) -> DbId
+  async get_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  set_local_chunk(path_id: DbId, chunk: LocalChunk)
+  list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
+  invalidate_local_chunks(path_id: DbId)
+  invalidate_local_chunk_file(path_id: DbId)
+  invalidate_local_chunk_directory(parent_path_id: DbId)
+}
+```
+(all methods async)
+
 ### CacheDb
 
 The above interfaces are built against an underlying CacheDb service (all methods async)
@@ -107,7 +120,7 @@ CacheDb {
   list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
   invalidate_local_chunks(path_id: DbId)
   invalidate_local_chunk_file(path_id: DbId)
-  invalidate_local_chunk_directory(path_id: DbId)
+  invalidate_local_chunk_directory(parent_path_id: DbId)
 }
 
 PathEntry {
@@ -141,11 +154,8 @@ As will be described later, these calls map to a key/value database in a straigh
 * get_or_create_filestore_id does a get_filestore_id/[next_id/set_filestore_id] sequence
 * get_or_create_name_id does a get_name_id/[next_id/set_name_id] sequence
 * get_or_create_path_entry_id does a get_path_entry_id/[next_id/set_path_entry_id] sequence
-* get_or_create_local_path_entry_id does a get_local_path_entry_id/[next_id/set_local_path_entry_id] sequence
 
 The path functions are all intended to allow paths to be used in keys (for get_fingerprinted_file_info, for example) while cutting down on key size.  Each component of a path is mapped to a name id, and the path hierarchy is represented by "path entry" mappings from a [parent path, name] combo to a new path id.  The get_path_id() function is a convenience function that goes through that logic.
-
-The local path functions are similar to the path functions, except that they are not scoped to any particular file store id.
 
 The get_object() and set_object() calls do not use the Key/Value database.  Those are instead mapped to an ObjectCacheDb (described later)
 
@@ -228,6 +238,7 @@ filestore-id-by-url/{filestore url, uri-component-encoded} -> implements get/set
 fi/{filestore dbid}/{path dbid} -> {file info, of the form "{fingerprint}|{file hash}"} - implements get/set_fingerprinted_file_info
 
 na/{encoded name} -> {name id} - implements get/set_name_id
+nn/{name id} -> {encoded name} - populated by set_name_id
 pa/{parent path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id, used by get_path_id
 pp/{path dbid} -> "{parent path dbid or "root"}|{name dbid}" - populated as part of set_path_entry_id, used by get_path
 

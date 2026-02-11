@@ -14,8 +14,8 @@ use heed::{Database, Env, EnvOpenOptions};
 const LIST_ENTRIES_BATCH_SIZE: usize = 64;
 
 use super::key_value_db::{
-    KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries,
-    KeyValueEntry, Result, WriteOp,
+    KeyEntries, KeyEntry, KeyValueDb, KeyValueDbError, KeyValueDbTransaction, KeyValueDbWrites,
+    KeyValueEntries, KeyValueEntry, Result, WriteOp,
 };
 
 // =============================================================================
@@ -112,6 +112,14 @@ impl KeyValueDb for LmdbKeyValueDb {
 
     async fn list_entries(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueEntries + Send>> {
         Ok(Box::new(LmdbKeyValueEntries::new(
+            self.env.clone(),
+            self.db,
+            prefix.to_vec(),
+        )))
+    }
+
+    async fn list_keys(&self, prefix: &[u8]) -> Result<Box<dyn KeyEntries + Send>> {
+        Ok(Box::new(LmdbKeyEntries::new(
             self.env.clone(),
             self.db,
             prefix.to_vec(),
@@ -445,6 +453,148 @@ impl KeyValueEntries for LmdbKeyValueEntries {
 }
 
 // =============================================================================
+// LmdbKeyEntries
+// =============================================================================
+
+/// Iterator over LMDB keys matching a prefix, fetched in batches.
+/// More efficient than LmdbKeyValueEntries when only keys are needed.
+struct LmdbKeyEntries {
+    env: Arc<Env>,
+    db: Database<Bytes, Bytes>,
+    prefix: Vec<u8>,
+    /// Current batch of keys.
+    batch: Vec<KeyEntry>,
+    /// Index into the current batch.
+    batch_index: usize,
+    /// The last key we saw, used to resume iteration for the next batch.
+    /// None means we haven't started or we're done.
+    last_key: Option<Vec<u8>>,
+    /// Whether we've exhausted all entries.
+    exhausted: bool,
+}
+
+impl LmdbKeyEntries {
+    fn new(env: Arc<Env>, db: Database<Bytes, Bytes>, prefix: Vec<u8>) -> Self {
+        Self {
+            env,
+            db,
+            prefix,
+            batch: Vec::new(),
+            batch_index: 0,
+            last_key: None,
+            exhausted: false,
+        }
+    }
+
+    /// Fetch the next batch of keys.
+    async fn fetch_batch(&mut self) -> Result<()> {
+        let env = self.env.clone();
+        let db = self.db;
+        let prefix = self.prefix.clone();
+        let last_key = self.last_key.clone();
+
+        let batch = tokio::task::spawn_blocking(move || -> Result<Vec<KeyEntry>> {
+            let rtxn = env
+                .read_txn()
+                .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+            let mut keys = Vec::with_capacity(LIST_ENTRIES_BATCH_SIZE);
+
+            if prefix.is_empty() {
+                // Empty prefix: iterate all entries
+                match &last_key {
+                    None => {
+                        let iter = db
+                            .iter(&rtxn)
+                            .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                        for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {
+                            let (key, _value) =
+                                result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                            keys.push(KeyEntry::new(key.to_vec()));
+                        }
+                    }
+                    Some(last) => {
+                        let iter = db
+                            .range(&rtxn, &(Bound::Excluded(last.as_slice()), Bound::Unbounded))
+                            .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                        for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {
+                            let (key, _value) =
+                                result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                            keys.push(KeyEntry::new(key.to_vec()));
+                        }
+                    }
+                }
+            } else {
+                // With prefix: use prefix iteration
+                match &last_key {
+                    None => {
+                        // First batch: start from the prefix
+                        let iter = db
+                            .prefix_iter(&rtxn, &prefix)
+                            .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                        for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {
+                            let (key, _value) =
+                                result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                            keys.push(KeyEntry::new(key.to_vec()));
+                        }
+                    }
+                    Some(last) => {
+                        // Subsequent batches: use range starting after last key
+                        let iter = db
+                            .range(&rtxn, &(Bound::Excluded(last.as_slice()), Bound::Unbounded))
+                            .map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+
+                        for result in iter.take(LIST_ENTRIES_BATCH_SIZE) {
+                            let (key, _value) =
+                                result.map_err(|e| KeyValueDbError::Database(e.to_string()))?;
+                            // Check if still within prefix
+                            if !key.starts_with(&prefix) {
+                                break;
+                            }
+                            keys.push(KeyEntry::new(key.to_vec()));
+                        }
+                    }
+                }
+            }
+
+            Ok(keys)
+        })
+        .await
+        .map_err(|e| KeyValueDbError::Database(e.to_string()))??;
+
+        self.exhausted = batch.len() < LIST_ENTRIES_BATCH_SIZE;
+        self.batch = batch;
+        self.batch_index = 0;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl KeyEntries for LmdbKeyEntries {
+    async fn next(&mut self) -> Result<Option<KeyEntry>> {
+        // If we need a new batch, fetch one
+        if self.batch_index >= self.batch.len() {
+            if self.exhausted {
+                return Ok(None);
+            }
+            self.fetch_batch().await?;
+            if self.batch.is_empty() {
+                return Ok(None);
+            }
+        }
+
+        let entry = self.batch[self.batch_index].clone();
+        self.batch_index += 1;
+        self.last_key = Some(entry.key.clone());
+        Ok(Some(entry))
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -580,5 +730,72 @@ mod tests {
         // List with non-matching prefix
         let mut entries = db.list_entries(b"bar/").await.unwrap();
         assert!(entries.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values with prefixes
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+        writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+        writes.set(b"prefix/c".to_vec(), b"value_c".to_vec()).await;
+        writes.set(b"other/x".to_vec(), b"value_x".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List keys with prefix
+        let mut keys = db.list_keys(b"prefix/").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"prefix/a");
+
+        let k2 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k2.key, b"prefix/b");
+
+        let k3 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k3.key, b"prefix/c");
+
+        // No more keys
+        assert!(keys.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_empty_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"a".to_vec(), b"1".to_vec()).await;
+        writes.set(b"b".to_vec(), b"2".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List all keys (empty prefix)
+        let mut keys = db.list_keys(b"").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"a");
+
+        let k2 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k2.key, b"b");
+
+        assert!(keys.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_no_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = LmdbKeyValueDb::new(temp_dir.path()).unwrap();
+
+        // Write some values
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"foo/a".to_vec(), b"1".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // List with non-matching prefix
+        let mut keys = db.list_keys(b"bar/").await.unwrap();
+        assert!(keys.next().await.unwrap().is_none());
     }
 }

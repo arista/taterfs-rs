@@ -176,20 +176,15 @@ impl DbFileStoreCache {
 #[async_trait]
 impl FileStoreCache for DbFileStoreCache {
     async fn get_path_id(&self, path: &str) -> Result<Option<DbId>> {
-        // CacheDb.get_path_id internally calls get_or_create_* methods
-        Ok(self.cache_db.get_path_id(self.filestore_id, path).await?)
+        // Paths are global (not filestore-scoped)
+        Ok(self.cache_db.get_path_id(path).await?)
     }
 
     async fn get_path_entry_id(&self, parent: Option<DbId>, name: &str) -> Result<DbId> {
-        // First get or create the name ID
-        let name_id = self
-            .cache_db
-            .get_or_create_name_id(self.filestore_id, name)
-            .await?;
-        // Then get or create the path entry ID
+        // Paths are global (not filestore-scoped)
         Ok(self
             .cache_db
-            .get_or_create_path_entry_id(self.filestore_id, parent, name_id)
+            .get_or_create_path_entry_id_by_name(parent, name)
             .await?)
     }
 
@@ -197,6 +192,7 @@ impl FileStoreCache for DbFileStoreCache {
         &self,
         path_id: DbId,
     ) -> Result<Option<FingerprintedFileInfo>> {
+        // Fingerprint info is filestore-scoped
         Ok(self
             .cache_db
             .get_fingerprinted_file_info(self.filestore_id, path_id)
@@ -208,6 +204,7 @@ impl FileStoreCache for DbFileStoreCache {
         path_id: DbId,
         info: &FingerprintedFileInfo,
     ) -> Result<()> {
+        // Fingerprint info is filestore-scoped
         self.cache_db
             .set_fingerprinted_file_info(self.filestore_id, path_id, info)
             .await?;
@@ -325,10 +322,14 @@ mod tests {
             object_id: "bbb".to_string(),
         };
 
-        // Same path, different stores - get path IDs first
+        // Same path, different stores - path IDs are now global (same path = same ID)
         let path_id1 = cache1.get_path_id("test.txt").await.unwrap().unwrap();
         let path_id2 = cache2.get_path_id("test.txt").await.unwrap().unwrap();
 
+        // With global paths, same path should give same ID
+        assert_eq!(path_id1, path_id2);
+
+        // But fingerprint info is still filestore-scoped
         cache1
             .set_fingerprinted_file_info(path_id1, &info1)
             .await
@@ -338,7 +339,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Each should have its own data
+        // Each filestore should have its own fingerprint data for the same path
         assert_eq!(
             cache1
                 .get_fingerprinted_file_info(path_id1)

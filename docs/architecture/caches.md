@@ -92,25 +92,27 @@ CacheDb {
   get_or_create_filestore_id(filestore_url) -> DbId
   get_fingerprinted_file_info(filetore_id: DbId, path_id: DbId) -> Option<FingerprintedFileInfo>
   set_fingerprinted_file_info(filetore_id: DbId, path_id: DbId, info: FingerprintedFileInfo)
-  get_name_id(filestore_id: DbId, name: string) -> Option<DbId>
-  set_name_id(filestore_id: DbId, name: string, id: DbId)
-  get_or_create_name_id(filestore_id: DbId, name: string) -> DbId
-  get_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId) -> Option<DbId>
-  set_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId, path_id: DbId)
-  get_or_create_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: string) -> DbId
-  get_path_id(filestore_id: DbId, path: string) -> DbId
 
-  get_local_path_entry_id(parent: Option<DbId>, name: DbId) -> Option<DbId>
-  set_local_path_entry_id(parent: Option<DbId>, name: DbId, path_id: DbId)
-  get_or_create_local_path_entry_id(parent: Option<DbId>, name: string) -> DbId
-  get_local_path_id(path: string) -> DbId
-  local_path_id_to_path(local_path_id: DbId) -> Path
+  get_name_id(name: string) -> Option<DbId>
+  set_name_id(name: string, id: DbId)
+  get_or_create_name_id(name: string) -> DbId
+  get_path_entry_id(parent: Option<DbId>, name: DbId) -> Option<DbId>
+  set_path_entry_id(parent: Option<DbId>, name: DbId, path_id: DbId)
+  get_or_create_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  get_path_entry(path_id: DbId) -> PathEntry
+  get_path_id(path: string) -> DbId
+  get_path(path_id: DbId) -> Path
 
-  set_local_chunk(local_path_id: DbId, chunk: LocalChunk)
+  set_local_chunk(path_id: DbId, chunk: LocalChunk)
   list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
-  invalidate_local_chunks(local_path_id: DbId)
-  invalidate_local_chunk_file(local_path_id: DbId)
-  invalidate_local_chunk_directory(local_path_id: DbId)
+  invalidate_local_chunks(path_id: DbId)
+  invalidate_local_chunk_file(path_id: DbId)
+  invalidate_local_chunk_directory(path_id: DbId)
+}
+
+PathEntry {
+  parent_id: Option<DbId>
+  name_id: DbId
 }
 
 LocalChunk {
@@ -223,30 +225,19 @@ ex/{repository dbid}/{object id} -> {empty value} - implements get/set_exists
 fs/{repository dbid}/{object id} -> {empty value} - implements get/set_fully_stored
 
 filestore-id-by-url/{filestore url, uri-component-encoded} -> implements get/set_filestore_id
-na/{filestore dbid}/{encoded name} -> {name id} - implements get/set_name_id
-pa/{filestore dbid}/{path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id
 fi/{filestore dbid}/{path dbid} -> {file info, of the form "{fingerprint}|{file hash}"} - implements get/set_fingerprinted_file_info
 
-lc/{chunk id}/{local path dbid}/{offset}/{local chunk size}
-lf/{local path dbid}/{offset}/{chunk_id}
-lp/{parent local path dbid or "root"}/{name dbid} -> {local path dbid}
-ld/{parent local path dbid or "root"}/{local path dbid} -> {name dbid}
-lr/{local path dbid} -> {parent local path dbid or "root"}
+na/{encoded name} -> {name id} - implements get/set_name_id
+pa/{parent path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id, used by get_path_id
+pp/{path dbid} -> "{parent path dbid or "root"}|{name dbid}" - populated as part of set_path_entry_id, used by get_path
+
+lc/{chunk id}/{path dbid}/{offset}/{local chunk size}
+lf/{path dbid}/{offset}/{chunk_id}
 ```
 
-The lc/lf/lp/ld are used to implement the local chunks functionality, which is a little more complicated than the other functions since it effectively requires entries to be "indexed" in multiple ways.  The implementations are as follows:
+The lc and lf namespaces are used to implement the local chunks functionality, which is a little more complicated than the other functions since it effectively requires entries to be "indexed" in multiple ways.  The implementations are as follows:
 
 ```
-set_local_path_entry_id(parent: Option<DbId>, name: DbId, path_id: DbId) {
-  add entry to lp/
-  add entry to ld/
-  add entry to lr/
-}
-
-local_path_id_to_path(local_path_id: DbId) -> Path {
-  use entries in lr/ to reconstruct the Path, recursively looking until "root" is reached
-}
-
 set_local_chunk(local_path_id: DbId, chunk: LocalChunk) {
   add entry to lc/
   add entry to lf/
@@ -257,15 +248,15 @@ list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList {
   retrieve up to 256 into memory and return them as a single unit, don't retrieve more than that.  In other words, don't asynchronously "page" through the list since it might change as entries are removed
 }
 
-invalidate_local_chunks(local_path_id: DbId) {
+invalidate_local_chunks(path_id: DbId) {
   // call both file and directory since we don't necessarily know which one a path represents
   invalidate_local_chunk_file
   invalidate_local_chunk_directory
 }
 
-invalidate_local_chunk_file(local_path_id: DbId) {
+invalidate_local_chunk_file(path_id: DbId) {
   loop until no more batches {
-    retrieve a batch of up to 256 entries starting with "lf/{local_path_id}/", for each entry: {
+    retrieve a batch of up to 256 entries starting with "lf/{path_id}/", for each entry: {
       get the offset and chunk id from the entry
       remove the lf/ entry
       remove the lc/ entry
@@ -273,11 +264,11 @@ invalidate_local_chunk_file(local_path_id: DbId) {
   }
 }
 
-invalidate_local_chunk_directory(local_path_id: DbId) {
+invalidate_local_chunk_directory(parent_path_id: DbId) {
   loop until no more batches {
-    retrieve a batch of up to 16 entries starting with "ld/{local_path_id}", for each entry {
-      obtain its {local path dbid}
-      call invalidate_local_chunks(local_path_id)
+    retrieve a batch of up to 16 entries starting with "pa/{parent_path_id}", for each entry {
+      obtain its {path dbid}
+      call invalidate_local_chunks(path_id)
     }
   }
 }

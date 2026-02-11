@@ -80,6 +80,43 @@ pub trait DownloadActions: Send + Sync {
 }
 
 // =============================================================================
+// StageCleanupComplete
+// =============================================================================
+
+/// A [`Complete`] implementation that cleans up a stage after an inner operation completes.
+///
+/// This ensures that the stage's `cleanup()` method is called after the inner
+/// operation finishes, and that the overall operation only completes after
+/// cleanup is done.
+struct StageCleanupComplete {
+    inner: Arc<dyn Complete>,
+    stage: Arc<dyn FileDestStage>,
+}
+
+impl StageCleanupComplete {
+    /// Create a new `StageCleanupComplete`.
+    fn new(inner: Arc<dyn Complete>, stage: Arc<dyn FileDestStage>) -> Self {
+        Self { inner, stage }
+    }
+}
+
+#[async_trait]
+impl Complete for StageCleanupComplete {
+    async fn complete(&self) -> std::result::Result<(), crate::util::CompleteError> {
+        // Wait for the inner operation to complete
+        self.inner.complete().await?;
+
+        // Then clean up the stage
+        self.stage
+            .cleanup()
+            .await
+            .map_err(|e| -> crate::util::CompleteError { Box::new(e) })?;
+
+        Ok(())
+    }
+}
+
+// =============================================================================
 // ActionCallback Type
 // =============================================================================
 
@@ -1100,7 +1137,7 @@ pub async fn download_directory(
                 Arc::clone(&stage),
                 managed_buffers,
             );
-            if let Some(ref cb) = on_action {
+            let phase2_result = if let Some(ref cb) = on_action {
                 let phase2_actions = VerboseDownloadActions::new(Some(&phase2_base), Arc::clone(cb));
                 let download = DownloadRepoToStore::new(
                     repo,
@@ -1110,13 +1147,20 @@ pub async fn download_directory(
                     &phase2_actions,
                 )
                 .await?;
-                return download.download_repo_to_store().await;
+                download.download_repo_to_store().await?
             } else {
                 let download =
                     DownloadRepoToStore::new(repo, directory_id.clone(), store, path, &phase2_base)
                         .await?;
-                return download.download_repo_to_store().await;
-            }
+                download.download_repo_to_store().await?
+            };
+
+            // Wrap the phase 2 result with stage cleanup
+            let cleanup_complete = StageCleanupComplete::new(phase2_result.complete, stage);
+            return Ok(WithComplete::new(
+                (),
+                Arc::new(cleanup_complete) as Arc<dyn Complete>,
+            ));
         }
     }
 

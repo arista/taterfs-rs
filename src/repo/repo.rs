@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::backend::{BackendError, RepoBackend, RepositoryInfo};
-use crate::caches::RepoCache;
+use crate::caches::{LocalChunksCache, RepoCache};
 use crate::repository::{
     Branch, BranchListEntry, Branches, BranchesType, ChunkFilePart, Commit, CommitMetadata,
     CommitType, DirEntry, Directory, DirectoryPart, DirectoryType, File, FileEntry, FilePart,
@@ -596,6 +596,7 @@ impl DirectoryScan {
 pub struct Repo {
     backend: Arc<dyn RepoBackend>,
     cache: Arc<dyn RepoCache>,
+    local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
     flow_control: FlowControl,
 
     // Deduplication for various operations
@@ -616,6 +617,7 @@ impl Repo {
         Self {
             backend: Arc::new(backend),
             cache: Arc::new(cache),
+            local_chunks_cache: None,
             flow_control: FlowControl::default(),
             dedup_current_root: Dedup::new(),
             dedup_write_current_root: Dedup::new(),
@@ -634,6 +636,7 @@ impl Repo {
         Self {
             backend: Arc::new(backend),
             cache: Arc::new(cache),
+            local_chunks_cache: None,
             flow_control,
             dedup_current_root: Dedup::new(),
             dedup_write_current_root: Dedup::new(),
@@ -647,11 +650,13 @@ impl Repo {
     pub fn from_dyn(
         backend: Arc<dyn RepoBackend>,
         cache: Arc<dyn RepoCache>,
+        local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
         flow_control: FlowControl,
     ) -> Self {
         Self {
             backend,
             cache,
+            local_chunks_cache,
             flow_control,
             dedup_current_root: Dedup::new(),
             dedup_write_current_root: Dedup::new(),
@@ -979,6 +984,25 @@ impl Repo {
         id: &ObjectId,
         acquired: Option<AcquiredCapacity>,
     ) -> Result<Arc<ManagedBuffer>> {
+        // Try local chunks cache first (silent on failure)
+        if let Some(ref local_cache) = self.local_chunks_cache {
+            if let Ok(Some(data)) = local_cache.get_chunk(id).await {
+                // Found in local cache - wrap in ManagedBuffer
+                let managed_buffer = if let Some(acq) = acquired {
+                    if let Some(ref mb) = self.flow_control.managed_buffers {
+                        mb.create_buffer_with_acquired(data, acq)
+                    } else {
+                        ManagedBuffers::new().create_buffer_with_acquired(data, acq)
+                    }
+                } else if let Some(ref mb) = self.flow_control.managed_buffers {
+                    mb.get_buffer_with_data(data).await
+                } else {
+                    ManagedBuffers::new().get_buffer_with_data(data).await
+                };
+                return Ok(Arc::new(managed_buffer));
+            }
+        }
+
         let backend = Arc::clone(&self.backend);
         let flow_control = self.flow_control.clone();
         let id_owned = id.clone();

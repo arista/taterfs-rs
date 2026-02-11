@@ -286,6 +286,12 @@ The FileDest implementation should offer a FileDestStage implementation:
 * While chunks are being written, they should first be written to a temporary file "chunks/{id[0..2]}/{id[2..4]}/{id[4..6]}/.download.{id}-{temp filename}", then moved atomically to their intended stage destination
 * The cleanup() function should remove the entire stage directory
 
+The FsFileStore should update the [LocalChunksCache](./caches.md) in response to operations and findings.  In all these cases, note that the path should be an absolute filesystem path, as opposed to a local path within the file store (since the LocalChunksCache is global).
+
+* FileDest.rm should call LocalChunksCache.invalidate_local_chunks
+* FileDest.write_file_from_chunks should call set_local_chunk for the chunks as they are written
+* FileSource.get_source_chunks_with_content should call set_local_chunk for the chunks as they are read
+
 ### S3FileStore
 
 This implementation reads from an S3 bucket, treating S3 object keys as paths where "/" is used as the directory separator.

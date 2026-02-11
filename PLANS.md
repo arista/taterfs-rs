@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at the changes in caches.md, see if they make sense, prepare to implement.
+repository_interface.md and file_store.md describe how the LocalChunksCache is to be used and updated.  These changes should be implemented, keeping in mind the cache updates and consulting the cache should be bypassed if no-cache is specified in the configuration (or from the cli)
 
 ## Planned Features
 

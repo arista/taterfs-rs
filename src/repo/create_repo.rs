@@ -12,7 +12,7 @@ use crate::app::CapacityManagers;
 use crate::backend::{
     FsBackend, FsLikeRepoBackendAdapter, HttpBackend, RepoBackend, S3Backend, S3BackendConfig,
 };
-use crate::caches::{NoopCache, RepoCache, RepoCaches};
+use crate::caches::{LocalChunksCache, NoopCache, RepoCache, RepoCaches};
 use crate::config::ConfigHelper;
 
 use super::Repo;
@@ -239,6 +239,7 @@ fn parse_query_string(query: &str) -> HashMap<String, String> {
 pub struct CreateRepoContext {
     config: Arc<ConfigHelper>,
     repository_caches: Arc<dyn RepoCaches>,
+    local_chunks_cache: Arc<dyn LocalChunksCache>,
     network_managers: CapacityManagers,
     s3_managers: CapacityManagers,
     allow_uninitialized: bool,
@@ -253,12 +254,14 @@ impl CreateRepoContext {
     pub fn new(
         config: ConfigHelper,
         repository_caches: Arc<dyn RepoCaches>,
+        local_chunks_cache: Arc<dyn LocalChunksCache>,
         network_managers: CapacityManagers,
         s3_managers: CapacityManagers,
     ) -> Self {
         Self {
             config: Arc::new(config),
             repository_caches,
+            local_chunks_cache,
             network_managers,
             s3_managers,
             allow_uninitialized: false,
@@ -283,6 +286,11 @@ impl CreateRepoContext {
     /// Get the repository caches.
     pub fn repository_caches(&self) -> &dyn RepoCaches {
         &*self.repository_caches
+    }
+
+    /// Get the local chunks cache.
+    pub fn local_chunks_cache(&self) -> Arc<dyn LocalChunksCache> {
+        self.local_chunks_cache.clone()
     }
 
     /// Get the network-level capacity managers.
@@ -438,8 +446,13 @@ impl CreateRepoContext {
         let managers = self.create_managers_for_spec(spec);
         let flow_control = managers.to_flow_control();
 
-        // Create and return the Repo
-        Ok(Repo::from_dyn(backend, cache, flow_control))
+        // Create and return the Repo with local chunks cache
+        Ok(Repo::from_dyn(
+            backend,
+            cache,
+            Some(self.local_chunks_cache.clone()),
+            flow_control,
+        ))
     }
 }
 

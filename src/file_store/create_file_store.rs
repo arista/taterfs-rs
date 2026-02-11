@@ -9,7 +9,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::CapacityManagers;
-use crate::caches::{FileStoreCache, FileStoreCaches};
+use crate::caches::{FileStoreCache, FileStoreCaches, LocalChunksCache};
 use crate::config::ConfigHelper;
 use crate::file_store::{FileStore, FsFileStore, S3FileSource, S3FileSourceConfig};
 use crate::util::ManagedBuffers;
@@ -249,6 +249,7 @@ pub struct CreateFileStoreContext {
     s3_managers: CapacityManagers,
     managed_buffers: ManagedBuffers,
     file_store_caches: Arc<dyn FileStoreCaches>,
+    local_chunks_cache: Arc<dyn LocalChunksCache>,
 }
 
 impl CreateFileStoreContext {
@@ -257,6 +258,7 @@ impl CreateFileStoreContext {
         config: ConfigHelper,
         managed_buffers: ManagedBuffers,
         file_store_caches: Arc<dyn FileStoreCaches>,
+        local_chunks_cache: Arc<dyn LocalChunksCache>,
     ) -> Self {
         let config = Arc::new(config);
         let network_managers =
@@ -269,6 +271,7 @@ impl CreateFileStoreContext {
             s3_managers,
             managed_buffers,
             file_store_caches,
+            local_chunks_cache,
         }
     }
 
@@ -290,6 +293,11 @@ impl CreateFileStoreContext {
     /// Get the managed buffers for memory allocation.
     pub fn managed_buffers(&self) -> &ManagedBuffers {
         &self.managed_buffers
+    }
+
+    /// Get the local chunks cache.
+    pub fn local_chunks_cache(&self) -> Arc<dyn LocalChunksCache> {
+        self.local_chunks_cache.clone()
     }
 
     /// Create capacity managers for a specific file store.
@@ -366,7 +374,12 @@ impl CreateFileStoreContext {
             }
 
             FileStoreType::FileSystem => {
-                let store = FsFileStore::new(&spec.location, self.managed_buffers.clone(), cache);
+                let store = FsFileStore::new(
+                    &spec.location,
+                    self.managed_buffers.clone(),
+                    cache,
+                    Some(self.local_chunks_cache.clone()),
+                );
                 Ok(Arc::new(store))
             }
 
@@ -504,14 +517,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_fs_file_store() {
-        use crate::caches::NoopFileStoreCaches;
+        use crate::caches::{NoopFileStoreCaches, NoopLocalChunksCache};
         use crate::config::{ConfigHelper, ConfigSource, read_config};
 
         let source = ConfigSource::default();
         let result = read_config(&source).unwrap();
         let config = ConfigHelper::new(result.config);
         let file_store_caches = Arc::new(NoopFileStoreCaches);
-        let ctx = CreateFileStoreContext::new(config, ManagedBuffers::new(), file_store_caches);
+        let local_chunks_cache = Arc::new(NoopLocalChunksCache);
+        let ctx = CreateFileStoreContext::new(
+            config,
+            ManagedBuffers::new(),
+            file_store_caches,
+            local_chunks_cache,
+        );
 
         let store = ctx.create_file_store("file:///tmp").await.unwrap();
         assert!(store.get_source().is_some());

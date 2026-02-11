@@ -4,7 +4,7 @@
 
 use super::chunk_sizes::next_chunk_size;
 use super::scan_ignore_helper::{ScanDirEntry, ScanDirectoryEvent, ScanIgnoreHelper};
-use crate::caches::{FileStoreCache, FingerprintedFileInfo};
+use crate::caches::{FileStoreCache, FingerprintedFileInfo, LocalChunk, LocalChunksCache};
 use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
     FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
@@ -32,6 +32,8 @@ pub struct FsFileStore {
     managed_buffers: ManagedBuffers,
     /// Cache for this file store.
     cache: Arc<dyn FileStoreCache>,
+    /// Local chunks cache for tracking chunk locations on disk.
+    local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
 }
 
 impl FsFileStore {
@@ -40,12 +42,14 @@ impl FsFileStore {
         root: impl AsRef<Path>,
         managed_buffers: ManagedBuffers,
         cache: Arc<dyn FileStoreCache>,
+        local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
     ) -> Self {
         let root_path = root.as_ref().to_path_buf();
         Self {
             root: root_path,
             managed_buffers,
             cache,
+            local_chunks_cache,
         }
     }
 
@@ -172,16 +176,27 @@ struct FsSourceChunkWithContentList {
     managed_buffers: ManagedBuffers,
     /// Cached file handle, opened lazily on first next() call.
     file: Option<fs::File>,
+    /// Local chunks cache for registering chunk locations.
+    local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
+    /// Cached path ID for the local chunks cache.
+    path_id: Option<u64>,
 }
 
 impl FsSourceChunkWithContentList {
-    fn new(path: PathBuf, file_size: u64, managed_buffers: ManagedBuffers) -> Self {
+    fn new(
+        path: PathBuf,
+        file_size: u64,
+        managed_buffers: ManagedBuffers,
+        local_chunks_cache: Option<Arc<dyn LocalChunksCache>>,
+    ) -> Self {
         Self {
             path,
             file_size,
             current_offset: 0,
             managed_buffers,
             file: None,
+            local_chunks_cache,
+            path_id: None,
         }
     }
 }
@@ -227,7 +242,28 @@ impl SourceChunkWithContentList for FsSourceChunkWithContentList {
             format!("{:x}", hasher.finalize())
         };
 
-        // 5. Create buffer using the acquired capacity (doesn't wait)
+        // 5. Register chunk in local chunks cache (if available)
+        if let Some(ref cache) = self.local_chunks_cache {
+            // Get path_id lazily on first chunk
+            if self.path_id.is_none()
+                && let Some(path_str) = self.path.to_str()
+                && let Ok(Some(id)) = cache.get_path_id(path_str).await
+            {
+                self.path_id = Some(id);
+            }
+            // Register the chunk
+            if let Some(path_id) = self.path_id {
+                let local_chunk = LocalChunk {
+                    chunk_id: hash.clone(),
+                    offset,
+                    length: size,
+                };
+                // Silently ignore errors during cache registration
+                let _ = cache.set_local_chunk(path_id, &local_chunk).await;
+            }
+        }
+
+        // 6. Create buffer using the acquired capacity (doesn't wait)
         let managed_buffer = self
             .managed_buffers
             .create_buffer_with_acquired(buffer, acquired);
@@ -329,6 +365,7 @@ impl FileSource for FsFileStore {
             absolute,
             file_size,
             self.managed_buffers.clone(),
+            self.local_chunks_cache.clone(),
         ))))
     }
 
@@ -591,15 +628,27 @@ impl crate::file_store::FileDest for FsFileStore {
         let store = self.clone();
         let path_for_task = path.to_path_buf();
         let object_id_for_task = object_id.clone();
+        let local_chunks_cache_for_task = self.local_chunks_cache.clone();
 
         // Spawn the background writer task
         tokio::spawn(async move {
+            // Build cache context if local chunks cache is available
+            let cache_ctx = if let Some(cache) = local_chunks_cache_for_task
+                && let Some(abs_str) = absolute_for_task.to_str()
+                && let Ok(Some(path_id)) = cache.get_path_id(abs_str).await
+            {
+                Some(ChunkCacheContext { cache, path_id })
+            } else {
+                None
+            };
+
             let result = write_chunks_to_file(
                 file,
                 &mut rx,
                 &temp_path_for_task,
                 &absolute_for_task,
                 executable,
+                cache_ctx,
             )
             .await;
 
@@ -609,6 +658,7 @@ impl crate::file_store::FileDest for FsFileStore {
                     let _ = store
                         .update_cache_after_write(&path_for_task, &object_id_for_task)
                         .await;
+
                     complete_for_task.notify_complete();
                 }
                 Err(e) => complete_for_task.notify_error(e.to_string()),
@@ -659,6 +709,15 @@ impl crate::file_store::FileDest for FsFileStore {
             fs::remove_dir_all(&absolute).await?;
         } else {
             fs::remove_file(&absolute).await?;
+        }
+
+        // Invalidate local chunks cache entries for the removed path
+        if let Some(ref cache) = self.local_chunks_cache
+            && let Some(abs_str) = absolute.to_str()
+            && let Ok(Some(path_id)) = cache.get_path_id(abs_str).await
+        {
+            // Silently ignore errors during cache invalidation
+            let _ = cache.invalidate_local_chunks(path_id).await;
         }
 
         Ok(())
@@ -814,27 +873,55 @@ async fn scan_directory(
     Ok(())
 }
 
+/// Context for registering chunks in the local cache during writes.
+struct ChunkCacheContext {
+    cache: Arc<dyn LocalChunksCache>,
+    path_id: u64,
+}
+
 /// Helper function for writing chunks to a file from a channel.
 ///
 /// Receives chunks from the channel, writes them to the file in order,
 /// then moves the file to its final location.
+///
+/// If `cache_ctx` is provided, registers each chunk in the local cache as it's written.
 async fn write_chunks_to_file(
     mut file: fs::File,
     rx: &mut mpsc::UnboundedReceiver<Option<FileChunkWithContent>>,
     temp_path: &Path,
     final_path: &Path,
     executable: bool,
+    cache_ctx: Option<ChunkCacheContext>,
 ) -> Result<()> {
+    let mut offset: u64 = 0;
+
     // Process chunks from the channel
     while let Some(chunk_option) = rx.recv().await {
         match chunk_option {
             Some(chunk) => {
+                // Get chunk metadata before awaiting content
+                let chunk_id = chunk.chunk.content.clone();
+                let chunk_size = chunk.chunk.size;
+
                 // Wait for the chunk content and write it
                 let content = chunk
                     .content()
                     .await
                     .map_err(|e| Error::Other(e.to_string()))?;
                 file.write_all(&content[..]).await.map_err(Error::Io)?;
+
+                // Register chunk in cache immediately (if cache context provided)
+                if let Some(ref ctx) = cache_ctx {
+                    let local_chunk = LocalChunk {
+                        chunk_id,
+                        offset,
+                        length: chunk_size,
+                    };
+                    // Silently ignore errors during cache registration
+                    let _ = ctx.cache.set_local_chunk(ctx.path_id, &local_chunk).await;
+                }
+
+                offset += chunk_size;
             }
             None => {
                 // End of chunks - finalize the file
@@ -991,7 +1078,7 @@ mod tests {
     }
 
     fn create_store(temp: &TempDir) -> FsFileStore {
-        FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache())
+        FsFileStore::new(temp.path(), ManagedBuffers::new(), noop_cache(), None)
     }
 
     /// Helper to collect all events from a ScanEventList.

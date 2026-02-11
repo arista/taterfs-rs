@@ -11,8 +11,8 @@ use lru::LruCache;
 use tokio::sync::Mutex;
 
 use super::key_value_db::{
-    KeyValueDb, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries, KeyValueEntry, Result,
-    WriteOp,
+    KeyEntries, KeyEntry, KeyValueDb, KeyValueDbTransaction, KeyValueDbWrites, KeyValueEntries,
+    KeyValueEntry, Result, WriteOp,
 };
 
 // =============================================================================
@@ -309,6 +309,27 @@ impl KeyValueDb for CachingKeyValueDb {
         };
 
         Ok(Box::new(CachingKeyValueEntries::new(
+            underlying,
+            pending_entries,
+        )))
+    }
+
+    async fn list_keys(&self, prefix: &[u8]) -> Result<Box<dyn KeyEntries + Send>> {
+        // Get lazy iterator from underlying database
+        let underlying = self.inner.list_keys(prefix).await?;
+
+        // Extract pending entries matching the prefix (snapshot)
+        let pending_entries: Vec<(Vec<u8>, WriteOp)> = {
+            let state = self.state.lock().await;
+            state
+                .pending
+                .range::<Vec<u8>, _>(prefix.to_vec()..)
+                .take_while(|(k, _)| k.starts_with(prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+
+        Ok(Box::new(CachingKeyEntries::new(
             underlying,
             pending_entries,
         )))
@@ -611,6 +632,144 @@ impl KeyValueEntries for CachingKeyValueEntries {
 }
 
 // =============================================================================
+// CachingKeyEntries
+// =============================================================================
+
+/// Iterator that zipper-merges underlying database keys with pending writes.
+///
+/// Pending Set operations add or override keys, Del operations remove keys.
+/// Keys are yielded in sorted order.
+struct CachingKeyEntries {
+    /// Iterator over underlying database keys.
+    underlying: Box<dyn KeyEntries + Send>,
+    /// Pending entries sorted by key (snapshot taken at iteration start).
+    pending: Vec<(Vec<u8>, WriteOp)>,
+    /// Index into pending entries.
+    pending_index: usize,
+    /// Next key from underlying (peeked ahead).
+    underlying_next: Option<KeyEntry>,
+    /// Whether we've exhausted the underlying iterator.
+    underlying_exhausted: bool,
+}
+
+impl CachingKeyEntries {
+    fn new(underlying: Box<dyn KeyEntries + Send>, pending: Vec<(Vec<u8>, WriteOp)>) -> Self {
+        Self {
+            underlying,
+            pending,
+            pending_index: 0,
+            underlying_next: None,
+            underlying_exhausted: false,
+        }
+    }
+
+    /// Peek the next pending entry (if any).
+    fn peek_pending(&self) -> Option<&(Vec<u8>, WriteOp)> {
+        self.pending.get(self.pending_index)
+    }
+
+    /// Advance pending to the next entry.
+    fn advance_pending(&mut self) {
+        self.pending_index += 1;
+    }
+
+    /// Ensure we have a peeked underlying key (if available).
+    async fn ensure_underlying_peeked(&mut self) -> Result<()> {
+        if self.underlying_next.is_none() && !self.underlying_exhausted {
+            self.underlying_next = self.underlying.next().await?;
+            if self.underlying_next.is_none() {
+                self.underlying_exhausted = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the peeked underlying key.
+    fn take_underlying(&mut self) -> Option<KeyEntry> {
+        self.underlying_next.take()
+    }
+}
+
+#[async_trait]
+impl KeyEntries for CachingKeyEntries {
+    async fn next(&mut self) -> Result<Option<KeyEntry>> {
+        loop {
+            // Ensure we have a peeked underlying key
+            self.ensure_underlying_peeked().await?;
+
+            let pending = self.peek_pending();
+            let underlying = self.underlying_next.as_ref();
+
+            match (pending, underlying) {
+                (None, None) => {
+                    // Both exhausted
+                    return Ok(None);
+                }
+                (Some((key, op)), None) => {
+                    // Only pending left
+                    let key = key.clone();
+                    let op = op.clone();
+                    self.advance_pending();
+                    match op {
+                        WriteOp::Set { .. } => {
+                            return Ok(Some(KeyEntry::new(key)));
+                        }
+                        WriteOp::Del { .. } => {
+                            // Skip deleted keys
+                            continue;
+                        }
+                    }
+                }
+                (None, Some(_)) => {
+                    // Only underlying left
+                    return Ok(self.take_underlying());
+                }
+                (Some((pending_key, op)), Some(underlying_entry)) => {
+                    // Compare keys
+                    match pending_key.cmp(&underlying_entry.key) {
+                        std::cmp::Ordering::Less => {
+                            // Pending key comes first
+                            let key = pending_key.clone();
+                            let op = op.clone();
+                            self.advance_pending();
+                            match op {
+                                WriteOp::Set { .. } => {
+                                    return Ok(Some(KeyEntry::new(key)));
+                                }
+                                WriteOp::Del { .. } => {
+                                    // Skip deleted keys
+                                    continue;
+                                }
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Same key - pending takes precedence
+                            let key = pending_key.clone();
+                            let op = op.clone();
+                            self.advance_pending();
+                            self.take_underlying(); // Discard underlying
+                            match op {
+                                WriteOp::Set { .. } => {
+                                    return Ok(Some(KeyEntry::new(key)));
+                                }
+                                WriteOp::Del { .. } => {
+                                    // Key was deleted
+                                    continue;
+                                }
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Underlying key comes first
+                            return Ok(self.take_underlying());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -827,5 +986,125 @@ mod tests {
         assert_eq!(e4.key, b"prefix/d");
 
         assert!(entries.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_from_underlying() {
+        let temp_dir = TempDir::new().unwrap();
+        let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
+
+        // Write directly to underlying LMDB
+        {
+            let mut writes = lmdb.write().await.unwrap();
+            writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+            writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+            writes.flush().await.unwrap();
+        }
+
+        let db = CachingKeyValueDb::new(lmdb, CachingConfig::default());
+
+        // list_keys should see underlying data
+        let mut keys = db.list_keys(b"prefix/").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"prefix/a");
+
+        let k2 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k2.key, b"prefix/b");
+
+        assert!(keys.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_sees_pending_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
+        let db = CachingKeyValueDb::new(lmdb, CachingConfig::default());
+
+        // Add pending writes (not flushed to underlying)
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+        writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // list_keys should see pending writes
+        let mut keys = db.list_keys(b"prefix/").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"prefix/a");
+
+        let k2 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k2.key, b"prefix/b");
+
+        assert!(keys.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_pending_delete_hides_underlying() {
+        let temp_dir = TempDir::new().unwrap();
+        let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
+
+        // Write to underlying LMDB
+        {
+            let mut writes = lmdb.write().await.unwrap();
+            writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+            writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+            writes.flush().await.unwrap();
+        }
+
+        let db = CachingKeyValueDb::new(lmdb, CachingConfig::default());
+
+        // Delete one key via pending write
+        let mut writes = db.write().await.unwrap();
+        writes.del(b"prefix/a".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // list_keys should NOT include the deleted key
+        let mut keys = db.list_keys(b"prefix/").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"prefix/b");
+
+        // Only one key (the deleted one is hidden)
+        assert!(keys.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_merged_sorted() {
+        let temp_dir = TempDir::new().unwrap();
+        let lmdb = Arc::new(LmdbKeyValueDb::new(temp_dir.path()).unwrap());
+
+        // Write to underlying LMDB
+        {
+            let mut writes = lmdb.write().await.unwrap();
+            writes.set(b"prefix/b".to_vec(), b"value_b".to_vec()).await;
+            writes.set(b"prefix/d".to_vec(), b"value_d".to_vec()).await;
+            writes.flush().await.unwrap();
+        }
+
+        let db = CachingKeyValueDb::new(lmdb, CachingConfig::default());
+
+        // Add interleaved pending writes
+        let mut writes = db.write().await.unwrap();
+        writes.set(b"prefix/a".to_vec(), b"value_a".to_vec()).await;
+        writes.set(b"prefix/c".to_vec(), b"value_c".to_vec()).await;
+        writes.flush().await.unwrap();
+
+        // list_keys should return all keys in sorted order
+        let mut keys = db.list_keys(b"prefix/").await.unwrap();
+
+        let k1 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k1.key, b"prefix/a");
+
+        let k2 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k2.key, b"prefix/b");
+
+        let k3 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k3.key, b"prefix/c");
+
+        let k4 = keys.next().await.unwrap().unwrap();
+        assert_eq!(k4.key, b"prefix/d");
+
+        assert!(keys.next().await.unwrap().is_none());
     }
 }

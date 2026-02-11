@@ -84,6 +84,31 @@ impl KeyValueEntry {
 }
 
 // =============================================================================
+// KeyEntry
+// =============================================================================
+
+/// A key-only entry from the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyEntry {
+    /// The key bytes.
+    pub key: Vec<u8>,
+}
+
+impl KeyEntry {
+    /// Create a new key entry.
+    pub fn new(key: Vec<u8>) -> Self {
+        Self { key }
+    }
+
+    /// Get the key as a UTF-8 string.
+    ///
+    /// Returns an error if the key is not valid UTF-8.
+    pub fn key_string(&self) -> std::result::Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.key)
+    }
+}
+
+// =============================================================================
 // KeyValueEntries Trait
 // =============================================================================
 
@@ -94,6 +119,20 @@ impl KeyValueEntry {
 pub trait KeyValueEntries: Send {
     /// Get the next entry, or `None` if there are no more entries.
     async fn next(&mut self) -> Result<Option<KeyValueEntry>>;
+}
+
+// =============================================================================
+// KeyEntries Trait
+// =============================================================================
+
+/// An iterator over keys (without values).
+///
+/// Yields keys in lexicographic order. More efficient than KeyValueEntries
+/// when only keys are needed.
+#[async_trait]
+pub trait KeyEntries: Send {
+    /// Get the next key, or `None` if there are no more keys.
+    async fn next(&mut self) -> Result<Option<KeyEntry>>;
 }
 
 // =============================================================================
@@ -115,6 +154,12 @@ pub trait KeyValueDb: Send + Sync {
     ///
     /// Returns an iterator that yields entries in lexicographic key order.
     async fn list_entries(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueEntries + Send>>;
+
+    /// List all keys starting with the given prefix.
+    ///
+    /// Returns an iterator that yields keys in lexicographic order.
+    /// More efficient than `list_entries` when only keys are needed.
+    async fn list_keys(&self, prefix: &[u8]) -> Result<Box<dyn KeyEntries + Send>>;
 
     /// Start a transaction for atomic read-modify-write operations.
     ///

@@ -49,6 +49,34 @@ FingerprintedFileInfo {
 
 ```
 
+### LocalChunksCache
+
+This cache keeps track of where chunks with particular object id's can be found on the local disk.  Its purpose is to accelerate the download process for cases where much of the content to be downloaded is already available on the local disk.  This can happen, for example, if a file is being moved to a different location, or if a file is being appended to.
+
+The cache is populated and updated during upload and download operations, as chunk hashes are discovered while reading the disk (upload) or explicitly written to the disk (download).  The cache is intended to be treated as a set of hints, not necessarily guarantees.  For example, if the cache says that a particular chunk is found at a particular location of a file, there's no guarantee that will be the case in the future.  So users of the cache need to verify any entries that they find, perhaps removing entries from the cache that are no longer found to be true.  And of course, as the [file store](./file_stores.md), especially when removing files or directories, the cache should be updated accordingly.
+
+The LocalChunksCache spans the entire filesystem, and is not segregated by repo or file store.  This allows, for example, a download into one file store to access content from the files in another file store.  This also means that path id's in the LocalChunksCache are relative to the filesystem's root, as opposed to the root of any particular file store.
+
+The basic operations of the LocalChunksCache are:
+
+* list local chunks - given a chunk's id, list the locations within local files to potentially find that chunk
+* set local chunk - notify the cache that a chunk with a particular id can be found in a specified location within a file
+* invalidate local chunks file - notify the cache that any entries associated with the given file should be removed
+* invalidate local chunks directory - notify the cache that any entries recursively found under the given directory should be removed
+
+```
+interface LocalChunksCache {
+  async get_path_id(path: Path) -> DbId
+  async get_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  set_local_chunk(path_id: DbId, chunk: LocalChunk)
+  list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
+  invalidate_local_chunks(path_id: DbId)
+  invalidate_local_chunk_file(path_id: DbId)
+  invalidate_local_chunk_directory(parent_path_id: DbId)
+}
+```
+(all methods async)
+
 ### CacheDb
 
 The above interfaces are built against an underlying CacheDb service (all methods async)
@@ -77,13 +105,43 @@ CacheDb {
   get_or_create_filestore_id(filestore_url) -> DbId
   get_fingerprinted_file_info(filetore_id: DbId, path_id: DbId) -> Option<FingerprintedFileInfo>
   set_fingerprinted_file_info(filetore_id: DbId, path_id: DbId, info: FingerprintedFileInfo)
-  get_name_id(filestore_id: DbId, name: string) -> Option<DbId>
-  set_name_id(filestore_id: DbId, name: string, id: DbId)
-  get_or_create_name_id(filestore_id: DbId, name: string) -> DbId
-  get_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId) -> Option<DbId>
-  set_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: DbId, path_id: DbId)
-  get_or_create_path_entry_id(filestore_id: DbId, parent: Option<DbId>, name: string) -> DbId
+
+  get_name_id(name: string) -> Option<DbId>
+  set_name_id(name: string, id: DbId)
+  get_or_create_name_id(name: string) -> DbId
+  get_path_entry_id(parent: Option<DbId>, name: DbId) -> Option<DbId>
+  set_path_entry_id(parent: Option<DbId>, name: DbId, path_id: DbId)
+  get_or_create_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  get_path_entry(path_id: DbId) -> PathEntry
   get_path_id(path: string) -> DbId
+  get_path(path_id: DbId) -> Path
+
+  set_local_chunk(path_id: DbId, chunk: LocalChunk)
+  list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
+  invalidate_local_chunks(path_id: DbId)
+  invalidate_local_chunk_file(path_id: DbId)
+  invalidate_local_chunk_directory(parent_path_id: DbId)
+}
+
+PathEntry {
+  parent_id: Option<DbId>
+  name_id: DbId
+}
+
+LocalChunk {
+  chunk_id: ObjectId
+  offset: u64
+  length: u64
+}
+
+PossibleLocalChunkList {
+  async next() -> Option<PossibleLocalChunk>
+}
+
+PossibleLocalChunk {
+  local_path_id: DbId
+  offset: u64
+  length: u64
 }
 ```
 
@@ -109,7 +167,9 @@ This is an even more fundamental interface to an underlying key/value database t
 KeyValueDb {
   async exists(key: bytes) -> bool
   async get(key: bytes) -> Option<bytes>
+  async remove(key: bytes)
   async list_entries(prefix: bytes) -> KeyValueEntries
+  async list_keys(prefix: bytes) -> KeyEntries
   async transaction() -> KeyValueDbTransaction
   async write() -> KeyValueDbWrites
 }
@@ -136,6 +196,16 @@ KeyValueEntry {
   
   key_string() -> string
   value_string() -> string
+}
+
+KeyEntries {
+  async get() -> Option<KeyEntry>
+}
+
+KeyEntry {
+  key: bytes
+  
+  key_string() -> string
 }
 ```
 
@@ -165,10 +235,58 @@ ex/{repository dbid}/{object id} -> {empty value} - implements get/set_exists
 fs/{repository dbid}/{object id} -> {empty value} - implements get/set_fully_stored
 
 filestore-id-by-url/{filestore url, uri-component-encoded} -> implements get/set_filestore_id
-na/{filestore dbid}/{encoded name} -> {name id} - implements get/set_name_id
-pa/{filestore dbid}/{path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id
 fi/{filestore dbid}/{path dbid} -> {file info, of the form "{fingerprint}|{file hash}"} - implements get/set_fingerprinted_file_info
+
+na/{encoded name} -> {name id} - implements get/set_name_id
+nn/{name id} -> {encoded name} - populated by set_name_id
+pa/{parent path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_path_entry_id, used by get_path_id
+pp/{path dbid} -> "{parent path dbid or "root"}|{name dbid}" - populated as part of set_path_entry_id, used by get_path
+
+lc/{chunk id}/{path dbid}/{offset}/{local chunk size}
+lf/{path dbid}/{offset}/{chunk_id}/{local chunk size}
 ```
+
+The lc and lf namespaces are used to implement the local chunks functionality, which is a little more complicated than the other functions since it effectively requires entries to be "indexed" in multiple ways.  The implementations are as follows:
+
+```
+set_local_chunk(local_path_id: DbId, chunk: LocalChunk) {
+  add entry to lc/
+  add entry to lf/
+}
+
+list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList {
+  draw entries from those starting with "lc/{chunk_id}"
+  retrieve up to 256 into memory and return them as a single unit, don't retrieve more than that.  In other words, don't asynchronously "page" through the list since it might change as entries are removed
+}
+
+invalidate_local_chunks(path_id: DbId) {
+  // call both file and directory since we don't necessarily know which one a path represents
+  invalidate_local_chunk_file
+  invalidate_local_chunk_directory
+}
+
+invalidate_local_chunk_file(path_id: DbId) {
+  loop until no more batches {
+    retrieve a batch of up to 256 entries starting with "lf/{path_id}/", for each entry: {
+      get the offset and chunk id from the entry
+      remove the lf/ entry
+      remove the lc/ entry
+    }
+  }
+}
+
+invalidate_local_chunk_directory(parent_path_id: DbId) {
+  loop until no more batches {
+    retrieve a batch of up to 16 entries starting with "pa/{parent_path_id}", for each entry {
+      obtain its {path dbid}
+      call invalidate_local_chunks(path_id)
+    }
+  }
+}
+```
+
+Note that the mappings between paths and path id's is never removed, just the mappings between paths and chunk id's.
+
 #### Memory Caching and Write Backs
 
 The system makes the following assumptions that affect the design:

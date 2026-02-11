@@ -66,16 +66,37 @@ The basic operations of the LocalChunksCache are:
 
 ```
 interface LocalChunksCache {
-  async get_path_id(path: Path) -> DbId
-  async get_path_entry_id(parent: Option<DbId>, name: string) -> DbId
+  get_path_id(path: Path) -> DbId
+  get_path_entry_id(parent: Option<DbId>, name: string) -> DbId
   set_local_chunk(path_id: DbId, chunk: LocalChunk)
   list_possible_local_chunks(chunk_id: ObjectId) -> PossibleLocalChunkList
   invalidate_local_chunks(path_id: DbId)
   invalidate_local_chunk_file(path_id: DbId)
   invalidate_local_chunk_directory(parent_path_id: DbId)
+  
+  get_chunk(chunk_id: ObjectId) -> Option<Buffer>
 }
 ```
 (all methods async)
+
+The get_chunk method attempts to find a chunk within the local chunks registered within the cache:
+
+```
+get_chunk(chunk_id: ObjectId) -> Option<Buffer> {
+  retrieve PossibleLocalChunkList (list_possible_local_chunks)
+  for each possible chunk: {
+    use get_path to convert the path_id to an absolute local file
+    retrieve the buffer with the given offset and size
+    check its hash to make sure it matches the chunk_id
+    return it if so
+    
+    if any of the above fails {
+      invalidate_local_chunk
+    }
+  }
+  return None
+}
+```
 
 ### CacheDb
 
@@ -121,6 +142,7 @@ CacheDb {
   invalidate_local_chunks(path_id: DbId)
   invalidate_local_chunk_file(path_id: DbId)
   invalidate_local_chunk_directory(parent_path_id: DbId)
+  invalidate_local_chunk(path_id: DbId, chunk: LocalChunk)
 }
 
 PathEntry {
@@ -269,8 +291,7 @@ invalidate_local_chunk_file(path_id: DbId) {
   loop until no more batches {
     retrieve a batch of up to 256 entries starting with "lf/{path_id}/", for each entry: {
       get the offset and chunk id from the entry
-      remove the lf/ entry
-      remove the lc/ entry
+      call invalidate_local_chunk
     }
   }
 }
@@ -282,6 +303,11 @@ invalidate_local_chunk_directory(parent_path_id: DbId) {
       call invalidate_local_chunks(path_id)
     }
   }
+}
+
+invalidate_local_chunk(path_id: DbId, chunk: LocalChunk) {
+  remove the lf/ entry
+  remove the lc/ entry
 }
 ```
 

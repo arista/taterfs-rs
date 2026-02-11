@@ -473,6 +473,8 @@ impl CacheDb {
     }
 
     /// Reconstruct the full path string from a path ID.
+    ///
+    /// Returns an absolute path (with leading `/` on Unix).
     pub async fn get_path(&self, path_id: DbId) -> Result<Option<std::path::PathBuf>> {
         let mut components: Vec<String> = Vec::new();
         let mut current_id = Some(path_id);
@@ -492,7 +494,14 @@ impl CacheDb {
         }
 
         components.reverse();
-        Ok(Some(std::path::PathBuf::from(components.join("/"))))
+
+        // Build the path - on Unix, prepend "/" for absolute paths
+        #[cfg(unix)]
+        let path = std::path::PathBuf::from(format!("/{}", components.join("/")));
+        #[cfg(not(unix))]
+        let path = std::path::PathBuf::from(components.join("/"));
+
+        Ok(Some(path))
     }
 
     // =========================================================================
@@ -676,6 +685,19 @@ impl CacheDb {
         }
 
         Ok(())
+    }
+
+    /// Invalidate a single local chunk entry.
+    ///
+    /// Removes both the lc/ and lf/ entries for the specified chunk.
+    pub async fn invalidate_local_chunk(&self, path_id: DbId, chunk: &LocalChunk) -> Result<()> {
+        let lc_key = local_chunk_key(&chunk.chunk_id, path_id, chunk.offset, chunk.length);
+        let lf_key = local_file_key(path_id, chunk.offset, &chunk.chunk_id, chunk.length);
+
+        let mut writes = self.db.write().await?;
+        writes.del(lc_key).await;
+        writes.del(lf_key).await;
+        writes.flush().await
     }
 
     /// Flush any pending writes.
@@ -993,8 +1015,11 @@ mod tests {
         // Create a path
         let path_id = db.get_path_id("foo/bar/baz.txt").await.unwrap().unwrap();
 
-        // Reconstruct the path
+        // Reconstruct the path - on Unix, get_path returns absolute paths
         let reconstructed = db.get_path(path_id).await.unwrap().unwrap();
+        #[cfg(unix)]
+        assert_eq!(reconstructed, std::path::PathBuf::from("/foo/bar/baz.txt"));
+        #[cfg(not(unix))]
         assert_eq!(reconstructed, std::path::PathBuf::from("foo/bar/baz.txt"));
     }
 

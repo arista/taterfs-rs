@@ -4,7 +4,8 @@ The **Repo** object manages an application's interaction with a stored repositor
 
 A Repo presents an interface that is slightly more ergonomic than the raw RepoBackend interface.  More importantly, a Repo adds important functionality around the calls in those interfaces:
 
-* Caching - if configured with a RepoCache, then that cache will be consulted before handing requests to the backend.  If requests do get handed to the backend, then on success, the cache will be updated accordingly.
+* Caching - if configured with a [RepoCache](./caches.md), then that cache will be consulted before handing requests to the backend.  If requests do get handed to the backend, then on success, the cache will be updated accordingly.
+* LocalChunksCache - if configured with a [LocalChunksCache](./caches.md), then that cache will be consulted first to retreieve chunk content before retrieving content from the backend
 * Request deduplication - if a request is made and handed off to the backend, and then additional requests are made with the same parameters before the backend returns with the result, those additional requests are combined with the original request.  Once the backend returns with the answer, all of those requests will be fulfilled.
 * Flow control - if so configured, the Repo will respect various CapacityManager flow control mechanisms "around" calls to the backend
     * concurrent request limiter
@@ -86,6 +87,8 @@ The list_directory_entry and list_file_chunks functions are convenience function
 
 The read_file_chunks_with_content function is similar to list_file_chunks, except that it also retrieves the contents of each chunk.  When next() is called on the resulting FileChunkWithContentList, it will block until a ManagedBuffer of the required size is available.  It will then return the FileChunkWitContent, but it will also initiate the download of the chunk into that ManagedBuffer in the background, using the same sorts of flow control mechanisms that read() uses (minus the use of the ManagedBuffer).  Later, when the application calls content() on the FileChunkWithContent, it will block until the download of that chunk is complete (if it isn't already), and return the ManagedBuffer.  The application is free to call content() as many times as it likes.
 
+The read() and read_file_chunks_with_content() functions should attempt to retrieve content using the LocalChunksCache (if any) get_chunk() before falling back to retrieve from the backend.
+
 The write functions return WithComplete structures very quickly, but are not actually finished until their WithComplete.complete is complete.
 
 The Repo is configured with:
@@ -93,6 +96,7 @@ The Repo is configured with:
 ```
 backend: RepoBackend
 cache: RepoCache
+local_chunks_cache: Option<LocalChunksCache>
 request_rate_limiter: Option<CapacityManager>
 concurrent_request_limiter: Option<CapacityManager>
 read_throughput_limiter: Option<CapacityManager>

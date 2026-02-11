@@ -3,6 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 use super::cache_db::{CacheDb, DbId, LocalChunk, PossibleLocalChunk};
 use super::key_value_db::KeyValueDbError;
@@ -95,6 +98,13 @@ pub trait LocalChunksCache: Send + Sync {
 
     /// Invalidate local chunk entries for a directory and all descendants.
     async fn invalidate_local_chunk_directory(&self, path_id: DbId) -> Result<()>;
+
+    /// Attempt to retrieve a chunk from local disk.
+    ///
+    /// Searches through possible local chunk locations, reads the data,
+    /// verifies the hash matches the chunk_id, and returns the data if found.
+    /// Invalidates stale entries that no longer match.
+    async fn get_chunk(&self, chunk_id: &str) -> Result<Option<Vec<u8>>>;
 }
 
 // =============================================================================
@@ -133,6 +143,10 @@ impl LocalChunksCache for NoopLocalChunksCache {
     async fn invalidate_local_chunk_directory(&self, _path_id: DbId) -> Result<()> {
         Ok(())
     }
+
+    async fn get_chunk(&self, _chunk_id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 // =============================================================================
@@ -148,6 +162,52 @@ impl DbLocalChunksCache {
     /// Create a new database-backed local chunks cache.
     pub fn new(cache_db: Arc<CacheDb>) -> Self {
         Self { cache_db }
+    }
+
+    /// Read a chunk from a file and verify its hash.
+    ///
+    /// Returns `Ok(Some(data))` if the chunk was read and verified,
+    /// `Ok(None)` if the hash didn't match, or `Err` on I/O error.
+    async fn read_and_verify_chunk(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        length: u64,
+        expected_chunk_id: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, std::io::Error> {
+        let mut file = File::open(path).await?;
+        file.seek(SeekFrom::Start(offset)).await?;
+
+        let mut buffer = vec![0u8; length as usize];
+        file.read_exact(&mut buffer).await?;
+
+        // Compute hash and verify
+        let mut hasher = Sha256::new();
+        hasher.update(&buffer);
+        let result = hasher.finalize();
+        let computed_id = hex::encode(result);
+
+        if computed_id == expected_chunk_id {
+            Ok(Some(buffer))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Invalidate a chunk entry (helper to avoid verbose error handling).
+    async fn invalidate_chunk_entry(
+        &self,
+        path_id: DbId,
+        chunk_id: &str,
+        possible: &PossibleLocalChunk,
+    ) {
+        let chunk = LocalChunk {
+            chunk_id: chunk_id.to_string(),
+            offset: possible.offset,
+            length: possible.length,
+        };
+        // Ignore errors during invalidation - best effort
+        let _ = self.cache_db.invalidate_local_chunk(path_id, &chunk).await;
     }
 }
 
@@ -186,6 +246,43 @@ impl LocalChunksCache for DbLocalChunksCache {
             .invalidate_local_chunk_directory(path_id)
             .await?)
     }
+
+    async fn get_chunk(&self, chunk_id: &str) -> Result<Option<Vec<u8>>> {
+        let possible_chunks = self.list_possible_local_chunks(chunk_id).await?;
+
+        for possible in possible_chunks {
+            // Get the file path from path_id
+            let path = match self.cache_db.get_path(possible.path_id).await? {
+                Some(p) => p,
+                None => {
+                    // Path no longer exists in cache, invalidate
+                    self.invalidate_chunk_entry(possible.path_id, chunk_id, &possible)
+                        .await;
+                    continue;
+                }
+            };
+
+            // Try to read and verify the chunk
+            match self
+                .read_and_verify_chunk(&path, possible.offset, possible.length, chunk_id)
+                .await
+            {
+                Ok(Some(data)) => return Ok(Some(data)),
+                Ok(None) => {
+                    // Hash didn't match, invalidate
+                    self.invalidate_chunk_entry(possible.path_id, chunk_id, &possible)
+                        .await;
+                }
+                Err(_) => {
+                    // I/O error (file not found, etc.), invalidate
+                    self.invalidate_chunk_entry(possible.path_id, chunk_id, &possible)
+                        .await;
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 // =============================================================================
@@ -197,6 +294,7 @@ mod tests {
     use super::super::lmdb_key_value_db::LmdbKeyValueDb;
     use super::super::object_cache_db::NoopObjectCacheDb;
     use super::*;
+    use std::io::Write;
     use tempfile::TempDir;
 
     fn create_test_cache() -> (TempDir, DbLocalChunksCache) {
@@ -319,5 +417,144 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(test_id, full_path_id);
+    }
+
+    #[tokio::test]
+    async fn test_get_chunk_found() {
+        let (temp, cache) = create_test_cache();
+
+        // Create a test file with known content
+        let test_content = b"Hello, this is test content for the chunk!";
+        let file_path = temp.path().join("test_file.bin");
+        {
+            let mut file = std::fs::File::create(&file_path).unwrap();
+            file.write_all(test_content).unwrap();
+        }
+
+        // Compute the expected chunk ID (SHA-256 hash)
+        let mut hasher = Sha256::new();
+        hasher.update(test_content);
+        let result = hasher.finalize();
+        let expected_chunk_id = hex::encode(result);
+
+        // Register the chunk in the cache
+        let path_str = file_path.to_str().unwrap();
+        let path_id = cache.get_path_id(path_str).await.unwrap().unwrap();
+
+        let chunk = LocalChunk {
+            chunk_id: expected_chunk_id.clone(),
+            offset: 0,
+            length: test_content.len() as u64,
+        };
+        cache.set_local_chunk(path_id, &chunk).await.unwrap();
+
+        // Retrieve the chunk
+        let retrieved = cache.get_chunk(&expected_chunk_id).await.unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), test_content);
+    }
+
+    #[tokio::test]
+    async fn test_get_chunk_not_found() {
+        let (_temp, cache) = create_test_cache();
+
+        // Try to get a chunk that doesn't exist
+        let result = cache.get_chunk("nonexistent_chunk_id").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_chunk_stale_entry_invalidated() {
+        let (temp, cache) = create_test_cache();
+
+        // Create a test file with initial content
+        let initial_content = b"Initial content";
+        let file_path = temp.path().join("test_file2.bin");
+        {
+            let mut file = std::fs::File::create(&file_path).unwrap();
+            file.write_all(initial_content).unwrap();
+        }
+
+        // Compute the chunk ID for initial content
+        let mut hasher = Sha256::new();
+        hasher.update(initial_content);
+        let result = hasher.finalize();
+        let initial_chunk_id = hex::encode(result);
+
+        // Register the chunk
+        let path_str = file_path.to_str().unwrap();
+        let path_id = cache.get_path_id(path_str).await.unwrap().unwrap();
+
+        let chunk = LocalChunk {
+            chunk_id: initial_chunk_id.clone(),
+            offset: 0,
+            length: initial_content.len() as u64,
+        };
+        cache.set_local_chunk(path_id, &chunk).await.unwrap();
+
+        // Verify chunk is registered
+        let chunks = cache
+            .list_possible_local_chunks(&initial_chunk_id)
+            .await
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+
+        // Modify the file (content no longer matches hash)
+        {
+            let mut file = std::fs::File::create(&file_path).unwrap();
+            file.write_all(b"Modified content").unwrap();
+        }
+
+        // Try to get the chunk - should fail and invalidate the entry
+        let result = cache.get_chunk(&initial_chunk_id).await.unwrap();
+        assert!(result.is_none());
+
+        // Entry should be invalidated
+        let chunks = cache
+            .list_possible_local_chunks(&initial_chunk_id)
+            .await
+            .unwrap();
+        assert!(chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_chunk_file_deleted_invalidated() {
+        let (temp, cache) = create_test_cache();
+
+        // Create a test file
+        let test_content = b"Test content";
+        let file_path = temp.path().join("test_file3.bin");
+        {
+            let mut file = std::fs::File::create(&file_path).unwrap();
+            file.write_all(test_content).unwrap();
+        }
+
+        // Compute the chunk ID
+        let mut hasher = Sha256::new();
+        hasher.update(test_content);
+        let result = hasher.finalize();
+        let chunk_id = hex::encode(result);
+
+        // Register the chunk
+        let path_str = file_path.to_str().unwrap();
+        let path_id = cache.get_path_id(path_str).await.unwrap().unwrap();
+
+        let chunk = LocalChunk {
+            chunk_id: chunk_id.clone(),
+            offset: 0,
+            length: test_content.len() as u64,
+        };
+        cache.set_local_chunk(path_id, &chunk).await.unwrap();
+
+        // Delete the file
+        std::fs::remove_file(&file_path).unwrap();
+
+        // Try to get the chunk - should fail and invalidate
+        let result = cache.get_chunk(&chunk_id).await.unwrap();
+        assert!(result.is_none());
+
+        // Entry should be invalidated
+        let chunks = cache.list_possible_local_chunks(&chunk_id).await.unwrap();
+        assert!(chunks.is_empty());
     }
 }

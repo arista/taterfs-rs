@@ -547,7 +547,7 @@ impl CacheDb {
     /// Writes to both lc/ (for chunk lookup) and lf/ (for file-based invalidation).
     pub async fn set_local_chunk(&self, path_id: DbId, chunk: &LocalChunk) -> Result<()> {
         let lc_key = local_chunk_key(&chunk.chunk_id, path_id, chunk.offset, chunk.length);
-        let lf_key = local_file_key(path_id, chunk.offset, &chunk.chunk_id);
+        let lf_key = local_file_key(path_id, chunk.offset, &chunk.chunk_id, chunk.length);
 
         let mut writes = self.db.write().await?;
         writes.set(lc_key, Vec::new()).await;
@@ -606,16 +606,16 @@ impl CacheDb {
         loop {
             // Get a batch of up to 256 entries
             let mut keys = self.db.list_keys(&prefix).await?;
-            let mut batch: Vec<(Vec<u8>, String, u64)> = Vec::with_capacity(256);
+            let mut batch: Vec<(Vec<u8>, String, u64, u64)> = Vec::with_capacity(256);
 
             while batch.len() < 256 {
                 match keys.next().await? {
                     Some(entry) => {
-                        // Parse key: lf/{path_id}/{offset}/{chunk_id}
-                        if let Some((offset, chunk_id)) =
+                        // Parse key: lf/{path_id}/{offset}/{chunk_id}/{length}
+                        if let Some((offset, chunk_id, length)) =
                             parse_local_file_key(&entry.key, &prefix)
                         {
-                            batch.push((entry.key, chunk_id, offset));
+                            batch.push((entry.key, chunk_id, offset, length));
                         }
                     }
                     None => break,
@@ -628,27 +628,13 @@ impl CacheDb {
 
             // Delete the entries
             let mut writes = self.db.write().await?;
-            for (lf_key, chunk_id, offset) in batch {
-                // Also need length to construct lc key - get it from somewhere
-                // Actually, we can list lc/ entries for this chunk and find matching path_id/offset
-                // Or we could store length in lf/ value... let's just delete by prefix scan for now
-
+            for (lf_key, chunk_id, offset, length) in batch {
                 // Delete lf/ entry
                 writes.del(lf_key).await;
 
-                // For lc/, we need to scan for entries matching this path_id and offset
-                // This is inefficient but correct. A better approach would store length in lf/ value.
-                let lc_prefix = local_chunk_prefix(&chunk_id);
-                let mut lc_keys = self.db.list_keys(&lc_prefix).await?;
-                while let Some(lc_entry) = lc_keys.next().await? {
-                    if let Some(chunk) = parse_local_chunk_key(&lc_entry.key, &lc_prefix)
-                        && chunk.path_id == path_id
-                        && chunk.offset == offset
-                    {
-                        writes.del(lc_entry.key).await;
-                        break;
-                    }
-                }
+                // Delete corresponding lc/ entry (we have all the info we need)
+                let lc_key = local_chunk_key(&chunk_id, path_id, offset, length);
+                writes.del(lc_key).await;
             }
             writes.flush().await?;
         }
@@ -827,13 +813,15 @@ fn local_chunk_prefix(chunk_id: &str) -> Vec<u8> {
     key
 }
 
-fn local_file_key(path_id: DbId, offset: u64, chunk_id: &str) -> Vec<u8> {
+fn local_file_key(path_id: DbId, offset: u64, chunk_id: &str, length: u64) -> Vec<u8> {
     let mut key = KEY_LOCAL_FILE_PREFIX.to_vec();
     key.extend(path_id.to_string().as_bytes());
     key.push(b'/');
     key.extend(offset.to_string().as_bytes());
     key.push(b'/');
     key.extend(chunk_id.as_bytes());
+    key.push(b'/');
+    key.extend(length.to_string().as_bytes());
     key
 }
 
@@ -870,26 +858,27 @@ fn parse_local_chunk_key(key: &[u8], prefix: &[u8]) -> Option<PossibleLocalChunk
     })
 }
 
-/// Parse a local file key: lf/{path_id}/{offset}/{chunk_id}
+/// Parse a local file key: lf/{path_id}/{offset}/{chunk_id}/{length}
 /// The prefix (lf/{path_id}/) is already stripped.
-/// Returns (offset, chunk_id).
-fn parse_local_file_key(key: &[u8], prefix: &[u8]) -> Option<(u64, String)> {
+/// Returns (offset, chunk_id, length).
+fn parse_local_file_key(key: &[u8], prefix: &[u8]) -> Option<(u64, String, u64)> {
     if !key.starts_with(prefix) {
         return None;
     }
 
     let suffix = &key[prefix.len()..];
     let s = std::str::from_utf8(suffix).ok()?;
-    let parts: Vec<&str> = s.splitn(2, '/').collect();
+    let parts: Vec<&str> = s.split('/').collect();
 
-    if parts.len() != 2 {
+    if parts.len() != 3 {
         return None;
     }
 
     let offset: u64 = parts[0].parse().ok()?;
     let chunk_id = parts[1].to_string();
+    let length: u64 = parts[2].parse().ok()?;
 
-    Some((offset, chunk_id))
+    Some((offset, chunk_id, length))
 }
 
 fn file_info_key(filestore_id: DbId, path_id: DbId) -> Vec<u8> {

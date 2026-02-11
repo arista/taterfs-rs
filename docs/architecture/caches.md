@@ -243,7 +243,7 @@ pa/{parent path dbid or "root"}/{name dbid} -> {path dbid} - implements get/set_
 pp/{path dbid} -> "{parent path dbid or "root"}|{name dbid}" - populated as part of set_path_entry_id, used by get_path
 
 lc/{chunk id}/{path dbid}/{offset}/{local chunk size}
-lf/{path dbid}/{offset}/{chunk_id}
+lf/{path dbid}/{offset}/{chunk_id}/{local chunk size}
 ```
 
 The lc and lf namespaces are used to implement the local chunks functionality, which is a little more complicated than the other functions since it effectively requires entries to be "indexed" in multiple ways.  The implementations are as follows:

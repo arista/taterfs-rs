@@ -11,6 +11,7 @@ A File Store will use this interface:
 interface FileStore {
   get_source() -> FileSource | null
   get_dest() -> FileDest | null
+  get_sync_state() -> StoreSyncState | null
 }
 ```
 
@@ -184,6 +185,40 @@ FileDestStage {
 
 The cleanup function removes the stage and all of its content.
 
+### StoreSyncState
+
+FileStores are often "sync"'ed with a repository, meaning that changes in the FileStore will be reflected in the repo, and vice versa.  To support this, additional "SyncState" needs to be stored with the FileStore:
+
+* repository_url - the repo to sync with
+* repository_directory - the directory within the repo synced with the FileStore
+* branch_name - the name of the branch to sync with
+* base_commit - the commit against which changes will be registered.  When syncing, changes to the FileStore and changes to the repository will be merged, using this base_commit as the merge base.
+
+Performing a sync is a multi-stage process in which the file store's content is uploaded, the file store's changes are merged against the repo's changes, then the merged result is downloaded to the file store.  That last step is sensitive - if it is interrupted, then the FileStore will be left in an ambiguous state.  Some parts of the FileStore may have been modified, but it will be ambiguous as to whether those modifications happened because of local changes, or because it was in the middle of downloading.
+
+To address this, the StoreSyncState supports the notion of a "next" SyncState.  This is recorded in the FileStore to indicate that a sync operation is in its final download phase, with the intention of matching the commit specified in that "next" SyncState.  Once that download phase has completed successfully, the "next" SyncState will be "committed", by overwriting the current SyncState.
+
+If a sync operation sees that there is already a "next" SyncState, it can first complete that operation, or alert the user of the interrupted download.
+
+The interfaces look like this (all async):
+
+```
+StoreSyncState {
+  get_sync_state() -> Option<SyncState>
+  get_next_sync_state() -> Option<SyncState>
+  set_next_sync_state(state: Option<SyncState>)
+  commit_next_sync_state()
+}
+
+SyncState {
+  created_at: "*time this SyncState version was created, in ISO 8601 format*"
+  repository_url: string
+  repository_directory: string
+  branch_name: string
+  base_commit: ObjectId
+}
+```
+
 ## Implementation Helpers
 
 ### ScanIgnoreHelper
@@ -292,6 +327,8 @@ The FsFileStore should update the [LocalChunksCache](./caches.md) in response to
 * FileDest.write_file_from_chunks should call set_local_chunk for the chunks as they are written
 * FileSource.get_source_chunks_with_content should call set_local_chunk for the chunks as they are read
 
+The StoreSyncState interface should be implemented, with the current sync state stored in "{file store root}/.tfs/sync_state.json", and the next sync state stored in "{file store root}/.tfs/next_sync_state.json".  It is recommended that the json files be pretty-printed, rather than minimized.
+
 ### S3FileStore
 
 This implementation reads from an S3 bucket, treating S3 object keys as paths where "/" is used as the directory separator.
@@ -326,7 +363,7 @@ The S3FileStore should use a file fingerprint that is the ETag that S3 makes ava
 
 get_source_chunk_contents() should retrieve chunks concurrently, but still return them in order
 
-TODO: for now, the S3FileStore does not offer a FileDest implementation
+TODO: for now, the S3FileStore does not offer a FileDest implementation or a StoreSyncState implementation
 
 ### HttpFileSource
 

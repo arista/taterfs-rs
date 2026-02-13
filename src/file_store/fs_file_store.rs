@@ -9,7 +9,7 @@ use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
     FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
     SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
-    SourceChunksWithContent, VecScanEventList,
+    SourceChunksWithContent, StoreSyncState, SyncState, VecScanEventList,
 };
 use crate::repo::{BoxedFileChunksWithContent, FileChunkWithContent};
 use crate::repository::ObjectId;
@@ -431,6 +431,86 @@ impl FileStore for FsFileStore {
 
     fn get_cache(&self) -> Arc<dyn FileStoreCache> {
         self.cache.clone()
+    }
+
+    fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState> {
+        Some(self)
+    }
+}
+
+// =============================================================================
+// StoreSyncState Implementation
+// =============================================================================
+
+#[async_trait]
+impl StoreSyncState for FsFileStore {
+    async fn get_sync_state(&self) -> Result<Option<SyncState>> {
+        let path = self.root.join(".tfs/sync_state.json");
+        read_sync_state_file(&path).await
+    }
+
+    async fn get_next_sync_state(&self) -> Result<Option<SyncState>> {
+        let path = self.root.join(".tfs/next_sync_state.json");
+        read_sync_state_file(&path).await
+    }
+
+    async fn set_next_sync_state(&self, state: Option<&SyncState>) -> Result<()> {
+        let path = self.root.join(".tfs/next_sync_state.json");
+
+        match state {
+            Some(s) => {
+                // Create the .tfs directory if it doesn't exist
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                // Serialize with pretty printing
+                let json = serde_json::to_string_pretty(s)
+                    .map_err(|e| Error::Other(format!("Failed to serialize sync state: {}", e)))?;
+                fs::write(&path, json).await?;
+            }
+            None => {
+                // Remove the file if it exists
+                match fs::remove_file(&path).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn commit_next_sync_state(&self) -> Result<()> {
+        let next_path = self.root.join(".tfs/next_sync_state.json");
+        let current_path = self.root.join(".tfs/sync_state.json");
+
+        // Check if next state exists
+        match fs::metadata(&next_path).await {
+            Ok(_) => {
+                // Atomically move next to current
+                fs::rename(&next_path, &current_path).await?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No next state to commit - this is not an error
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        Ok(())
+    }
+}
+
+/// Helper function to read a sync state file.
+async fn read_sync_state_file(path: &Path) -> Result<Option<SyncState>> {
+    match fs::read_to_string(path).await {
+        Ok(contents) => {
+            let state: SyncState = serde_json::from_str(&contents)
+                .map_err(|e| Error::Other(format!("Failed to parse sync state: {}", e)))?;
+            Ok(Some(state))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -1545,5 +1625,147 @@ mod tests {
         let test_object_id = "test_object_id".to_string();
         let result = dest.set_executable(Path::new("dir"), true, &test_object_id).await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
+    }
+
+    // =========================================================================
+    // StoreSyncState Tests
+    // =========================================================================
+
+    fn create_test_sync_state() -> SyncState {
+        SyncState {
+            created_at: "2025-01-15T10:30:00Z".to_string(),
+            repository_url: "https://example.com/repo".to_string(),
+            repository_directory: "data".to_string(),
+            branch_name: "main".to_string(),
+            base_commit: "abc123def456".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_initially_none() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        let state = sync_manager.get_sync_state().await.unwrap();
+        assert!(state.is_none());
+
+        let next_state = sync_manager.get_next_sync_state().await.unwrap();
+        assert!(next_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_and_get_next_sync_state() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        let state = create_test_sync_state();
+
+        // Set next state
+        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+
+        // Verify it's persisted
+        let retrieved = sync_manager.get_next_sync_state().await.unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.repository_url, state.repository_url);
+        assert_eq!(retrieved.branch_name, state.branch_name);
+        assert_eq!(retrieved.base_commit, state.base_commit);
+
+        // Current state should still be none
+        assert!(sync_manager.get_sync_state().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_commit_next_sync_state() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        let state = create_test_sync_state();
+
+        // Set and commit next state
+        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager.commit_next_sync_state().await.unwrap();
+
+        // Current state should now be set
+        let current = sync_manager.get_sync_state().await.unwrap();
+        assert!(current.is_some());
+        let current = current.unwrap();
+        assert_eq!(current.repository_url, state.repository_url);
+        assert_eq!(current.base_commit, state.base_commit);
+
+        // Next state should be cleared
+        assert!(sync_manager.get_next_sync_state().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_clear_next_sync_state() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        let state = create_test_sync_state();
+
+        // Set then clear next state
+        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager.set_next_sync_state(None).await.unwrap();
+
+        // Next state should be none
+        assert!(sync_manager.get_next_sync_state().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_commit_when_no_next_state_is_ok() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        // Should not error when there's no next state to commit
+        sync_manager.commit_next_sync_state().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_files_are_pretty_printed() {
+        let temp = create_test_dir();
+        let store = create_store(&temp);
+        let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+
+        let state = create_test_sync_state();
+        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+
+        // Read the file directly and verify it's pretty-printed
+        let path = temp.path().join(".tfs/next_sync_state.json");
+        let contents = std::fs::read_to_string(&path).unwrap();
+
+        // Pretty-printed JSON should have newlines
+        assert!(contents.contains('\n'), "JSON should be pretty-printed");
+        // And the content should be valid
+        assert!(contents.contains("repository_url"));
+        assert!(contents.contains("base_commit"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_persists_across_store_instances() {
+        let temp = create_test_dir();
+        let state = create_test_sync_state();
+
+        // First store instance - set next state and commit
+        {
+            let store = create_store(&temp);
+            let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+            sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+            sync_manager.commit_next_sync_state().await.unwrap();
+        }
+
+        // Second store instance - should see the committed state
+        {
+            let store = create_store(&temp);
+            let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
+            let current = sync_manager.get_sync_state().await.unwrap();
+            assert!(current.is_some());
+            assert_eq!(current.unwrap().base_commit, state.base_commit);
+        }
     }
 }

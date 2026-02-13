@@ -27,6 +27,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+use serde::{Deserialize, Serialize};
+
 use crate::caches::FileStoreCache;
 use crate::repo::BoxedFileChunksWithContent;
 use crate::repository::ObjectId;
@@ -619,6 +621,64 @@ pub trait FileDestStage: Send + Sync {
 }
 
 // =============================================================================
+// StoreSyncState Types and Trait
+// =============================================================================
+
+/// State for syncing a FileStore with a repository.
+///
+/// This tracks which repository, directory, branch, and commit the FileStore
+/// is synced with. Changes to the FileStore are registered against the
+/// `base_commit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncState {
+    /// Time this SyncState version was created, in ISO 8601 format.
+    pub created_at: String,
+    /// The repository URL to sync with.
+    pub repository_url: String,
+    /// The directory within the repo synced with the FileStore.
+    pub repository_directory: String,
+    /// The name of the branch to sync with.
+    pub branch_name: String,
+    /// The commit against which changes will be registered.
+    pub base_commit: ObjectId,
+}
+
+/// Interface for managing sync state on a FileStore.
+///
+/// FileStores are often "synced" with a repository, meaning that changes in
+/// the FileStore will be reflected in the repo, and vice versa. This trait
+/// provides access to that sync state.
+///
+/// The trait supports a "next" SyncState concept for handling interrupted
+/// download operations. Before the final download phase, a "next" SyncState
+/// is recorded. If the download completes, the "next" state is "committed"
+/// by overwriting the current state. If interrupted, a subsequent sync can
+/// detect and handle the incomplete operation.
+#[async_trait]
+pub trait StoreSyncState: Send + Sync {
+    /// Get the current sync state.
+    async fn get_sync_state(&self) -> Result<Option<SyncState>>;
+
+    /// Get the "next" sync state, if one is pending.
+    ///
+    /// A "next" state indicates a sync operation is in its final download
+    /// phase, with the intention of matching the commit specified in that
+    /// "next" state.
+    async fn get_next_sync_state(&self) -> Result<Option<SyncState>>;
+
+    /// Set the "next" sync state.
+    ///
+    /// Pass `None` to clear the next state (e.g., if a download was cancelled).
+    async fn set_next_sync_state(&self, state: Option<&SyncState>) -> Result<()>;
+
+    /// Commit the "next" sync state to become the current state.
+    ///
+    /// This atomically moves the "next" state to become the current state.
+    /// Should be called after a download phase completes successfully.
+    async fn commit_next_sync_state(&self) -> Result<()>;
+}
+
+// =============================================================================
 // FileStore Trait
 // =============================================================================
 
@@ -632,4 +692,7 @@ pub trait FileStore: Send + Sync {
 
     /// Get the cache for this file store.
     fn get_cache(&self) -> Arc<dyn FileStoreCache>;
+
+    /// Get the StoreSyncState interface, if supported.
+    fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState>;
 }

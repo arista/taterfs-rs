@@ -1356,6 +1356,10 @@ mod tests {
         fn get_cache(&self) -> Arc<dyn FileStoreCache> {
             self.cache.clone()
         }
+
+        fn get_sync_state_manager(&self) -> Option<&dyn file_store::StoreSyncState> {
+            None
+        }
     }
 
     #[async_trait]

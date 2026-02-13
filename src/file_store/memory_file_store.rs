@@ -7,7 +7,7 @@ use crate::file_store::{
     DirEntry, DirectoryEntry, DirectoryList, DirectoryListSource, Error, FileDestStage, FileEntry,
     FileSource, FileStore, Result, ScanEvent, ScanEvents, SourceChunk, SourceChunkContent,
     SourceChunkList, SourceChunkWithContent, SourceChunkWithContentList, SourceChunks,
-    SourceChunksWithContent, VecScanEventList,
+    SourceChunksWithContent, StoreSyncState, VecScanEventList,
 };
 use crate::repo::BoxedFileChunksWithContent;
 use crate::repository::ObjectId;
@@ -627,6 +627,10 @@ impl FileStore for MemoryFileStore {
 
     fn get_cache(&self) -> Arc<dyn FileStoreCache> {
         self.cache.clone()
+    }
+
+    fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState> {
+        None // MemoryFileStore does not support sync state
     }
 }
 

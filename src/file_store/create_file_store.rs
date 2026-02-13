@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::app::CapacityManagers;
 use crate::caches::{FileStoreCache, FileStoreCaches, LocalChunksCache};
 use crate::config::ConfigHelper;
-use crate::file_store::{FileStore, FsFileStore, S3FileSource, S3FileSourceConfig};
+use crate::file_store::{FileStore, FsFileStore, S3FileSource, S3FileSourceConfig, StoreSyncState};
 use crate::util::ManagedBuffers;
 
 // =============================================================================
@@ -422,6 +422,10 @@ impl FileStore for S3FileStoreWrapper {
 
     fn get_cache(&self) -> Arc<dyn FileStoreCache> {
         self.cache.clone()
+    }
+
+    fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState> {
+        None // S3FileStore doesn't support sync state yet
     }
 }
 

@@ -126,6 +126,67 @@ pub struct FlowControl {
 }
 
 // =============================================================================
+// Branch List
+// =============================================================================
+
+/// An iterator over branches that handles nested BranchesEntry references.
+///
+/// This struct provides an async iterator interface that walks through all branches,
+/// recursively fetching and expanding any `BranchesEntry` references.
+pub struct BranchList {
+    repo: Arc<Repo>,
+    /// Stack of pending branches to process.
+    /// Each element is (branches, index into branches).
+    pending: Vec<(Branches, usize)>,
+}
+
+impl BranchList {
+    /// Create a new branch list starting from the given branches object.
+    fn new(repo: Arc<Repo>, branches: Branches) -> Self {
+        Self {
+            repo,
+            pending: vec![(branches, 0)],
+        }
+    }
+
+    /// Get the next branch.
+    ///
+    /// Returns `None` when all branches have been yielded.
+    /// Automatically handles `BranchesEntry` entries by fetching and
+    /// expanding them.
+    pub async fn next(&mut self) -> Result<Option<Branch>> {
+        loop {
+            // Get the current branches object and index from the stack
+            let Some((branches, idx)) = self.pending.last_mut() else {
+                return Ok(None);
+            };
+
+            // Check if we've exhausted this branches object's entries
+            if *idx >= branches.branches.len() {
+                self.pending.pop();
+                continue;
+            }
+
+            // Get the current entry and advance the index
+            let entry = branches.branches[*idx].clone();
+            *idx += 1;
+
+            match entry {
+                BranchListEntry::Branch(branch) => {
+                    return Ok(Some(branch));
+                }
+                BranchListEntry::BranchesEntry(branches_entry) => {
+                    // Fetch the nested branches and push them onto the stack
+                    let nested_branches = self.repo.read_branches(&branches_entry.branches).await?;
+                    self.pending.push((nested_branches, 0));
+                    // Continue the loop to process entries from the nested branches
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Directory Entry List
 // =============================================================================
 
@@ -139,6 +200,16 @@ pub enum DirectoryEntry {
     File(FileEntry),
     /// A subdirectory entry.
     Directory(DirEntry),
+}
+
+impl DirectoryEntry {
+    /// Get the name of this directory entry.
+    pub fn name(&self) -> &str {
+        match self {
+            DirectoryEntry::File(f) => &f.name,
+            DirectoryEntry::Directory(d) => &d.name,
+        }
+    }
 }
 
 /// An iterator over directory entries that handles nested PartialDirectory references.
@@ -1164,6 +1235,20 @@ impl Repo {
     // =========================================================================
     // List Functions
     // =========================================================================
+
+    /// List all branches, recursively handling BranchesEntry entries.
+    ///
+    /// This is a convenience function that walks through all branches,
+    /// automatically fetching and expanding any `BranchesEntry` references.
+    ///
+    /// Returns a [`BranchList`] that can be used to iterate over all branches.
+    pub async fn list_branches(
+        self: &Arc<Self>,
+        branches_id: &ObjectId,
+    ) -> Result<BranchList> {
+        let branches = self.read_branches(branches_id).await?;
+        Ok(BranchList::new(Arc::clone(self), branches))
+    }
 
     /// List all entries in a directory, recursively handling PartialDirectory entries.
     ///

@@ -11,7 +11,7 @@ pub use create_repo::{
     BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec, create_repo,
 };
 pub use repo::{
-    BoxedFileChunksWithContent, DirectoryEntry, DirectoryEntryList, DirectoryScan, FileChunkList,
-    FileChunkWithContent, FileChunkWithContentList, FileChunksWithContent, FlowControl, Repo,
-    RepoError, RepoInitialize, RepoScanEvent, Result,
+    BoxedFileChunksWithContent, BranchList, DirectoryEntry, DirectoryEntryList, DirectoryScan,
+    FileChunkList, FileChunkWithContent, FileChunkWithContentList, FileChunksWithContent,
+    FlowControl, Repo, RepoError, RepoInitialize, RepoScanEvent, Result,
 };

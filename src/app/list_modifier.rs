@@ -23,6 +23,29 @@ use crate::repository::{Branch, ChunkFilePart, ObjectId};
 use crate::util::{Complete, NoopComplete, WithComplete};
 
 // =============================================================================
+// Error Types
+// =============================================================================
+
+/// Error type for list modification operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListModificationError {
+    /// Attempted to add a modification after iteration has started.
+    AddAfterIteration,
+}
+
+impl std::fmt::Display for ListModificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListModificationError::AddAfterIteration => {
+                write!(f, "cannot add modifications after iteration has started")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ListModificationError {}
+
+// =============================================================================
 // ListElem
 // =============================================================================
 
@@ -73,8 +96,8 @@ pub trait ListElems<K, E>: Send {
 pub trait ListModifications<K: Ord, E>: Send {
     /// Add a modification to the collection.
     ///
-    /// Panics if called after `next()` has been called.
-    fn add(&mut self, key: K, entry: Option<E>);
+    /// Returns an error if called after `next()` has been called.
+    fn add(&mut self, key: K, entry: Option<E>) -> Result<(), ListModificationError>;
 
     /// Get the next modification.
     ///
@@ -110,12 +133,13 @@ impl<K: Ord, E> Default for ListModificationsVec<K, E> {
 }
 
 impl<K: Ord + Send, E: Send> ListModifications<K, E> for ListModificationsVec<K, E> {
-    fn add(&mut self, key: K, entry: Option<E>) {
+    fn add(&mut self, key: K, entry: Option<E>) -> Result<(), ListModificationError> {
         let mods = self
             .modifications
             .as_mut()
-            .expect("Cannot add modifications after iteration has started");
+            .ok_or(ListModificationError::AddAfterIteration)?;
         mods.push(ListModification { key, entry });
+        Ok(())
     }
 
     fn next(&mut self) -> Option<ListModification<K, E>> {

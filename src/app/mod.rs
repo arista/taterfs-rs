@@ -16,8 +16,8 @@ pub use list_builder::{
 pub use list_modifier::{
     BranchListElems, BranchListModifications, DirectoryEntryListElems,
     DirectoryEntryListModifications, FileChunkListElems, FileChunkListModifications, ListElem,
-    ListElems, ListModification, ListModifications, ListModificationsVec, modify_branches,
-    modify_directory, modify_file, modify_list,
+    ListElems, ListModification, ListModificationError, ListModifications, ListModificationsVec,
+    modify_branches, modify_directory, modify_file, modify_list,
 };
 pub use upload::{
     UploadDirectoryResult, UploadError, UploadFileResult, upload_directory, upload_file,

@@ -45,7 +45,7 @@ impl EntryModel {
     /// Get the name of this entry.
     pub fn name(&self) -> &str {
         match self {
-            EntryModel::File(f) => &f.name,
+            EntryModel::File(f) => f.name(),
             EntryModel::Directory(d) => &d.name,
         }
     }
@@ -54,13 +54,7 @@ impl EntryModel {
 /// Convert a DirectoryEntry to an EntryModel.
 fn entry_model_from_directory_entry(repo: Arc<Repo>, entry: DirectoryEntry) -> EntryModel {
     match entry {
-        DirectoryEntry::File(f) => EntryModel::File(FileEntryModel::new(
-            repo,
-            f.name,
-            f.size,
-            f.executable,
-            f.file,
-        )),
+        DirectoryEntry::File(f) => EntryModel::File(FileEntryModel::new(repo, f)),
         DirectoryEntry::Directory(d) => {
             EntryModel::Directory(DirectoryEntryModel::new(repo, d.name, d.directory))
         }

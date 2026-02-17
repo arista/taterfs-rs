@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::repo::Repo;
-use crate::repository::ObjectId;
+use crate::repository::{FileEntry, ObjectId};
 
 /// Model wrapper for a file in the repository.
 ///
@@ -24,38 +24,35 @@ impl FileModel {
 
 /// Model wrapper for a file entry in a directory.
 ///
-/// Contains file metadata and provides access to the file model.
+/// Thin wrapper around a FileEntry that provides access to the file model.
 pub struct FileEntryModel {
     repo: Arc<Repo>,
-    /// Name of the file.
-    pub name: String,
-    /// Size of the file in bytes.
-    pub size: u64,
-    /// Whether the file is executable.
-    pub executable: bool,
-    file_id: ObjectId,
+    entry: FileEntry,
 }
 
 impl FileEntryModel {
-    /// Create a new FileEntryModel.
-    pub fn new(
-        repo: Arc<Repo>,
-        name: String,
-        size: u64,
-        executable: bool,
-        file_id: ObjectId,
-    ) -> Self {
-        Self {
-            repo,
-            name,
-            size,
-            executable,
-            file_id,
-        }
+    /// Create a new FileEntryModel wrapping a FileEntry.
+    pub fn new(repo: Arc<Repo>, entry: FileEntry) -> Self {
+        Self { repo, entry }
+    }
+
+    /// Get the name of the file.
+    pub fn name(&self) -> &str {
+        &self.entry.name
+    }
+
+    /// Get the size of the file in bytes.
+    pub fn size(&self) -> u64 {
+        self.entry.size
+    }
+
+    /// Get whether the file is executable.
+    pub fn executable(&self) -> bool {
+        self.entry.executable
     }
 
     /// Get the FileModel for this file entry.
     pub fn file(&self) -> FileModel {
-        FileModel::new(Arc::clone(&self.repo), self.file_id.clone())
+        FileModel::new(Arc::clone(&self.repo), self.entry.file.clone())
     }
 }

@@ -64,10 +64,7 @@ impl DirectoryRootModel {
                     if is_last {
                         return Ok(ResolvePathResult::File(FileEntryModel::new(
                             Arc::clone(&self.repo),
-                            f.name,
-                            f.size,
-                            f.executable,
-                            f.file,
+                            f,
                         )));
                     } else {
                         // Can't traverse into a file

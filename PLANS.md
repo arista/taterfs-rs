@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at the changes specfied in list_search.md.  Implement in list_search.rs
+Look at the changes specfied in repo_model.md.  These should be implemented in directory repo_model
 
 ## Planned Features
 

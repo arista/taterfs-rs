@@ -6,6 +6,7 @@ A RepoModel is an object model around a [Repo](./repository_interface.md) that p
 
 ```
 RepoModel {
+  new(repo) -> RepoModel
   async default_branch() -> BranchModel
   async get_branch(name: string) -> Option<BranchModel>
 }
@@ -25,7 +26,22 @@ BranchModel {
 ```
 CommitModel {
   id: ObjectId
-  async root() -> DirectoryModel
+  async root() -> RootModel
+}
+```
+
+## RootModel interface
+
+```
+RootModel {
+  // Returns the root directory
+  directory() -> DirectoryModel
+
+  // Resolves the given path starting from the root, using "/" as a path separator.
+  async resolve_path(path) -> ResolvePathResult
+
+  // Resolves the given path, with an error if the result is not a DirectoryEntry or Root.  For the non-error cases, the resulting Directory is returned
+  async resolve_path_to_directory(path) -> DirectoryModel
 }
 ```
 
@@ -35,6 +51,8 @@ CommitModel {
 DirectoryModel {
   id: ObjectId
   async entries() -> EntryModelList
+  // Performs a binary search for the entry with the given name
+  async find_entry(name: string) -> Option<EntryModel>
 }
 
 EntryModelList {
@@ -44,6 +62,10 @@ EntryModelList {
 enum EntryModel {
   File(FileEntryModel)
   Directory(DirectoryEntryModel)
+}
+
+impl EntryModel {
+  name() -> string
 }
 
 FileEntryModel {
@@ -56,6 +78,13 @@ FileEntryModel {
 DirectoryEntryModel {
   name: string
   directory: DirectoryModel
+}
+
+enum ResolvePathResult {
+  None
+  Root
+  Directory(DirectoryEntryModel)
+  File(FileEntryModel)
 }
 ```
 

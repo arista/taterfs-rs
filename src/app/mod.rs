@@ -5,6 +5,7 @@ mod app;
 mod capacity_managers;
 mod list_builder;
 mod list_modifier;
+mod list_search;
 mod upload;
 
 pub use app::{App, AppContext, AppCreateFileStoreContext, AppCreateRepoContext, AppError, Result};
@@ -19,6 +20,7 @@ pub use list_modifier::{
     ListElems, ListModification, ListModificationError, ListModifications, ListModificationsVec,
     modify_branches, modify_directory, modify_file, modify_list,
 };
+pub use list_search::{search_branches, search_directory, search_file};
 pub use upload::{
     UploadDirectoryResult, UploadError, UploadFileResult, upload_directory, upload_file,
 };

@@ -19,6 +19,7 @@ This document describes the high-level architecture of taterfs-rs.
 * [completes](docs/architecture/completes.md)
 * [list_builder](docs/architecture/list_builder.md)
 * [list_modifier](docs/architecture/list_modifier.md)
+* [list_search](docs/architecture/list_search.md)
 * [upload](docs/architecture/upload.md)
 * [download](docs/architecture/download.md)
 * [app](docs/architecture/app.md)

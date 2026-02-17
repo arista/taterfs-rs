@@ -59,7 +59,6 @@ Constructed with the id of the commit's directory.  Lazily fetches and caches th
 DirectoryModel {
   id: ObjectId
   async entries() -> EntryModelList
-  // Performs a binary search for the entry with the given name
   async find_entry(name: string) -> Option<EntryModel>
 }
 
@@ -97,6 +96,8 @@ enum ResolvePathResult {
 ```
 
 DirectoryModel is constructed with the directory's id.  Lazily fetches and caches the backend "Directory" object as needed, using it as the source of its info.
+
+The find_entry method should use the appropriate [list_search](./list_search.md) function.
 
 ## FileModel interface
 

@@ -8,6 +8,7 @@ pub mod config;
 pub mod download;
 pub mod file_store;
 pub mod repo;
+pub mod repo_model;
 pub mod repository;
 pub mod util;
 

@@ -8,74 +8,66 @@ The interfaces look like this.  K is the key type, which must be comparable, E i
 
 ```
 SearchableList<K, E, T> {
+  length() -> number
+  // Error if ix is out of range
+  get(ix: number) -> SearchableListEntry<K, E, T>
 }
 
-SearchableListEntry<K, E, T> {
+enum SearchableListEntry<K, E, T> {
+  Leaf(SearchableListLeaf)
+  Tree(SearchableListTree)
+}
+
+impl SearchableListEntry<K, E, T> {
+  // Compare the key against the entry.  If a leaf, compare against the leaf's key.  If a tree, compare against the entry's key range (i.e., < if less than lower bound, > if greater than upper bound, = if between lower and upper bounds, inclusive)
+  compare(key:K)
 }
 
 SearchableListLeaf<K, E, T> {
+  key() -> K
+  entry() -> E
 }
 
 SearchableListTree<K, E, T> {
+  async list() -> SearchableList<K, E, T>
 }
 ```
 
-
-
-
-
-
-
-
-Similar to a [List Builder](./list_builder.md), a List Modifier applies a set of modifications to a list (Branches, File, Directory), writing the modified list to the repo, and returning the id of the result.  As with the List Builder, the List Modifier uses a common set of code, with generics used to apply that code to the various list types.
-
-The interfaces involved look like this:
+The algorithm can be divided into two functions:
 
 ```
-async modify_list(list_elems: ListElems, modifications: ListModifications, builder: ListBuilder) -> WithComplete<ObjectId>
-
-ListElems<K, E> {
-  async next() -> Option<ListElem<K, E>>
+search_list_entries(list: SearchableList, key: K) -> Option<SearchableListEntry> {
+  perform a binary search on list, using the compare method on each entry
+  if an entry matches, then return it, otherwise return None
 }
 
-ListElem<K, E> {
-  key: K
-  entry: E
-}
-
-ListModifications<K, E> {
-  next() -> Option<ListModification>
-  add(key: K, entry: Option<E>)
-}
-
-ListModification<K, E> {
-  key: K
-  entry: Option<E>
+seach_list(list: SearchableList, key: K) -> Option<E> {
+  call search_list_entries
+  if None, return None
+  otherwise, if Leaf, then return the leaf.entry()
+  otherwise, recursively call search_list_entries on leaf.list()
 }
 ```
 
-The general idea is that the ListModifications is expected to hold a vector of ListModification objects that were added by calling add(), and are kept in sorted order sorting by key (which must be a sortable type).  Its next() method yields each modification in order.  If a modification's entry is None, that means the entry is to be removed.  Otherwise, the entry is to be added, or should replace an existing entry with the same key.  It is an error to call add() after next() has been called.
+Each of the list types then has its own adapters to the traits specified above:
 
-The modify_list function then "zippers" the list_elems (which should also be sorted by key) with the modifications, calling the given ListBuilder with each resulting entry.
+## Branches
 
-As with list builder, there will be different implementations of ListElems for each of the list types (defined in repo_objects.rs)
+* SearchableList wraps a Branches and returns BranchListEntry items from the branches property wrapped in SearchableListEntry
+* SearchableListEntry wraps a BranchListEntry, compare() compares against Branch.name or BranchesEntry.firstName/lastName
+* SearchableListLeaf wraps a Branch
+* SearchableListTree wraps a BranchesEntry
 
-* Branches
+## Directory
 
-The entries are of type Branch, and the next() method should return those entries corresponding to BranchList, as returned by repo.list_branches.  The key type is String, corresponding to Branch.name
+* SearchableList wraps a Directory and returns DirectoryPart items from the entries property wrapped in SearchableListEntry
+* SearchableListEntry wraps a DirectoryPart, compare() compares against DirectoryEntry.name or PartialDirectory.firstName/lastName
+* SearchableListLeaf wraps a DirectoryEntry
+* SearchableListTree wraps a PartialDirectory
 
-The key type is String, corresponding to Branch.name
+## File
 
-* Directory
-
-The entries are of type DirectoryEntry, and the next() method should return those entries corresponding to DirectoryEntryList, as returned by repo.list_directory_entries.  The key type is String, corresponding to DirectoryEntry.name (
-
-* File
-
-The entries are of type ChunkFilePart, and the next() method should return those entries corresponding to FileChunkList, as returned by repo.list_file_chunks.  The key type is a u64, corresponding to the position of the chunk.  The position is not contained in the ChunkFilePart, so the ListElems implementation must keep a running total of that position, adding each chunk's size  for the next chunk.
-
-There should also be separate types for of ListModifications corresponding to the above list types.  And the ListBuilder should be a ListBuilder with the appropriate ListBuilderConfig type.
-
-
-There should then be modify_branches, modify_directory, and modify_file specialized methods that call the generic modify_list.
-
+* SearchableList wraps a File and returns FilePart items from the parts property wrapped in SearchableListEntry.  The SearchableList will have to compute the start and end positions of each FilePart, storing that in the SearchableListEntry.  That should be done up front when the SearchableList is constructed.
+* SearchableListEntry wraps a FilePart, compare() compares against the start and end positions described above
+* SearchableListLeaf wraps a ChunkFilePart
+* SearchableListTree wraps a FileFilePart

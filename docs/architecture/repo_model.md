@@ -2,38 +2,45 @@
 
 A RepoModel is an object model around a [Repo](./repository_interface.md) that presents a higher-level API for interacting with that Repo.
 
+In most cases, the model object is a thin wrapper around a corresponding [backend storage object](./backend_storage_model.md).  The model object might be constructed with only an ObjectId (or branch name for a BranchModel), and a place to hold that backend storage object, fetched lazily when needed.
+
 ## RepoModel interface
 
 ```
 RepoModel {
   new(repo) -> RepoModel
   async default_branch() -> BranchModel
+  // performs a binary search for the given branch
   async get_branch(name: string) -> Option<BranchModel>
 }
 ```
+Lazily fetches and caches the current "Root" object, using it as the source of its info.
+
+The functions that return a BranchModel will find the Branch in the branches list and construct with BranchModel with that Branch.
 
 ## BranchModel interface
 
 ```
 BranchModel {
-  id: ObjectId
+  branch_name: string
+  branch: Branch
   async commit() -> CommitModel
 }
 ```
-
 ## CommitModel interface
 
 ```
 CommitModel {
   id: ObjectId
-  async root() -> RootModel
+  async root() -> DirectoryRootModel
 }
 ```
+Constructed with the commit's id.  Lazily fetches and caches the backend "Commit" object, using it as the source of its info
 
 ## RootModel interface
 
 ```
-RootModel {
+DirectoryRootModel {
   // Returns the root directory
   directory() -> DirectoryModel
 
@@ -44,6 +51,7 @@ RootModel {
   async resolve_path_to_directory(path) -> DirectoryModel
 }
 ```
+Constructed with the id of the commit's directory.  Lazily fetches and caches the backend "Commit" object, using it as the source of its info
 
 ## DirectoryModel interface
 
@@ -88,6 +96,8 @@ enum ResolvePathResult {
 }
 ```
 
+DirectoryModel is constructed with the directory's id.  Lazily fetches and caches the backend "Directory" object as needed, using it as the source of its info.
+
 ## FileModel interface
 
 ```
@@ -95,3 +105,6 @@ FileModel {
   id: ObjectId
 }
 ```
+
+FileModel is constructed with the directory's id.  Lazily fetches and caches the backend "Directory" object as needed, using it as the source of its info.
+

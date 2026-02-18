@@ -1,6 +1,7 @@
 //! Command-line interface for taterfs.
 
 pub mod args;
+pub mod command_context;
 mod commands;
 
 use clap::{Parser, Subcommand};
@@ -8,7 +9,11 @@ use thiserror::Error;
 
 use crate::app::{App, AppError};
 
-pub use args::{FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs};
+pub use args::{GlobalArgs, InputSource, OutputSink};
+pub use command_context::{
+    create_command_context, CommandContext, CommandContextError, CommandContextInput,
+    CommandContextRequirements,
+};
 
 // =============================================================================
 // Error Types
@@ -32,6 +37,10 @@ pub enum CliError {
     /// File store error.
     #[error("{0}")]
     FileStore(#[from] crate::file_store::Error),
+
+    /// Command context error.
+    #[error("{0}")]
+    CommandContext(#[from] CommandContextError),
 
     /// I/O error.
     #[error("I/O error: {0}")]

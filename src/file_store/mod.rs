@@ -695,4 +695,10 @@ pub trait FileStore: Send + Sync {
 
     /// Get the StoreSyncState interface, if supported.
     fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState>;
+
+    /// Get the root path for filesystem-based stores.
+    /// Returns None for non-filesystem stores (S3, HTTP, etc.).
+    fn get_root_path(&self) -> Option<&std::path::Path> {
+        None
+    }
 }

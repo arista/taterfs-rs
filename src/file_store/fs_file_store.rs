@@ -436,6 +436,10 @@ impl FileStore for FsFileStore {
     fn get_sync_state_manager(&self) -> Option<&dyn StoreSyncState> {
         Some(self)
     }
+
+    fn get_root_path(&self) -> Option<&std::path::Path> {
+        Some(&self.root)
+    }
 }
 
 // =============================================================================

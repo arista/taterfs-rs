@@ -4,8 +4,11 @@ use std::path::Path;
 
 use clap::{Args, Subcommand};
 
-use crate::app::App;
-use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, Result};
+use crate::app::{App, AppCreateFileStoreContext};
+use crate::cli::{
+    create_command_context, CliError, CommandContextRequirements, GlobalArgs, InputSource,
+    OutputSink, Result,
+};
 use crate::file_store::ScanEvent;
 
 // =============================================================================
@@ -40,9 +43,6 @@ impl FileStoreCommand {
 /// Arguments for the scan command.
 #[derive(Args, Debug)]
 pub struct ScanArgs {
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
-
     /// Optional path to scan from within the file store.
     pub path: Option<String>,
 
@@ -51,17 +51,36 @@ pub struct ScanArgs {
 }
 
 impl ScanArgs {
-    pub async fn run(self, app: &App, _global: &GlobalArgs) -> Result<()> {
-        let fs_ctx = self.file_store.to_create_file_store_context();
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_file_store_path(),
+            app,
+        )
+        .await?;
+
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+
+        // Resolve the path before consuming ctx
+        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
+
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
 
         let source = file_store
             .get_source()
             .ok_or_else(|| CliError::Other("file store does not support reading".to_string()))?;
+        let scan_path = if resolved_path == "/" {
+            None
+        } else {
+            Some(resolved_path)
+        };
 
-        let scan_path = self.path.as_ref().map(Path::new);
         let mut events = source
-            .scan(scan_path)
+            .scan(scan_path.as_ref().map(|s| Path::new(s.as_str())))
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
 
@@ -109,9 +128,6 @@ impl ScanArgs {
 /// Arguments for the source_chunks command.
 #[derive(Args, Debug)]
 pub struct SourceChunksArgs {
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
-
     /// The path to the file.
     pub path: Option<String>,
 
@@ -123,22 +139,37 @@ pub struct SourceChunksArgs {
 }
 
 impl SourceChunksArgs {
-    pub async fn run(self, app: &App, _global: &GlobalArgs) -> Result<()> {
-        let fs_ctx = self.file_store.to_create_file_store_context();
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_file_store_path(),
+            app,
+        )
+        .await?;
+
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+
+        // Get the path from argument or input
+        let path_str = self.input.read(self.path.as_deref()).await?;
+        // Resolve the path relative to the filestore base (before moving ctx)
+        let resolved_path = ctx.resolve_file_store_path(Some(&path_str));
+
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
 
         let source = file_store
             .get_source()
             .ok_or_else(|| CliError::Other("file store does not support reading".to_string()))?;
-
-        let path_str = self.input.read(self.path.as_deref()).await?;
-        let path = Path::new(&path_str);
+        let path = Path::new(&resolved_path);
 
         let mut contents = source
             .get_source_chunks_with_content(path)
             .await
             .map_err(|e| CliError::Other(e.to_string()))?
-            .ok_or_else(|| CliError::Other(format!("path not found: {}", path_str)))?;
+            .ok_or_else(|| CliError::Other(format!("path not found: {}", resolved_path)))?;
 
         let mut output = String::new();
         let mut total_size = 0u64;

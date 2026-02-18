@@ -6,7 +6,7 @@ use clap::Args;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::app::{AppContext, AppCreateFileStoreContext, AppCreateRepoContext};
+use crate::app::AppContext;
 use crate::config::ConfigSource;
 
 // =============================================================================
@@ -58,6 +58,16 @@ pub struct GlobalArgs {
     /// Disable caching.
     #[arg(long = "no-cache", global = true)]
     pub no_cache: bool,
+
+    /// Repository specification (URL or named repository).
+    /// If not specified, auto-discovered from filestore's sync state.
+    #[arg(long = "repository", global = true)]
+    pub repository: Option<String>,
+
+    /// File store specification (URL or named file store).
+    /// If not specified, auto-discovered by searching for .tfs/ directory.
+    #[arg(long = "filestore", global = true)]
+    pub filestore: Option<String>,
 }
 
 impl GlobalArgs {
@@ -76,6 +86,19 @@ impl GlobalArgs {
             config_source: self.to_config_source(),
         }
     }
+
+    /// Convert to a CommandContextInput for command context creation.
+    pub fn to_command_context_input(&self) -> crate::cli::command_context::CommandContextInput {
+        crate::cli::command_context::CommandContextInput {
+            config_file: self.config_file.clone(),
+            config_file_overrides: self.config_file_overrides.clone(),
+            config: self.config_overrides.clone(),
+            json: self.json,
+            no_cache: self.no_cache,
+            repository_spec: self.repository.clone(),
+            file_store_spec: self.filestore.clone(),
+        }
+    }
 }
 
 /// Parse a config override from "name=value" format.
@@ -84,47 +107,6 @@ fn parse_config_override(s: &str) -> std::result::Result<(String, String), Strin
         .split_once('=')
         .ok_or_else(|| format!("invalid config override '{}': expected name=value", s))?;
     Ok((name.to_string(), value.to_string()))
-}
-
-// =============================================================================
-// Repo Arguments
-// =============================================================================
-
-/// Arguments common to repository commands.
-#[derive(Args, Debug)]
-pub struct RepoArgs {
-    /// Repository specification (URL or named repository).
-    pub repo_spec: String,
-}
-
-impl RepoArgs {
-    /// Convert to an AppCreateRepoContext.
-    pub fn to_create_repo_context(&self, allow_uninitialized: bool) -> AppCreateRepoContext {
-        AppCreateRepoContext {
-            spec: self.repo_spec.clone(),
-            allow_uninitialized,
-        }
-    }
-}
-
-// =============================================================================
-// File Store Arguments
-// =============================================================================
-
-/// Arguments common to file store commands.
-#[derive(Args, Debug)]
-pub struct FileStoreArgs {
-    /// File store specification (URL or named file store).
-    pub file_store_spec: String,
-}
-
-impl FileStoreArgs {
-    /// Convert to an AppCreateFileStoreContext.
-    pub fn to_create_file_store_context(&self) -> AppCreateFileStoreContext {
-        AppCreateFileStoreContext {
-            spec: self.file_store_spec.clone(),
-        }
-    }
 }
 
 // =============================================================================

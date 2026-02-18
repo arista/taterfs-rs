@@ -8,8 +8,11 @@ use sha2::{Digest, Sha256};
 
 use std::path::{Path, PathBuf};
 
-use crate::app::{App, upload_directory, upload_file};
-use crate::cli::{CliError, FileStoreArgs, GlobalArgs, InputSource, OutputSink, RepoArgs, Result};
+use crate::app::{upload_directory, upload_file, App, AppCreateFileStoreContext, AppCreateRepoContext};
+use crate::cli::{
+    create_command_context, CliError, CommandContextRequirements, GlobalArgs, InputSource,
+    OutputSink, Result,
+};
 use crate::download::ActionCallback;
 use crate::repo::RepoInitialize;
 
@@ -87,9 +90,6 @@ impl RepoCommand {
 /// Arguments for the initialize command.
 #[derive(Args, Debug)]
 pub struct InitializeArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// Name of the default branch.
     #[arg(long, default_value = "main")]
     pub default_branch_name: String,
@@ -104,7 +104,21 @@ pub struct InitializeArgs {
 
 impl InitializeArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(true);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: true,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let init = RepoInitialize {
@@ -117,7 +131,7 @@ impl InitializeArgs {
         // Get and output the repository info
         let info = repo.get_repository_info().await?;
 
-        if global.json {
+        if ctx.json {
             self.output
                 .write(
                     &RepositoryInfoOutput {
@@ -142,9 +156,6 @@ impl InitializeArgs {
 #[derive(Args, Debug)]
 pub struct GetCurrentRootArgs {
     #[command(flatten)]
-    pub repo: RepoArgs,
-
-    #[command(flatten)]
     pub output: OutputSink,
 }
 
@@ -155,7 +166,21 @@ struct CurrentRootOutput {
 
 impl GetCurrentRootArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let root = if repo.current_root_exists().await? {
@@ -164,7 +189,7 @@ impl GetCurrentRootArgs {
             None
         };
 
-        if global.json {
+        if ctx.json {
             self.output.write(&CurrentRootOutput { root }, true).await?;
         } else {
             match root {
@@ -185,9 +210,6 @@ impl GetCurrentRootArgs {
 #[derive(Args, Debug)]
 pub struct GetRepositoryInfoArgs {
     #[command(flatten)]
-    pub repo: RepoArgs,
-
-    #[command(flatten)]
     pub output: OutputSink,
 }
 
@@ -198,12 +220,26 @@ struct RepositoryInfoOutput {
 
 impl GetRepositoryInfoArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let info = repo.get_repository_info().await?;
 
-        if global.json {
+        if ctx.json {
             self.output
                 .write(
                     &RepositoryInfoOutput {
@@ -227,9 +263,6 @@ impl GetRepositoryInfoArgs {
 /// Arguments for the set-current-root command.
 #[derive(Args, Debug)]
 pub struct SetCurrentRootArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The new root object ID.
     pub root: Option<String>,
 
@@ -239,13 +272,27 @@ pub struct SetCurrentRootArgs {
 
 impl SetCurrentRootArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let root_id = self.input.read(self.root.as_deref()).await?;
         repo.write_current_root(&root_id).await?;
 
-        if global.json {
+        if ctx.json {
             println!("{{\"status\": \"ok\"}}");
         }
 
@@ -260,9 +307,6 @@ impl SetCurrentRootArgs {
 /// Arguments for the exists command.
 #[derive(Args, Debug)]
 pub struct ExistsArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The object ID to check.
     pub object_id: String,
 
@@ -277,12 +321,26 @@ struct ExistsOutput {
 
 impl ExistsArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let exists = repo.object_exists(&self.object_id).await?;
 
-        if global.json {
+        if ctx.json {
             self.output.write(&ExistsOutput { exists }, true).await?;
         } else {
             self.output
@@ -301,9 +359,6 @@ impl ExistsArgs {
 /// Arguments for the read command.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The object ID to read.
     pub object_id: Option<String>,
 
@@ -316,14 +371,28 @@ pub struct ReadArgs {
 
 impl ReadArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let object_id = self.input.read(self.object_id.as_deref()).await?;
         let buffer = repo.read(&object_id, None).await?;
         let data: &[u8] = &buffer;
 
-        if global.json {
+        if ctx.json {
             // Try to parse as JSON and pretty-print
             match serde_json::from_slice::<serde_json::Value>(data) {
                 Ok(value) => {
@@ -351,9 +420,6 @@ impl ReadArgs {
 /// Arguments for the write command.
 #[derive(Args, Debug)]
 pub struct WriteArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The contents to write.
     pub contents: Option<String>,
 
@@ -371,7 +437,21 @@ struct WriteOutput {
 
 impl WriteArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new().with_repository(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
         let contents = self.input.read(self.contents.as_deref()).await?;
@@ -399,7 +479,7 @@ impl WriteArgs {
             .await
             .map_err(|e| CliError::Other(format!("write failed: {}", e)))?;
 
-        if global.json {
+        if ctx.json {
             self.output.write(&WriteOutput { id }, true).await?;
         } else {
             self.output.write_str(&id).await?;
@@ -416,12 +496,6 @@ impl WriteArgs {
 /// Arguments for the upload-file command.
 #[derive(Args, Debug)]
 pub struct UploadFileArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
-
     /// Path to the file within the file store.
     pub path: String,
 
@@ -436,13 +510,39 @@ struct UploadFileOutput {
 
 impl UploadFileArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new()
+                .with_repository()
+                .with_file_store_path(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+
+        // Resolve the path relative to the filestore base path (before consuming ctx fields)
+        let resolved_path = ctx.resolve_file_store_path(Some(&self.path));
+        let json = ctx.json;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
-        let fs_ctx = self.file_store.to_create_file_store_context();
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
 
-        let path = Path::new(&self.path);
+        let path = Path::new(&resolved_path);
+
         let result = upload_file(file_store.as_ref(), repo, path)
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
@@ -456,7 +556,7 @@ impl UploadFileArgs {
 
         let hash = result.result.hash;
 
-        if global.json {
+        if json {
             self.output.write(&UploadFileOutput { hash }, true).await?;
         } else {
             self.output.write_str(&hash).await?;
@@ -473,13 +573,7 @@ impl UploadFileArgs {
 /// Arguments for the upload-directory command.
 #[derive(Args, Debug)]
 pub struct UploadDirectoryArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
-
-    /// Path to the directory within the file store. If not specified, uploads the entire file store.
+    /// Path to the directory within the file store. If not specified, uses the current directory.
     pub path: Option<String>,
 
     #[command(flatten)]
@@ -493,16 +587,46 @@ struct UploadDirectoryOutput {
 
 impl UploadDirectoryArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new()
+                .with_repository()
+                .with_file_store_path(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+
+        // Resolve the path - if provided, resolve relative to base; if not, use base path
+        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
+        let json = ctx.json;
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
-        let fs_ctx = self.file_store.to_create_file_store_context();
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
 
         // Get the cache from the file store
         let cache = file_store.get_cache();
 
-        let path = self.path.as_deref().map(Path::new);
+        let path = if resolved_path == "/" {
+            None
+        } else {
+            Some(Path::new(&resolved_path))
+        };
+
         let result = upload_directory(file_store.as_ref(), repo, cache, path)
             .await
             .map_err(|e| CliError::Other(e.to_string()))?;
@@ -516,7 +640,7 @@ impl UploadDirectoryArgs {
 
         let hash = result.result.hash;
 
-        if global.json {
+        if json {
             self.output
                 .write(&UploadDirectoryOutput { hash }, true)
                 .await?;
@@ -535,14 +659,8 @@ impl UploadDirectoryArgs {
 /// Arguments for the download-directory command.
 #[derive(Args, Debug)]
 pub struct DownloadDirectoryArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The directory object ID to download.
     pub directory_object_id: String,
-
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
 
     /// Path within the file store to download to.
     pub path: Option<String>,
@@ -565,20 +683,47 @@ pub struct DownloadDirectoryArgs {
 
 impl DownloadDirectoryArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
-        let repo = app.create_repo(repo_ctx).await?;
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new()
+                .with_repository()
+                .with_file_store_path(),
+            app,
+        )
+        .await?;
 
-        let fs_ctx = self.file_store.to_create_file_store_context();
-        let file_store = app.create_file_store(fs_ctx).await?;
+        let repo_spec = ctx
+            .repository_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
 
-        let store_path = self.path.as_deref().map(PathBuf::from).unwrap_or_default();
+        // Resolve the path (before consuming ctx fields)
+        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
+        let store_path = if resolved_path == "/" {
+            PathBuf::new()
+        } else {
+            PathBuf::from(&resolved_path)
+        };
 
         // Determine if we need verbose output
-        let on_action = if self.verbose || self.dry_run || global.json {
-            Some(self.create_action_callback(global)?)
+        let on_action = if self.verbose || self.dry_run || ctx.json {
+            Some(self.create_action_callback(&ctx)?)
         } else {
             None
         };
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
+        let repo = app.create_repo(repo_ctx).await?;
+
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
+        let file_store = app.create_file_store(fs_ctx).await?;
 
         // Use download_directory for all cases - it handles dry_run and verbose internally
         let with_stage = !self.no_stage;
@@ -603,7 +748,10 @@ impl DownloadDirectoryArgs {
         Ok(())
     }
 
-    fn create_action_callback(&self, global: &GlobalArgs) -> Result<ActionCallback> {
+    fn create_action_callback(
+        &self,
+        ctx: &crate::cli::CommandContext,
+    ) -> Result<ActionCallback> {
         use std::io::Write;
         use std::sync::Mutex;
 
@@ -616,7 +764,7 @@ impl DownloadDirectoryArgs {
             None => Arc::new(Mutex::new(Box::new(std::io::stdout()))),
         };
 
-        let on_action: ActionCallback = if global.json {
+        let on_action: ActionCallback = if ctx.json {
             let w = writer.clone();
             Arc::new(move |s: &str| {
                 if let Ok(encoded) = serde_json::to_string(s) {
@@ -636,8 +784,6 @@ impl DownloadDirectoryArgs {
     }
 }
 
-// Removed run_download() and run_dry_run() - functionality moved to download_directory()
-
 // =============================================================================
 // download-file command
 // =============================================================================
@@ -645,28 +791,45 @@ impl DownloadDirectoryArgs {
 /// Arguments for the download-file command.
 #[derive(Args, Debug)]
 pub struct DownloadFileArgs {
-    #[command(flatten)]
-    pub repo: RepoArgs,
-
     /// The file object ID to download.
     pub file_object_id: String,
-
-    #[command(flatten)]
-    pub file_store: FileStoreArgs,
 
     /// Path within the file store to download to.
     pub path: String,
 }
 
 impl DownloadFileArgs {
-    pub async fn run(self, app: &App, _global: &GlobalArgs) -> Result<()> {
-        let repo_ctx = self.repo.to_create_repo_context(false);
+    pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        let ctx = create_command_context(
+            global.to_command_context_input(),
+            CommandContextRequirements::new()
+                .with_repository()
+                .with_file_store_path(),
+            app,
+        )
+        .await?;
+
+        let repo_spec = ctx
+            .repository_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("repository required".to_string()))?;
+        let fs_spec = ctx
+            .file_store_spec
+            .clone()
+            .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+
+        // Resolve the path (before consuming ctx fields)
+        let resolved_path = ctx.resolve_file_store_path(Some(&self.path));
+        let path = PathBuf::from(&resolved_path);
+
+        let repo_ctx = AppCreateRepoContext {
+            spec: repo_spec,
+            allow_uninitialized: false,
+        };
         let repo = app.create_repo(repo_ctx).await?;
 
-        let fs_ctx = self.file_store.to_create_file_store_context();
+        let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
-
-        let path = PathBuf::from(&self.path);
 
         // Download the file (default to not executable - the file metadata will
         // be determined from the File object in the repo)

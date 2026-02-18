@@ -18,6 +18,7 @@ This document describes the high-level architecture of taterfs-rs.
 * [list_search](docs/architecture/list_search.md)
 * [upload](docs/architecture/upload.md)
 * [download](docs/architecture/download.md)
+* [dir_tree_mod](docs/architecture/dir_tree_mod.md)
 * [repo_model](docs/architecture/repo_model.md)
 * [app](docs/architecture/app.md)
 * [cli](docs/architecture/cli.md)

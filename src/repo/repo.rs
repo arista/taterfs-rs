@@ -1250,6 +1250,20 @@ impl Repo {
         Ok(BranchList::new(Arc::clone(self), branches))
     }
 
+    /// List entries from a Directory object directly.
+    ///
+    /// This creates a [`DirectoryEntryList`] from an already-loaded Directory object,
+    /// avoiding the need to re-read it from the repository.
+    ///
+    /// This is useful when you have a Directory object and want to iterate over its
+    /// entries without performing another read operation.
+    pub fn list_entries_of_directory(
+        self: &Arc<Self>,
+        directory: Directory,
+    ) -> DirectoryEntryList {
+        DirectoryEntryList::new(Arc::clone(self), directory)
+    }
+
     /// List all entries in a directory, recursively handling PartialDirectory entries.
     ///
     /// This is a convenience function that walks through all entries in a directory,
@@ -1261,7 +1275,7 @@ impl Repo {
         directory_id: &ObjectId,
     ) -> Result<DirectoryEntryList> {
         let directory = self.read_directory(directory_id).await?;
-        Ok(DirectoryEntryList::new(Arc::clone(self), directory))
+        Ok(self.list_entries_of_directory(directory))
     }
 
     /// List all chunks in a file, recursively handling FileFilePart entries.

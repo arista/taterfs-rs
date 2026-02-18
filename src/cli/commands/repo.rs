@@ -511,7 +511,9 @@ struct UploadFileOutput {
 impl UploadFileArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(Some(self.path.clone())),
             CommandContextRequirements::new()
                 .with_repository()
                 .with_file_store_path(),
@@ -527,10 +529,10 @@ impl UploadFileArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
-
-        // Resolve the path relative to the filestore base path (before consuming ctx fields)
-        let resolved_path = ctx.resolve_file_store_path(Some(&self.path));
-        let json = ctx.json;
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
         let repo_ctx = AppCreateRepoContext {
             spec: repo_spec,
@@ -556,7 +558,7 @@ impl UploadFileArgs {
 
         let hash = result.result.hash;
 
-        if json {
+        if ctx.json {
             self.output.write(&UploadFileOutput { hash }, true).await?;
         } else {
             self.output.write_str(&hash).await?;
@@ -588,7 +590,9 @@ struct UploadDirectoryOutput {
 impl UploadDirectoryArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(self.path.clone()),
             CommandContextRequirements::new()
                 .with_repository()
                 .with_file_store_path(),
@@ -604,10 +608,10 @@ impl UploadDirectoryArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
-
-        // Resolve the path - if provided, resolve relative to base; if not, use base path
-        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
-        let json = ctx.json;
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
         let repo_ctx = AppCreateRepoContext {
             spec: repo_spec,
@@ -640,7 +644,7 @@ impl UploadDirectoryArgs {
 
         let hash = result.result.hash;
 
-        if json {
+        if ctx.json {
             self.output
                 .write(&UploadDirectoryOutput { hash }, true)
                 .await?;
@@ -684,7 +688,9 @@ pub struct DownloadDirectoryArgs {
 impl DownloadDirectoryArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(self.path.clone()),
             CommandContextRequirements::new()
                 .with_repository()
                 .with_file_store_path(),
@@ -700,9 +706,11 @@ impl DownloadDirectoryArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
-        // Resolve the path (before consuming ctx fields)
-        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
         let store_path = if resolved_path == "/" {
             PathBuf::new()
         } else {
@@ -801,7 +809,9 @@ pub struct DownloadFileArgs {
 impl DownloadFileArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(Some(self.path.clone())),
             CommandContextRequirements::new()
                 .with_repository()
                 .with_file_store_path(),
@@ -817,9 +827,11 @@ impl DownloadFileArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
-        // Resolve the path (before consuming ctx fields)
-        let resolved_path = ctx.resolve_file_store_path(Some(&self.path));
         let path = PathBuf::from(&resolved_path);
 
         let repo_ctx = AppCreateRepoContext {

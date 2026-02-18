@@ -53,7 +53,9 @@ pub struct ScanArgs {
 impl ScanArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(self.path.clone()),
             CommandContextRequirements::new().with_file_store_path(),
             app,
         )
@@ -63,9 +65,10 @@ impl ScanArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
-
-        // Resolve the path before consuming ctx
-        let resolved_path = ctx.resolve_file_store_path(self.path.as_deref());
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
         let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
@@ -73,6 +76,7 @@ impl ScanArgs {
         let source = file_store
             .get_source()
             .ok_or_else(|| CliError::Other("file store does not support reading".to_string()))?;
+
         let scan_path = if resolved_path == "/" {
             None
         } else {
@@ -140,8 +144,13 @@ pub struct SourceChunksArgs {
 
 impl SourceChunksArgs {
     pub async fn run(self, app: &App, global: &GlobalArgs) -> Result<()> {
+        // Get the path from argument or input first
+        let path_str = self.input.read(self.path.as_deref()).await?;
+
         let ctx = create_command_context(
-            global.to_command_context_input(),
+            global
+                .to_command_context_input()
+                .with_file_store_path(Some(path_str)),
             CommandContextRequirements::new().with_file_store_path(),
             app,
         )
@@ -151,11 +160,10 @@ impl SourceChunksArgs {
             .file_store_spec
             .clone()
             .ok_or_else(|| CliError::Other("file store required".to_string()))?;
-
-        // Get the path from argument or input
-        let path_str = self.input.read(self.path.as_deref()).await?;
-        // Resolve the path relative to the filestore base (before moving ctx)
-        let resolved_path = ctx.resolve_file_store_path(Some(&path_str));
+        let resolved_path = ctx
+            .file_store_path
+            .clone()
+            .ok_or_else(|| CliError::Other("file store path required".to_string()))?;
 
         let fs_ctx = AppCreateFileStoreContext { spec: fs_spec };
         let file_store = app.create_file_store(fs_ctx).await?;
@@ -163,6 +171,7 @@ impl SourceChunksArgs {
         let source = file_store
             .get_source()
             .ok_or_else(|| CliError::Other("file store does not support reading".to_string()))?;
+
         let path = Path::new(&resolved_path);
 
         let mut contents = source

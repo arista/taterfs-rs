@@ -67,6 +67,24 @@ pub struct CommandContextInput {
     pub repository_spec: Option<String>,
     /// File store specification (URL or name).
     pub file_store_spec: Option<String>,
+    /// Explicit file store path from command argument.
+    pub file_store_path: Option<String>,
+    /// Explicit repository path from command argument.
+    pub repository_path: Option<String>,
+}
+
+impl CommandContextInput {
+    /// Set the file store path (builder pattern).
+    pub fn with_file_store_path(mut self, path: Option<String>) -> Self {
+        self.file_store_path = path;
+        self
+    }
+
+    /// Set the repository path (builder pattern).
+    pub fn with_repository_path(mut self, path: Option<String>) -> Self {
+        self.repository_path = path;
+        self
+    }
 }
 
 // =============================================================================
@@ -134,34 +152,12 @@ pub struct CommandContext {
     pub no_cache: bool,
     /// Repository specification (if available/required).
     pub repository_spec: Option<String>,
-    /// Path within the repository (if required and resolved).
+    /// Fully resolved path within the repository (if required).
     pub repository_path: Option<String>,
     /// File store specification (if available/required).
     pub file_store_spec: Option<String>,
-    /// Path within the file store (if required and resolved).
+    /// Fully resolved path within the file store (if required).
     pub file_store_path: Option<String>,
-}
-
-impl CommandContext {
-    /// Resolve a filestore path, combining the context's base path with an explicit path.
-    ///
-    /// - If `explicit_path` is None, returns the context's file_store_path (or "/" if none).
-    /// - If `explicit_path` starts with "/", returns it as-is (absolute path).
-    /// - Otherwise, resolves `explicit_path` relative to the context's base.
-    pub fn resolve_file_store_path(&self, explicit_path: Option<&str>) -> String {
-        let base = self.file_store_path.as_deref().unwrap_or("/");
-        resolve_path(base, explicit_path)
-    }
-
-    /// Resolve a repository path, combining the context's base path with an explicit path.
-    ///
-    /// - If `explicit_path` is None, returns the context's repository_path (or "/" if none).
-    /// - If `explicit_path` starts with "/", returns it as-is (absolute path).
-    /// - Otherwise, resolves `explicit_path` relative to the context's base.
-    pub fn resolve_repository_path(&self, explicit_path: Option<&str>) -> String {
-        let base = self.repository_path.as_deref().unwrap_or("/");
-        resolve_path(base, explicit_path)
-    }
 }
 
 // =============================================================================
@@ -314,23 +310,27 @@ pub async fn create_command_context(
     let (repository_spec, repository_directory) =
         resolve_repository(&input, &requirements, &file_store_spec, app).await?;
 
-    // Step 3: Compute paths if required
+    // Step 3: Compute and resolve paths if required
     let file_store_path = if requirements.require_file_store_path {
-        filestore_root
+        // Compute base path from cwd relative to filestore root
+        let base = filestore_root
             .as_ref()
             .map(|root| compute_filestore_base_path(root, &cwd))
-            .or(Some("/".to_string()))
+            .unwrap_or_else(|| "/".to_string());
+        // Resolve explicit path (if any) relative to base
+        Some(resolve_path(&base, input.file_store_path.as_deref()))
     } else {
         None
     };
 
     let repository_path = if requirements.require_repository_path {
-        match (&filestore_root, &repository_directory) {
-            (Some(root), Some(repo_dir)) => {
-                Some(compute_repository_base_path(root, &cwd, repo_dir))
-            }
-            _ => Some("/".to_string()),
-        }
+        // Compute base path from cwd relative to repo directory
+        let base = match (&filestore_root, &repository_directory) {
+            (Some(root), Some(repo_dir)) => compute_repository_base_path(root, &cwd, repo_dir),
+            _ => "/".to_string(),
+        };
+        // Resolve explicit path (if any) relative to base
+        Some(resolve_path(&base, input.repository_path.as_deref()))
     } else {
         None
     };

@@ -97,6 +97,8 @@ impl GlobalArgs {
             no_cache: self.no_cache,
             repository_spec: self.repository.clone(),
             file_store_spec: self.filestore.clone(),
+            file_store_path: None,
+            repository_path: None,
         }
     }
 }

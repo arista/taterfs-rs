@@ -18,8 +18,28 @@ Other common arguments:
 --json - format output as JSON
 --no-cache - disable caching
 ```
+## CLI top-level commands
 
-## CLI Commands
+### common top-level behaviors
+
+The top-level commands typically require a repo and, in many cases, a file store.  Both of those can be specified explicitly:
+
+```
+--repository={repo spec}
+--filestore={filestore spec}
+```
+If not specified explicitly, then there are heuristics to determine these:
+
+* search upward from the current directory for the closest ".tfs/" directory.  If one exists, then the directory containing the .tfs/ directory is the filestore, and the appropriate filestore spec should be generated for it
+* if that filestore has a sync_state or a next_sync_state, then the repo specified in that sync state should be used to form the repo spec.
+
+In addition, some commands may require a current path within either the filestore or the repo.  If such a path is optional, then its default is determined as follows:
+
+* if a filestore path is required, and the filestore is a FsFileStore and the current directory is within that filestore, then the current directory's name relative to the filestore's root is used.
+* if a repo path is required, and the filestore is a FsFileStore and the current directory is within that filestore, and a StoreSync (either current or next) is associated with the filestore, then take the current directory relative to the filestore's root, and resolve it relative to the "repository_directory" in the sync state.
+
+
+## CLI sub-commands
 
 ### tfs repo
 
@@ -149,3 +169,4 @@ Calls list_entries() on the cache, and for each entry, converts the key and valu
 {key} -> {value}
 ```
 The output is printed to the output-file is specified, otherwise STDOUT.  If no prefix is specified, then all entries will be printed
+

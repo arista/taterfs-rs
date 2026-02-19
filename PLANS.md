@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-cli.md introduces the notion of a CommandContext, and imposes a different way of handling specifying repository specs, filestore specs, and paths.  The existing CLI needs to be changed to confirm, and use the CommandContext
+Look at the changes to [backend_storage_model.md](/docs/architecture/backend_storage_model.md), which involves removing defaultBranch as a separately-stored value, and instead mixes it into the full Branches structure.  This will likely be a pretty disruptive change.
 
 ## Planned Features
 

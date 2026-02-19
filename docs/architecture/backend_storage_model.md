@@ -23,9 +23,8 @@ A repository references the object id of a single Root object.  A new Root is cr
 interface Root {
   type: "Root"
   timestamp: "*creation time in ISO 8601 format*"
-  defaultBranchName: "..."
-  defaultBranch: "*object id of default Branch*"
-  otherBranches: "*object id of Branches*"
+  defaultBranchName: string
+  branches: "*object id of Branches*"
   previousRoot: "*object id of Root*" | null
 }
 ```

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::backend::{BackendError, RepoBackend, RepositoryInfo};
+use crate::backend::{BackendError, RepoBackend, RepositoryInfo, SwapResult};
 use crate::caches::{LocalChunksCache, RepoCache};
 use crate::repository::{
     Branch, BranchListEntry, Branches, BranchesType, ChunkFilePart, Commit, CommitMetadata,
@@ -910,6 +910,19 @@ impl Repo {
                 Ok(())
             })
             .await
+    }
+
+    /// Atomically swap the current root if it matches the expected value.
+    ///
+    /// Returns `SwapResult::Success` if the swap succeeded, or
+    /// `SwapResult::Mismatch(actual)` if the current root didn't match expected.
+    pub async fn swap_current_root(
+        &self,
+        expected: Option<&ObjectId>,
+        new_root: &ObjectId,
+    ) -> Result<SwapResult> {
+        let (_rate, _concurrent) = acquire_request_capacity(&self.flow_control).await;
+        Ok(self.backend.swap_current_root(expected, new_root).await?)
     }
 
     // =========================================================================

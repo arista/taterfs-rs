@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio::sync::OnceCell;
 
 use crate::repo::{Repo, RepoError};
-use crate::repository::{Commit, ObjectId};
+use crate::repository::{Commit, CommitMetadata, CommitType, ObjectId, RepoObject};
+use crate::util::WithComplete;
 
 use super::DirectoryRootModel;
 
@@ -43,5 +45,47 @@ impl CommitModel {
             Arc::clone(&self.repo),
             commit.directory.clone(),
         ))
+    }
+
+    /// Create a new commit with this commit as the first parent.
+    ///
+    /// If `commit_metadata` is None or its timestamp is None, the timestamp
+    /// is filled in with the current time.
+    pub async fn create_next_commit(
+        &self,
+        directory_id: ObjectId,
+        commit_metadata: Option<CommitMetadata>,
+        additional_parents: Option<Vec<ObjectId>>,
+    ) -> Result<WithComplete<ObjectId>, RepoError> {
+        // Build parents list: this commit first, then any additional parents
+        let mut parents = vec![self.id.clone()];
+        if let Some(additional) = additional_parents {
+            parents.extend(additional);
+        }
+
+        // Build metadata, ensuring timestamp is set
+        let metadata = match commit_metadata {
+            Some(mut meta) => {
+                if meta.timestamp.is_none() {
+                    meta.timestamp = Some(Utc::now().to_rfc3339());
+                }
+                Some(meta)
+            }
+            None => Some(CommitMetadata {
+                timestamp: Some(Utc::now().to_rfc3339()),
+                author: None,
+                committer: None,
+                message: None,
+            }),
+        };
+
+        let commit = Commit {
+            type_tag: CommitType::Commit,
+            directory: directory_id,
+            parents,
+            metadata,
+        };
+
+        self.repo.write_object(&RepoObject::Commit(commit)).await
     }
 }

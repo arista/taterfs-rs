@@ -10,6 +10,7 @@ mod repo;
 pub use create_repo::{
     BackendType, CreateRepoContext, CreateRepoError, ParsedRepoSpec, create_repo,
 };
+pub use crate::backend::SwapResult;
 pub use repo::{
     BoxedFileChunksWithContent, BranchList, DirectoryEntry, DirectoryEntryList, DirectoryScan,
     FileChunkList, FileChunkWithContent, FileChunkWithContentList, FileChunksWithContent,

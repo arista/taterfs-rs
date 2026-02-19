@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 
 use crate::app::search_branches;
 use crate::repo::{Repo, RepoError};
-use crate::repository::{Branch, Root};
+use crate::repository::Root;
 
 use super::BranchModel;
 
@@ -40,11 +40,16 @@ impl RepoModel {
     /// Get the default branch model.
     pub async fn default_branch(&self) -> Result<BranchModel, RepoError> {
         let root = self.get_root().await?;
-        let branch = Branch {
-            name: root.default_branch_name.clone(),
-            commit: root.default_branch.clone(),
-        };
-        Ok(BranchModel::new(Arc::clone(&self.repo), branch))
+        let branch =
+            search_branches(Arc::clone(&self.repo), &root.branches, &root.default_branch_name)
+                .await?;
+        match branch {
+            Some(b) => Ok(BranchModel::new(Arc::clone(&self.repo), b)),
+            None => Err(RepoError::Other(format!(
+                "default branch '{}' not found",
+                root.default_branch_name
+            ))),
+        }
     }
 
     /// Get a branch by name.
@@ -53,18 +58,7 @@ impl RepoModel {
     /// Returns `None` if the branch is not found.
     pub async fn get_branch(&self, name: &str) -> Result<Option<BranchModel>, RepoError> {
         let root = self.get_root().await?;
-
-        // Check if it's the default branch
-        if name == root.default_branch_name {
-            let branch = Branch {
-                name: root.default_branch_name.clone(),
-                commit: root.default_branch.clone(),
-            };
-            return Ok(Some(BranchModel::new(Arc::clone(&self.repo), branch)));
-        }
-
-        // Search in other branches
-        let branch = search_branches(Arc::clone(&self.repo), &root.other_branches, name).await?;
+        let branch = search_branches(Arc::clone(&self.repo), &root.branches, name).await?;
         Ok(branch.map(|b| BranchModel::new(Arc::clone(&self.repo), b)))
     }
 }

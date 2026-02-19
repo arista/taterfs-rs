@@ -5,11 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use thiserror::Error;
 
-use crate::app::App;
+use crate::app::{App, AppCreateRepoContext};
 use crate::config::ConfigHelper;
 use crate::file_store::{FileStore, SyncState};
+use crate::repo_model::RepoModel;
+use crate::repository::CommitMetadata;
 
 // =============================================================================
 // Error Types
@@ -71,6 +74,16 @@ pub struct CommandContextInput {
     pub file_store_path: Option<String>,
     /// Explicit repository path from command argument.
     pub repository_path: Option<String>,
+    /// Branch name to use.
+    pub branch: Option<String>,
+    /// Commit timestamp in ISO 8601 format.
+    pub commit_timestamp: Option<String>,
+    /// Commit author.
+    pub commit_author: Option<String>,
+    /// Commit committer.
+    pub commit_committer: Option<String>,
+    /// Commit message.
+    pub commit_message: Option<String>,
 }
 
 impl CommandContextInput {
@@ -102,6 +115,10 @@ pub struct CommandContextRequirements {
     pub require_file_store: bool,
     /// Command requires a file store path (cwd-relative path within filestore).
     pub require_file_store_path: bool,
+    /// Command requires a branch.
+    pub require_branch: bool,
+    /// Command requires commit metadata.
+    pub require_commit_metadata: bool,
 }
 
 impl CommandContextRequirements {
@@ -135,6 +152,19 @@ impl CommandContextRequirements {
         self.require_file_store_path = true;
         self
     }
+
+    /// Require a branch (implies requiring repository).
+    pub fn with_branch(mut self) -> Self {
+        self.require_repository = true;
+        self.require_branch = true;
+        self
+    }
+
+    /// Require commit metadata.
+    pub fn with_commit_metadata(mut self) -> Self {
+        self.require_commit_metadata = true;
+        self
+    }
 }
 
 // =============================================================================
@@ -158,6 +188,10 @@ pub struct CommandContext {
     pub file_store_spec: Option<String>,
     /// Fully resolved path within the file store (if required).
     pub file_store_path: Option<String>,
+    /// Branch name (if required). Defaults to repository's default branch.
+    pub branch: Option<String>,
+    /// Commit metadata (if required).
+    pub commit_metadata: Option<CommitMetadata>,
 }
 
 // =============================================================================
@@ -335,6 +369,41 @@ pub async fn create_command_context(
         None
     };
 
+    // Step 4: Resolve branch if required
+    let branch = if requirements.require_branch {
+        if let Some(branch) = &input.branch {
+            Some(branch.clone())
+        } else if let Some(repo_spec) = &repository_spec {
+            // Need to get default branch from repo's Root
+            let repo = app
+                .create_repo(AppCreateRepoContext::new(repo_spec))
+                .await?;
+            let repo_model = RepoModel::new(repo);
+            let default_branch = repo_model.default_branch().await.map_err(|e| {
+                CommandContextError::Config(format!("failed to get default branch: {}", e))
+            })?;
+            Some(default_branch.branch_name.clone())
+        } else {
+            None
+        }
+    } else {
+        input.branch.clone()
+    };
+
+    // Step 5: Build commit metadata if required
+    let commit_metadata = if requirements.require_commit_metadata {
+        Some(CommitMetadata {
+            timestamp: input.commit_timestamp.clone().or_else(|| {
+                Some(Utc::now().to_rfc3339())
+            }),
+            author: input.commit_author.clone(),
+            committer: input.commit_committer.clone(),
+            message: input.commit_message.clone(),
+        })
+    } else {
+        None
+    };
+
     Ok(CommandContext {
         config: app.config().clone(),
         json: input.json,
@@ -343,6 +412,8 @@ pub async fn create_command_context(
         repository_path,
         file_store_spec,
         file_store_path,
+        branch,
+        commit_metadata,
     })
 }
 

@@ -119,6 +119,13 @@ pub struct FilestoreConfig {
     pub limits: CapacityLimits,
 }
 
+/// [repositories] section - global repository settings.
+#[derive(Debug, Clone)]
+pub struct RepositoriesConfig {
+    /// Maximum number of attempts for RepoModel.update() optimistic concurrency loop.
+    pub max_root_swap_attempts: usize,
+}
+
 // =============================================================================
 // Top-Level Config
 // =============================================================================
@@ -129,6 +136,7 @@ pub struct Config {
     pub cache: CacheConfig,
     pub memory: MemoryConfig,
     pub filestores_config: FilestoresConfig,
+    pub repositories_config: RepositoriesConfig,
     pub network: NetworkConfig,
     pub s3: S3Config,
     pub repositories: HashMap<String, RepositoryConfig>,

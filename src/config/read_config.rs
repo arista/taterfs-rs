@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use super::{
     ByteSize, CacheConfig, CapacityLimits, Config, FilestoreConfig, FilestoresConfig, Limit,
-    MemoryConfig, NetworkConfig, RepositoryConfig, S3Config, S3Settings,
+    MemoryConfig, NetworkConfig, RepositoriesConfig, RepositoryConfig, S3Config, S3Settings,
 };
 
 // =============================================================================
@@ -32,6 +32,7 @@ const DEFAULT_NETWORK_MAX_REQUESTS_PER_SECOND: u32 = 100;
 const DEFAULT_NETWORK_MAX_READ_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_NETWORK_MAX_WRITE_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_FILESTORES_GLOBAL_IGNORES: &str = ".git/,.tfs/";
+const DEFAULT_REPOSITORIES_MAX_ROOT_SWAP_ATTEMPTS: usize = 10;
 
 const ENV_CONFIG_FILE: &str = "TFS_CONFIG_FILE";
 const DEFAULT_CONFIG_FILENAME: &str = ".tfsconfig";
@@ -290,6 +291,9 @@ fn default_config() -> Config {
         filestores_config: FilestoresConfig {
             global_ignores: parse_comma_separated(DEFAULT_FILESTORES_GLOBAL_IGNORES),
         },
+        repositories_config: RepositoriesConfig {
+            max_root_swap_attempts: DEFAULT_REPOSITORIES_MAX_ROOT_SWAP_ATTEMPTS,
+        },
         network: NetworkConfig {
             limits: CapacityLimits {
                 max_concurrent_requests: Limit::Value(DEFAULT_NETWORK_MAX_CONCURRENT_REQUESTS),
@@ -395,6 +399,15 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
     // [filestores] section
     if let Some(global_ignores) = ini.get("filestores", "global_ignores") {
         config.filestores_config.global_ignores = parse_comma_separated(&global_ignores);
+    }
+
+    // [repositories] section
+    if let Some(val) = ini.get("repositories", "max_root_swap_attempts") {
+        config.repositories_config.max_root_swap_attempts =
+            val.parse().map_err(|e| ConfigError::InvalidInteger {
+                value: val.clone(),
+                source: e,
+            })?;
     }
 
     // [network] section
@@ -507,6 +520,9 @@ fn apply_override(config: &mut Config, key: &str, value: &str) -> Result<()> {
         // filestores.global_ignores
         ["filestores", param] => apply_filestores_override(config, param, value),
 
+        // repositories.max_root_swap_attempts
+        ["repositories", param] => apply_repositories_override(config, param, value),
+
         // network.max_concurrent_requests, etc.
         ["network", param] => apply_network_override(config, param, value),
 
@@ -592,6 +608,23 @@ fn apply_filestores_override(config: &mut Config, param: &str, value: &str) -> R
         }
         _ => Err(ConfigError::InvalidOverrideKey {
             key: format!("filestores.{}", param),
+            message: "unknown parameter".to_string(),
+        }),
+    }
+}
+
+fn apply_repositories_override(config: &mut Config, param: &str, value: &str) -> Result<()> {
+    match param {
+        "max_root_swap_attempts" => {
+            config.repositories_config.max_root_swap_attempts =
+                value.parse().map_err(|e| ConfigError::InvalidInteger {
+                    value: value.to_string(),
+                    source: e,
+                })?;
+            Ok(())
+        }
+        _ => Err(ConfigError::InvalidOverrideKey {
+            key: format!("repositories.{}", param),
             message: "unknown parameter".to_string(),
         }),
     }

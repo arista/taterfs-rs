@@ -21,6 +21,7 @@ This document describes the high-level architecture of taterfs-rs.
 * [dir_tree_mod](docs/architecture/dir_tree_mod.md)
 * [repo_model](docs/architecture/repo_model.md)
 * [app](docs/architecture/app.md)
+* [commands](docs/architecture/commands.md)
 * [cli](docs/architecture/cli.md)
 
 ### Entry Point

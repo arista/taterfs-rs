@@ -47,6 +47,22 @@ In addition, some commands may require a current path within either the filestor
     * calculate a "base" repo path using the algorithm above (as if no repo path was specified)
     * resolve the specified path relative to that "base"
 
+Some commands require a branch:
+
+```
+--branch={branch name}
+```
+If not specified, the branch defaults to the repo's default branch
+
+Some commands make use of commit metadata to associate with a commit that the command will create.  All of these are optional and default to None, except for timestamp, which defaults to the current time in ISO 8601 format.
+
+```
+--commit-timestamp={must conform to ISO 8601 format}
+--commit-author=...
+--commit-committer=...
+--commit-message=...
+```
+
 ### CommandContext
 
 The CommandContext structure and create_command_context function encapsulate the above behaviors.  The CLI commands should use these functions to process their common command-line arguments (skipping those portions that don't apply)
@@ -58,30 +74,45 @@ CommandContextInput {
   config: Map<name to value>
   json: Option<bool>
   no_cache: Option<bool>
+  branch: Option<string>
   repository_spec: Option<string>
   file_store_spec: Option<string>
+  commit_timestamp: Option<string>
+  commit_author: Option<string>
+  commit_committer: Option<string>
+  commit_message: Option<string>
 }
 
 CommandContextRequirements {
+  require_branch: bool
   require_repository: bool
   require_repository_path: bool
   require_file_store: bool
   require_file_store_path: bool
+  require_commit_metadata: bool
 }
 
 CommandContext {
   config: Config
   json: bool
   no_cache: bool
+  branch: Option<string>
   repository_spec: Option<string>
   repository_path: Option<string>
   file_store_spec: Option<string>
   file_store_path: Option<string>
+  commit_metdata: Option<CommitMetadata>
 }
 
 async create_command_context(input: CommandContextInput, requirements: CommandContextRequirements) -> CommandContext
 ```
 
+## CLI top-level commands
+
+```
+tfs upload-directory {filestore path} {repo path}
+```
+Call the [upload_directory command](./commands.md).
 
 ## CLI sub-commands
 

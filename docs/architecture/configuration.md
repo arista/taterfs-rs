@@ -25,6 +25,9 @@ The following rules are applied to find the config file:
 * [filestores] section
     * global_ignores={comma-separated list of gitignore-format entries to be used by FileSource.scan(), default ".git/,.tfs/"}
 
+* [repositories] section
+    * max_root_swap_attempts={default 10} - value passed to RepoModel.update
+
 * [memory] section - configuration and maximums that will be applied to operations that potentially allocate and hold memory.  "none" may be specifed, in which case no capacity manager is used for memory limits
     * max={default 100MB}
 

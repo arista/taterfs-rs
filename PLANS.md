@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at the changes to [backend_storage_model.md](/docs/architecture/backend_storage_model.md), which involves removing defaultBranch as a separately-stored value, and instead mixes it into the full Branches structure.  This will likely be a pretty disruptive change.
+Look at the changes to [repo_model.md](/docs/architecture/repo_model.md)
 
 ## Planned Features
 

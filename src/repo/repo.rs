@@ -813,51 +813,39 @@ impl Repo {
             commit: commit_id,
         };
 
-        // 4. Create and write an empty Branches object for other branches
-        let empty_branches = Branches {
-            type_tag: BranchesType::Branches,
-            branches: vec![],
-        };
-        let other_branches_write = self
-            .write_object(&RepoObject::Branches(empty_branches))
-            .await?;
-        let other_branches_id = other_branches_write.result.clone();
-        completes.add(other_branches_write.complete).unwrap();
-
-        // 5. Create the default branch as a Branches object containing just the default branch
-        let default_branch_branches = Branches {
+        // 4. Create and write a Branches object containing the default branch
+        let branches_obj = Branches {
             type_tag: BranchesType::Branches,
             branches: vec![BranchListEntry::Branch(default_branch)],
         };
-        let default_branch_write = self
-            .write_object(&RepoObject::Branches(default_branch_branches))
+        let branches_write = self
+            .write_object(&RepoObject::Branches(branches_obj))
             .await?;
-        let default_branch_id = default_branch_write.result.clone();
-        completes.add(default_branch_write.complete).unwrap();
+        let branches_id = branches_write.result.clone();
+        completes.add(branches_write.complete).unwrap();
 
-        // 6. Create and write a Root
+        // 5. Create and write a Root
         let root = Root {
             type_tag: RootType::Root,
             timestamp: timestamp.clone(),
             default_branch_name: init.default_branch_name,
-            default_branch: default_branch_id,
-            other_branches: other_branches_id,
+            branches: branches_id,
             previous_root: None,
         };
         let root_write = self.write_object(&RepoObject::Root(root)).await?;
         let root_id = root_write.result.clone();
         completes.add(root_write.complete).unwrap();
 
-        // 7. Wait for all writes to complete
+        // 6. Wait for all writes to complete
         completes.done();
         completes.complete().await.map_err(|e| {
             RepoError::Other(format!("failed to write initialization objects: {}", e))
         })?;
 
-        // 8. Set the current root
+        // 7. Set the current root
         self.backend.write_current_root(&root_id).await?;
 
-        // 9. Write the repository info
+        // 8. Write the repository info
         let repo_info = RepositoryInfo { uuid };
         self.backend.set_repository_info(&repo_info).await?;
 

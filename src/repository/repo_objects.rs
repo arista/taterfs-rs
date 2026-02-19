@@ -37,10 +37,8 @@ pub struct Root {
     pub timestamp: String,
     /// Name of the default branch.
     pub default_branch_name: String,
-    /// Object ID of the default Branch.
-    pub default_branch: ObjectId,
-    /// Object ID of the Branches object containing other branches.
-    pub other_branches: ObjectId,
+    /// Object ID of the Branches object containing all branches.
+    pub branches: ObjectId,
     /// Object ID of the previous Root, if any.
     pub previous_root: Option<ObjectId>,
 }
@@ -362,14 +360,14 @@ mod tests {
             type_tag: RootType::Root,
             timestamp: "2024-01-15T10:30:00Z".to_string(),
             default_branch_name: "main".to_string(),
-            default_branch: "abc123".to_string(),
-            other_branches: "def456".to_string(),
+            branches: "abc123".to_string(),
             previous_root: None,
         };
 
         let json = to_canonical_json_string(&root).unwrap();
         assert!(json.contains("\"type\":\"Root\""));
         assert!(json.contains("\"defaultBranchName\":\"main\""));
+        assert!(json.contains("\"branches\":\"abc123\""));
 
         let parsed: Root = from_json_str(&json).unwrap();
         assert_eq!(parsed, root);
@@ -465,8 +463,7 @@ mod tests {
             type_tag: RootType::Root,
             timestamp: "2024-01-15T10:30:00Z".to_string(),
             default_branch_name: "main".to_string(),
-            default_branch: "abc123".to_string(),
-            other_branches: "def456".to_string(),
+            branches: "abc123".to_string(),
             previous_root: Some("prev789".to_string()),
         };
 
@@ -482,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_repo_object_deserialization() {
-        let root_json = r#"{"type":"Root","timestamp":"2024-01-15","defaultBranchName":"main","defaultBranch":"abc","otherBranches":"def","previousRoot":null}"#;
+        let root_json = r#"{"type":"Root","timestamp":"2024-01-15","defaultBranchName":"main","branches":"abc","previousRoot":null}"#;
         let obj: RepoObject = from_json_str(root_json).unwrap();
         assert!(matches!(obj, RepoObject::Root(_)));
 

@@ -265,7 +265,8 @@ fn resolve_limits_with_parent(
 mod tests {
     use super::*;
     use crate::config::{
-        CacheConfig, FilestoresConfig, MemoryConfig, NetworkConfig, S3Config, S3Settings,
+        CacheConfig, FilestoresConfig, MemoryConfig, NetworkConfig, RepositoriesConfig, S3Config,
+        S3Settings,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -286,6 +287,9 @@ mod tests {
             },
             filestores_config: FilestoresConfig {
                 global_ignores: vec![".git/".to_string(), ".tfs/".to_string()],
+            },
+            repositories_config: RepositoriesConfig {
+                max_root_swap_attempts: 10,
             },
             network: NetworkConfig {
                 limits: CapacityLimits {

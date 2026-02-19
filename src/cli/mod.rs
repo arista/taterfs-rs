@@ -72,6 +72,15 @@ pub struct Cli {
 /// Top-level commands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Upload a directory from a filestore to a repository.
+    #[command(name = "upload-directory")]
+    UploadDirectory {
+        /// Path within the filestore to upload.
+        filestore_path: String,
+        /// Path within the repository to upload to.
+        repo_path: String,
+    },
+
     /// Repository operations.
     Repo {
         #[command(subcommand)]
@@ -111,6 +120,12 @@ impl Cli {
         App::with_app(global.to_app_context(), |app| {
             Box::pin(async move {
                 match command {
+                    Command::UploadDirectory {
+                        filestore_path,
+                        repo_path,
+                    } => {
+                        run_upload_directory(app, &global, filestore_path, repo_path).await
+                    }
                     Command::Repo { command } => command.run(app, &global).await,
                     Command::FileStore { command } => command.run(app, &global).await,
                     Command::KeyValueCache { command } => command.run(app, &global).await,
@@ -119,6 +134,48 @@ impl Cli {
         })
         .await
     }
+}
+
+/// Run the upload-directory command.
+async fn run_upload_directory(
+    app: &App,
+    global: &GlobalArgs,
+    filestore_path: String,
+    repo_path: String,
+) -> Result<()> {
+    use std::path::PathBuf;
+
+    // Create command context with requirements
+    let requirements = CommandContextRequirements::new()
+        .with_repository()
+        .with_file_store()
+        .with_branch()
+        .with_commit_metadata();
+
+    let input = global
+        .to_command_context_input()
+        .with_file_store_path(Some(filestore_path.clone()));
+
+    let context = create_command_context(input, requirements, app).await?;
+
+    // Run the command
+    let args = crate::commands::UploadDirectoryArgs {
+        filestore_path: PathBuf::from(&filestore_path),
+        repo_path: PathBuf::from(&repo_path),
+    };
+
+    let result = crate::commands::upload_directory(args, &context, app)
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
+
+    // Output the result
+    if context.json {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    } else {
+        println!("{}", result);
+    }
+
+    Ok(())
 }
 
 /// Main entry point for the CLI.

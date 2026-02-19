@@ -68,6 +68,26 @@ pub struct GlobalArgs {
     /// If not specified, auto-discovered by searching for .tfs/ directory.
     #[arg(long = "filestore", global = true)]
     pub filestore: Option<String>,
+
+    /// Branch name to use. If not specified, uses the repository's default branch.
+    #[arg(long = "branch", global = true)]
+    pub branch: Option<String>,
+
+    /// Commit timestamp in ISO 8601 format. Defaults to current time.
+    #[arg(long = "commit-timestamp", global = true)]
+    pub commit_timestamp: Option<String>,
+
+    /// Commit author.
+    #[arg(long = "commit-author", global = true)]
+    pub commit_author: Option<String>,
+
+    /// Commit committer.
+    #[arg(long = "commit-committer", global = true)]
+    pub commit_committer: Option<String>,
+
+    /// Commit message.
+    #[arg(long = "commit-message", global = true)]
+    pub commit_message: Option<String>,
 }
 
 impl GlobalArgs {
@@ -99,6 +119,11 @@ impl GlobalArgs {
             file_store_spec: self.filestore.clone(),
             file_store_path: None,
             repository_path: None,
+            branch: self.branch.clone(),
+            commit_timestamp: self.commit_timestamp.clone(),
+            commit_author: self.commit_author.clone(),
+            commit_committer: self.commit_committer.clone(),
+            commit_message: self.commit_message.clone(),
         }
     }
 }

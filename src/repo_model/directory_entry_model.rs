@@ -27,6 +27,11 @@ impl DirectoryEntryModel {
         }
     }
 
+    /// Get the object ID of this directory entry.
+    pub fn id(&self) -> &ObjectId {
+        &self.directory_id
+    }
+
     /// Get the DirectoryModel for this directory entry.
     pub fn directory(&self) -> DirectoryModel {
         DirectoryModel::new(Arc::clone(&self.repo), self.directory_id.clone())

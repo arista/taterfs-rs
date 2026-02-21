@@ -127,6 +127,7 @@ tfs ls {repo path}
   [-x  multi-column with horizontal sort]
   [-w {cols}  manually specify screen width (defaults to terminal width)]
   [-F  enable classify_format]
+  [--include-id  include ids in long listings]
 ```
 Call the [list_command](./commands.md).  Default is to use short format, with multi-column vertical sort, with the number of columns determined by the terminal width.  The --json flag switches to JSON format (which is actually jsonl in this case).
 

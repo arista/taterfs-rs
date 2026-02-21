@@ -12,7 +12,7 @@ use crate::app::{App, AppCreateRepoContext};
 use crate::config::ConfigHelper;
 use crate::file_store::{FileStore, SyncState};
 use crate::repo_model::RepoModel;
-use crate::repository::CommitMetadata;
+use crate::repository::{CommitMetadata, ObjectId};
 
 // =============================================================================
 // Error Types
@@ -76,6 +76,8 @@ pub struct CommandContextInput {
     pub repository_path: Option<String>,
     /// Branch name to use.
     pub branch: Option<String>,
+    /// Specific commit to use.
+    pub commit: Option<String>,
     /// Commit timestamp in ISO 8601 format.
     pub commit_timestamp: Option<String>,
     /// Commit author.
@@ -117,6 +119,8 @@ pub struct CommandContextRequirements {
     pub require_file_store_path: bool,
     /// Command requires a branch.
     pub require_branch: bool,
+    /// Command requires a commit (existing commit to read from).
+    pub require_commit: bool,
     /// Command requires commit metadata.
     pub require_commit_metadata: bool,
 }
@@ -160,6 +164,14 @@ impl CommandContextRequirements {
         self
     }
 
+    /// Require a commit (implies requiring repository and branch).
+    pub fn with_commit(mut self) -> Self {
+        self.require_repository = true;
+        self.require_branch = true;
+        self.require_commit = true;
+        self
+    }
+
     /// Require commit metadata.
     pub fn with_commit_metadata(mut self) -> Self {
         self.require_commit_metadata = true;
@@ -190,6 +202,8 @@ pub struct CommandContext {
     pub file_store_path: Option<String>,
     /// Branch name (if required). Defaults to repository's default branch.
     pub branch: Option<String>,
+    /// Commit ID (if required). Defaults to branch's current commit.
+    pub commit: Option<ObjectId>,
     /// Commit metadata (if required).
     pub commit_metadata: Option<CommitMetadata>,
 }
@@ -370,7 +384,7 @@ pub async fn create_command_context(
     };
 
     // Step 4: Resolve branch if required
-    let branch = if requirements.require_branch {
+    let branch = if requirements.require_branch || requirements.require_commit {
         if let Some(branch) = &input.branch {
             Some(branch.clone())
         } else if let Some(repo_spec) = &repository_spec {
@@ -390,7 +404,37 @@ pub async fn create_command_context(
         input.branch.clone()
     };
 
-    // Step 5: Build commit metadata if required
+    // Step 5: Resolve commit if required
+    let commit: Option<ObjectId> = if requirements.require_commit {
+        if let Some(commit_str) = &input.commit {
+            // Use explicitly provided commit
+            Some(commit_str.clone())
+        } else if let (Some(repo_spec), Some(branch_name)) = (&repository_spec, &branch) {
+            // Resolve commit from branch's current commit
+            let repo = app
+                .create_repo(AppCreateRepoContext::new(repo_spec))
+                .await?;
+            let repo_model = RepoModel::new(repo);
+            let branch_model = repo_model.get_branch(branch_name).await.map_err(|e| {
+                CommandContextError::Config(format!("failed to get branch '{}': {}", branch_name, e))
+            })?;
+            match branch_model {
+                Some(bm) => Some(bm.branch.commit.clone()),
+                None => {
+                    return Err(CommandContextError::Config(format!(
+                        "branch '{}' not found",
+                        branch_name
+                    )))
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        input.commit.clone()
+    };
+
+    // Step 6: Build commit metadata if required
     let commit_metadata = if requirements.require_commit_metadata {
         Some(CommitMetadata {
             timestamp: input.commit_timestamp.clone().or_else(|| {
@@ -413,6 +457,7 @@ pub async fn create_command_context(
         file_store_spec,
         file_store_path,
         branch,
+        commit,
         commit_metadata,
     })
 }

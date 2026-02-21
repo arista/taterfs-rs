@@ -64,7 +64,7 @@ List the repo file or contents of the repo directory resolved by the path in the
 
 The list of entries to be listed is a single entry (if a file), or the list of entries from the directory, in the order that the directory has stored them (which should be alphabetical)
 
-For long and short format, directory names are printed in blue, executable file names in green, non-executable file names in green.  In addition, if classify_format is true, then names are appended (in white) with "/" for directories, or "*" for executable files.  Names are escaped using the "shell-escape" behavior used by modern "ls" implementations.
+For long and short format, directory names are printed in blue, executable file names in green, non-executable file names in white/default.  In addition, if classify_format is true, then names are appended (in white) with "/" for directories, or "*" for executable files.  Names are escaped using the "shell-escape" behavior used by modern "ls" implementations.
 
 * Long format
 

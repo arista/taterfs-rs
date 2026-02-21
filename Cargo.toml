@@ -25,6 +25,7 @@ configparser = "3"
 heed = "0.22"
 lru = "0.12"
 percent-encoding = "2"
+crossterm = "0.28"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

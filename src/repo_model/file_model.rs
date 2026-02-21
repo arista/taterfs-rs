@@ -51,6 +51,11 @@ impl FileEntryModel {
         self.entry.executable
     }
 
+    /// Get the object ID of this file entry.
+    pub fn id(&self) -> &ObjectId {
+        &self.entry.file
+    }
+
     /// Get the FileModel for this file entry.
     pub fn file(&self) -> FileModel {
         FileModel::new(Arc::clone(&self.repo), self.entry.file.clone())

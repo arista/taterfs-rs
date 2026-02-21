@@ -88,6 +88,10 @@ pub struct GlobalArgs {
     /// Commit message.
     #[arg(long = "commit-message", global = true)]
     pub commit_message: Option<String>,
+
+    /// Specific commit to use. If not specified, uses the branch's current commit.
+    #[arg(long = "commit", global = true)]
+    pub commit: Option<String>,
 }
 
 impl GlobalArgs {
@@ -120,6 +124,7 @@ impl GlobalArgs {
             file_store_path: None,
             repository_path: None,
             branch: self.branch.clone(),
+            commit: self.commit.clone(),
             commit_timestamp: self.commit_timestamp.clone(),
             commit_author: self.commit_author.clone(),
             commit_committer: self.commit_committer.clone(),

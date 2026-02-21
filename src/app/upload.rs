@@ -2,16 +2,20 @@
 //!
 //! This module provides functions for uploading files and directories from a
 //! FileStore to a Repository, handling chunking, caching, and completion tracking.
+//! It also provides [`StreamingFileUploader`] for uploading file content that is
+//! produced incrementally (e.g., from a 3-way text merge).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use crate::app::{DirectoryLeaf, DirectoryListBuilder, FileListBuilder};
 use crate::caches::{DbId, FileStoreCache, FingerprintedFileInfo};
-use crate::file_store::{FileStore, ScanEvent, ScanEvents};
+use crate::file_store::{FileStore, ScanEvent, ScanEvents, CHUNK_SIZES, next_chunk_size};
 use crate::repo::{Repo, RepoError};
 use crate::repository::{ChunkFilePart, DirEntry, Directory, File, FileEntry, ObjectId};
-use crate::util::{Complete, NoopComplete, WithComplete};
+use crate::util::{Complete, ManagedBuffer, ManagedBuffers, NoopComplete, WithComplete};
 
 // =============================================================================
 // Upload Result Types
@@ -319,5 +323,305 @@ async fn upload_directory_from_scan_events(
                     .await?;
             }
         }
+    }
+}
+
+// =============================================================================
+// StreamingFileUploader
+// =============================================================================
+
+/// Uploads file content that is produced incrementally as `ManagedBuffer`s.
+///
+/// This is used when file content is computed on the fly (e.g., output of a
+/// 3-way text merge) rather than read from a `FileStore`. Buffers are added
+/// via [`add`](Self::add), segmented into chunks using the same algorithm as
+/// `FileStore::get_source_chunks_with_content`, written to the repo, and
+/// tracked via a `FileListBuilder`. Call [`finish`](Self::finish) to flush
+/// remaining data and get the final `UploadFileResult`.
+pub struct StreamingFileUploader {
+    repo: Arc<Repo>,
+    builder: FileListBuilder,
+    pending: Vec<ManagedBuffer>,
+    pending_size: u64,
+}
+
+impl StreamingFileUploader {
+    /// Create a new `StreamingFileUploader` that writes chunks to the given repo.
+    pub fn new(repo: Arc<Repo>) -> Self {
+        Self {
+            builder: FileListBuilder::new(repo.clone()),
+            repo,
+            pending: Vec::new(),
+            pending_size: 0,
+        }
+    }
+
+    /// Add a buffer of content to the upload.
+    ///
+    /// The buffer is accumulated internally. When enough data has been
+    /// accumulated to fill a full chunk (`CHUNK_SIZES[0]` = 4 MB), the chunk
+    /// is hashed, written to the repo, and added to the internal file builder.
+    pub async fn add(&mut self, buf: ManagedBuffer) -> Result<()> {
+        self.pending_size += buf.size();
+        self.pending.push(buf);
+
+        // Flush full chunks while we have enough data
+        while self.pending_size >= CHUNK_SIZES[0] {
+            self.flush_chunk(CHUNK_SIZES[0]).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Finish the upload, flushing any remaining data.
+    ///
+    /// Consumes `self` to prevent further `add` calls. Returns the uploaded
+    /// file result with a completion handle.
+    pub async fn finish(mut self) -> Result<WithComplete<UploadFileResult>> {
+        // Drain remaining data using descending chunk sizes
+        while self.pending_size > 0 {
+            let chunk_size = next_chunk_size(self.pending_size);
+            self.flush_chunk(chunk_size).await?;
+        }
+
+        let result = self.builder.finish().await?;
+
+        let upload_result = UploadFileResult {
+            file: result.object,
+            hash: result.hash,
+        };
+
+        Ok(WithComplete::new(upload_result, result.complete))
+    }
+
+    /// Extract exactly `size` bytes from the front of the pending buffers,
+    /// hash them, write to the repo, and add the chunk to the builder.
+    async fn flush_chunk(&mut self, size: u64) -> Result<()> {
+        let size_usize = size as usize;
+        let mut assembled = Vec::with_capacity(size_usize);
+        let mut remaining = size_usize;
+
+        while remaining > 0 {
+            let front = &self.pending[0];
+            let front_len = front.buf().len();
+
+            if front_len <= remaining {
+                // Consume this entire buffer
+                let buf = self.pending.remove(0);
+                assembled.extend_from_slice(buf.as_ref());
+                remaining -= front_len;
+            } else {
+                // Partially consume the front buffer
+                assembled.extend_from_slice(&self.pending[0].as_ref()[..remaining]);
+                // Split off the consumed bytes
+                let _ = self.pending[0].buf_mut().split_to(remaining);
+                remaining = 0;
+            }
+        }
+
+        self.pending_size -= size;
+
+        // Hash the assembled chunk
+        let hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(&assembled);
+            format!("{:x}", hasher.finalize())
+        };
+
+        // Wrap in a ManagedBuffer (unmanaged — original buffers' capacity is
+        // released as they are consumed above)
+        let managed = ManagedBuffers::new()
+            .get_buffer_with_data(assembled)
+            .await;
+
+        // Write to repo
+        let write_result = self.repo.write(&hash, Arc::new(managed)).await?;
+
+        // Add chunk to the file builder
+        let chunk_part = ChunkFilePart {
+            size,
+            content: hash,
+        };
+        self.builder.add(chunk_part, write_result.complete).await?;
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MemoryBackend;
+    use crate::caches::NoopCache;
+    use crate::repository::FilePart;
+    use crate::util::ManagedBuffers;
+
+    fn create_test_repo() -> Arc<Repo> {
+        let backend = MemoryBackend::new();
+        let cache = NoopCache;
+        Arc::new(Repo::new(backend, cache))
+    }
+
+    async fn make_buffer(data: &[u8]) -> ManagedBuffer {
+        ManagedBuffers::new()
+            .get_buffer_with_data(data.to_vec())
+            .await
+    }
+
+    /// Helper: collect all ChunkFilePart entries from a File object.
+    fn collect_chunks(file: &File) -> Vec<&ChunkFilePart> {
+        file.parts
+            .iter()
+            .filter_map(|p| match p {
+                FilePart::Chunk(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_empty_file() {
+        let repo = create_test_repo();
+        let uploader = StreamingFileUploader::new(repo);
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        // Empty file should have no chunks
+        assert!(result.result.file.parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_small_file() {
+        let repo = create_test_repo();
+        let mut uploader = StreamingFileUploader::new(repo);
+
+        let data = b"hello world";
+        uploader.add(make_buffer(data).await).await.unwrap();
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        let chunks = collect_chunks(&result.result.file);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].size, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_exact_chunk_boundary() {
+        let repo = create_test_repo();
+        let mut uploader = StreamingFileUploader::new(repo);
+
+        // Add exactly CHUNK_SIZES[0] (4MB) bytes
+        let chunk_size = CHUNK_SIZES[0] as usize;
+        let data = vec![0xABu8; chunk_size];
+        uploader.add(make_buffer(&data).await).await.unwrap();
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        let chunks = collect_chunks(&result.result.file);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].size, CHUNK_SIZES[0]);
+    }
+
+    #[tokio::test]
+    async fn test_large_file_multiple_chunks() {
+        let repo = create_test_repo();
+        let mut uploader = StreamingFileUploader::new(repo);
+
+        // Add 5MB + 100KB of data to get multiple chunks
+        let big_chunk = CHUNK_SIZES[0] as usize; // 4MB
+        let extra = 100_000usize;
+        let total = big_chunk + extra;
+
+        let data = vec![0x42u8; total];
+        uploader.add(make_buffer(&data).await).await.unwrap();
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        let chunks = collect_chunks(&result.result.file);
+
+        // First chunk should be 4MB, remainder (100_000) gets chunked by next_chunk_size
+        assert_eq!(chunks[0].size, CHUNK_SIZES[0]);
+
+        // Remaining 100_000 should be a single chunk (< 16KB threshold doesn't apply,
+        // next_chunk_size(100_000) = 65_536)
+        let remaining = total as u64 - CHUNK_SIZES[0];
+        let expected_second = next_chunk_size(remaining);
+        assert_eq!(chunks[1].size, expected_second);
+
+        // Total size across all chunks should equal total
+        let total_chunked: u64 = chunks.iter().map(|c| c.size).sum();
+        assert_eq!(total_chunked, total as u64);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_small_adds() {
+        let repo = create_test_repo();
+        let mut uploader = StreamingFileUploader::new(repo);
+
+        // Add many small buffers that accumulate past the 4MB threshold
+        let buf_size = 100_000usize;
+        let num_bufs = 50; // 5MB total
+        for _ in 0..num_bufs {
+            let data = vec![0x01u8; buf_size];
+            uploader.add(make_buffer(&data).await).await.unwrap();
+        }
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        let chunks = collect_chunks(&result.result.file);
+
+        // Should have at least one 4MB chunk
+        assert!(chunks[0].size == CHUNK_SIZES[0]);
+
+        // Total size should match
+        let total_chunked: u64 = chunks.iter().map(|c| c.size).sum();
+        assert_eq!(total_chunked, (buf_size * num_bufs) as u64);
+    }
+
+    #[tokio::test]
+    async fn test_chunk_hashes_are_valid_hex() {
+        let repo = create_test_repo();
+        let mut uploader = StreamingFileUploader::new(repo);
+
+        uploader.add(make_buffer(b"test data").await).await.unwrap();
+
+        let result = uploader.finish().await.unwrap();
+        result.complete.complete().await.unwrap();
+
+        let chunks = collect_chunks(&result.result.file);
+        for chunk in &chunks {
+            // SHA-256 hex is 64 characters
+            assert_eq!(chunk.content.len(), 64);
+            assert!(chunk.content.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_hash() {
+        // Uploading the same content twice should produce the same file hash
+        let data = b"deterministic content";
+
+        let repo1 = create_test_repo();
+        let mut uploader1 = StreamingFileUploader::new(repo1);
+        uploader1.add(make_buffer(data).await).await.unwrap();
+        let result1 = uploader1.finish().await.unwrap();
+        result1.complete.complete().await.unwrap();
+
+        let repo2 = create_test_repo();
+        let mut uploader2 = StreamingFileUploader::new(repo2);
+        uploader2.add(make_buffer(data).await).await.unwrap();
+        let result2 = uploader2.finish().await.unwrap();
+        result2.complete.complete().await.unwrap();
+
+        assert_eq!(result1.result.hash, result2.result.hash);
     }
 }

@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at [merge](./docs/architecture/merge.md), implement the functions and changes there.  Start a new directory under src/merge/merge.rs to hold this.
+Look at the changes in [merge.md](./docs/architecture/merge.md) on this branch, particularly the changes are around merge_files, and some of the changes implied in the implementation of merge_directories, and some configuration changes too.
 
 ## Planned Features
 

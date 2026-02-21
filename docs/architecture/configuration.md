@@ -30,6 +30,7 @@ The following rules are applied to find the config file:
 
 * [memory] section - configuration and maximums that will be applied to operations that potentially allocate and hold memory.  "none" may be specifed, in which case no capacity manager is used for memory limits
     * max={default 100MB}
+    * max_merge_memory={default 1GB}
 
 * [network] section - configuration and maximums that will be used for capacity managers that are applied to all network-based repositories and file stores.  Each can optionally specify "none", in which case no capacity manager is used for that aspect
     * max_concurrent_requests={default 40}

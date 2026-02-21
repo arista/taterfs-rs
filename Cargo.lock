@@ -727,6 +727,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "content_inspector"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7bda66e858c683005a53a9a60c69a4aca7eeaa45d124526e389f7aec8e62f38"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -897,6 +906,12 @@ checksum = "ececcb659e7ba858fb4f10388c250a7252eb0a27373f1a72b8748afdd248e587"
 dependencies = [
  "powerfmt",
 ]
+
+[[package]]
+name = "difflib"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6184e33543162437515c2e2b48714794e37845ec9851711914eec9d308f6ebe8"
 
 [[package]]
 name = "digest"
@@ -1752,6 +1767,16 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "merge3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4b277bc3c7e2bc163abc6c0069f53715b52dc34442c0e807cc8758c7113524f"
+dependencies = [
+ "clap",
+ "difflib",
+]
 
 [[package]]
 name = "mio"
@@ -2643,12 +2668,14 @@ dependencies = [
  "chrono",
  "clap",
  "configparser",
+ "content_inspector",
  "crossterm",
  "futures",
  "heed",
  "hex",
  "ignore",
  "lru",
+ "merge3",
  "percent-encoding",
  "reqwest",
  "serde",

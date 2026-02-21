@@ -9,6 +9,7 @@ use crate::app::{DirectoryLeaf, DirectoryListBuilder};
 use crate::merge::change_merge::changes_to_merge;
 use crate::merge::dir_change::to_dir_change;
 use crate::merge::error::{MergeError, Result};
+use crate::merge::file::merge_files;
 use crate::merge::types::{ChangingDirEntry, ConflictContext, DirChangeMerge};
 use crate::repo::{DirectoryEntry, Repo};
 use crate::repository::{DirEntry, FileEntry, ObjectId};
@@ -75,6 +76,7 @@ pub enum ConflictResolution {
 /// * `base` - Base directory ObjectId (None for newly created directories)
 /// * `dir_1` - First directory to merge
 /// * `dir_2` - Second directory to merge
+/// * `max_merge_memory` - Maximum combined file size for text merges
 ///
 /// # Returns
 /// The merged directory result with ObjectId and any conflicts encountered.
@@ -83,6 +85,7 @@ pub async fn merge_directories(
     base: Option<&ObjectId>,
     dir_1: &ObjectId,
     dir_2: &ObjectId,
+    max_merge_memory: u64,
 ) -> Result<MergeDirectoryResult> {
     // Create entry lists for all directories
     let mut base_list = if let Some(base_id) = base {
@@ -172,6 +175,7 @@ pub async fn merge_directories(
                     base.as_ref(),
                     &dir_1,
                     &dir_2,
+                    max_merge_memory,
                 ))
                 .await?;
 
@@ -202,6 +206,7 @@ pub async fn merge_directories(
                     entry_2: changing_2.clone(),
                     change_1: change_1.clone(),
                     change_2: change_2.clone(),
+                    merge_file_result: None,
                 };
 
                 let merge_result = merge_files(
@@ -211,9 +216,10 @@ pub async fn merge_directories(
                     &fe1,
                     &fe2,
                     executable,
+                    max_merge_memory,
                     context.clone(),
                 )
-                .await;
+                .await?;
 
                 match merge_result {
                     MergeFileResult::Merged { file, complete } => {
@@ -232,6 +238,7 @@ pub async fn merge_directories(
                     entry_2: changing_2.clone(),
                     change_1: change_1.clone(),
                     change_2: change_2.clone(),
+                    merge_file_result: None,
                 };
 
                 let resolution = handle_conflict(context.clone());
@@ -269,29 +276,6 @@ pub async fn merge_directories(
         },
         conflicts,
     })
-}
-
-// =============================================================================
-// merge_files (stub)
-// =============================================================================
-
-/// Attempt to merge two files (text-based 3-way merge).
-///
-/// STUB: Currently returns a conflict for all cases.
-/// Future implementation will perform actual text merge using diff3 or similar.
-#[allow(clippy::too_many_arguments)]
-pub async fn merge_files(
-    _repo: Arc<Repo>,
-    _name: &str,
-    _base: Option<&FileEntry>,
-    _file_1: &FileEntry,
-    _file_2: &FileEntry,
-    _executable: bool,
-    context: ConflictContext,
-) -> MergeFileResult {
-    // STUB: Return conflict for now
-    // TODO: Implement actual text merge
-    MergeFileResult::Conflict(Box::new(context))
 }
 
 // =============================================================================

@@ -117,6 +117,7 @@ ConflictContext {
   entry_2: ChangingDirEntry
   change_1: DirEntryChange
   change_2: DirEntryChange
+  merge_file_result: Option<MergeFileResult>
 }
 ```
 
@@ -160,6 +161,12 @@ changes_to_merge(c1: DirEntryChange, c2: DirEntryChange) -> DirChangeMerge {
     if fe1_opt {
       if fe2_opt {
         MergeFiles(base, fe1_opt.with_executable(executable), fe2_opt.with_executable(executable), executable)
+        if successful {
+          TakeFile of the merged file
+        }
+        else {
+          Conflict (with the MergeFileResult)
+        }
       }
       else {
         TakeFile(fe1_opt.with_executable(executable))
@@ -217,11 +224,46 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
   return directory_builder ObjectId and completes
 }
 
-async merge_files(repo: Repo, name: String, base: Option<FileEntry>, fe1: FileEntry, fe2: FileEntry, executable: bool, conflict: ConflictContext) -> DirectoryEntry {
-  // FIXME - to be defined later
-}
-
 async conflict(repo: Repo, name: string, conflict: ConflictContext) -> DirectoryEntry {
   // FIXME - to be defined later
+}
+```
+
+## merge_files
+
+The above algorithm calls out a case when a file has been modified in both dir1 and dir2, indicating that an attempt should be made to merge the two files.  The file merge algorithm will make use of the [content_inspector](https://crates.io/crates/content-inspector) crate to determine if a file is a "binary" file or not.  If the files to be merged are both text files, then the [merge3](https://crates.io/crates/merge3) crate will be used to perform the actual merge.
+
+The merge3 crate expects to hold all the files in memory (although the output can be streamed).  The files can be pulled into memory using Repo.read_file_chunks_with_content and organized into whatever form merge3 requires.  All 3 files (base, dir1, dir2) should be downloaded simultaneously.
+
+The output of merge3 is streamed using an iterator, and written to the repo using a [StreamingFileUploader](./upload.md).
+
+Because the files need to be loaded into memory, there is a limit to the size of files that will attempt merging.  The maximum size is specified in configuration [memory.max_merge_memory](./configuration.md).  If the base, file1, and file2 together exceed that size, then the merge will fail.
+
+When the files are download into memory, the merge should do a quick check to make sure none of the files are binary files.  This means that when calling read_file_chunks_with_content, the merge should start by loading just the first chunk from all 3 (simultaneously), check for binary, and if all are clear, then continue with downloading.
+
+The outcome of the merge can be one of the following:
+
+```
+enum MergeFileResult {
+  Merged(file_id) - successful merge
+  MergeConflict(file_id) - merged, but with conflict markers in the result
+  Binary - either base, file1, or file2 was determined to be a binary file
+  TooLarge - base, file1, and file2 together are too large to fit in memory
+}
+```
+
+And the file merge looks like this:
+
+```
+async merge_files(repo: Repo, managed_buffers, base: Option<FileEntry>, fe1: FileEntry, fe2: FileEntry) -> WithComplete<MergeFileResult> {
+  check the combined sizes of base, fe1, fe2, return TooLarge if too large
+  download one chunk all 3 files (base, fe1, fe2) simultaneously
+  if any chunk is binary, return Binary
+  continue downloading the remainders of the files into memory (into whatever form merge3 requires, probably split into lines)
+  create a StreamingFileUploader
+  call merge3
+  iterate through the merge3 results, adding them to StreamingFileUploader
+  if there are any conflict markers (or however merge3 signals that), return MergeConflict with the uplaoder's complete
+  otherwise return Merged with the uploader's complete
 }
 ```

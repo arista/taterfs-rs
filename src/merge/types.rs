@@ -170,6 +170,23 @@ pub enum DirChangeMerge {
 }
 
 // =============================================================================
+// MergeFileOutcome
+// =============================================================================
+
+/// Outcome of attempting a file merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeFileOutcome {
+    /// Successfully merged without conflicts.
+    Merged { file_id: ObjectId, size: u64 },
+    /// Merged but with conflict markers in the result.
+    MergeConflict { file_id: ObjectId, size: u64 },
+    /// One or more files are binary — cannot text-merge.
+    Binary,
+    /// Combined file sizes exceed the max_merge_memory limit.
+    TooLarge,
+}
+
+// =============================================================================
 // ConflictContext
 // =============================================================================
 
@@ -191,4 +208,6 @@ pub struct ConflictContext {
     pub change_1: DirEntryChange,
     /// Change from base to entry_2.
     pub change_2: DirEntryChange,
+    /// Result of file merge attempt, if applicable.
+    pub merge_file_result: Option<MergeFileOutcome>,
 }

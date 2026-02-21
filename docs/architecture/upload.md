@@ -60,3 +60,21 @@ async upload_directory_from_scan_events(store: FileStore, repo: Repo, path: Path
                 * Call upload_file
                 * add a FileEntry with the corresponding File and complete
                 * Call set_fingerprinted_file_info on the FileStore's cache
+
+## Streamed File Upload
+
+In some cases, the source of a file might be computed and streamed on the fly, such as when [merging files](./merge.md).  To assist with this, a helper struct should be defined:
+
+```
+StreamingFileUploader {
+  new(repo: Repo)
+  async add(ManagedBuffer)
+  async finish() -> WithComplete<FileId>
+}
+```
+
+An application would construct an instance of this, call add() to add buffers of various sizes, then call finish().  It is an error to call add() after calling finish().
+
+Calls to add() and finish() should return quickly - they don't have to wait for all the content to be uploaded, since that's handled by the Complete flag returned by WithComplete.  Flow control is handled on the application side when it acquires ManagedBuffers.
+
+The StreamingFileUploader should segment files into chunks of CHUNK_SIZES according to the same algorithm used by FileStore.get_source_chunks_with_content.  To do this, it should maintain a list of buffers that have been add()ed to it.  Once the list reaches the size of the largest CHUNK_SIZE, it should flush out a chunk of that size (possibly pieced together from multiple buffers), releasing any buffers that have been fully written.  When finish() is called, it should similarly write out the remaining content broken down by the remaining CHUNK_SIZES.

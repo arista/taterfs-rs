@@ -78,6 +78,7 @@ pub struct CacheConfig {
 #[derive(Debug, Clone)]
 pub struct MemoryConfig {
     pub max: Limit<ByteSize>,
+    pub max_merge_memory: Limit<ByteSize>,
 }
 
 /// [filestores] section - global filestore settings.

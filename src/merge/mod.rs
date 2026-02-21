@@ -1,4 +1,4 @@
-//! 3-way directory merge for taterfs-rs.
+//! 3-way directory and file merge for taterfs-rs.
 //!
 //! This module implements a 3-way merge algorithm for combining changes
 //! from two directory trees that share a common ancestor.
@@ -18,12 +18,14 @@
 //! - [`DirEntryChange`] - Represents a change between two states
 //! - [`DirChangeMerge`] - The merge action to take
 //! - [`ConflictContext`] - Information about a merge conflict
+//! - [`MergeFileOutcome`] - Outcome of a file merge attempt
 //!
 //! # Key Functions
 //!
 //! - [`to_dir_change`] - Compute the change from base to derived
 //! - [`changes_to_merge`] - Determine merge action from two changes
 //! - [`merge_directories`] - Perform the 3-way directory merge
+//! - [`merge_files`] - Perform a 3-way text file merge
 //!
 //! # Example
 //!
@@ -35,6 +37,7 @@
 //!     Some(&base_dir_id),
 //!     &dir_1_id,
 //!     &dir_2_id,
+//!     max_merge_memory,
 //! ).await?;
 //!
 //! if result.conflicts.is_empty() {
@@ -48,13 +51,16 @@ mod change_merge;
 mod dir_change;
 mod directory;
 mod error;
+mod file;
 mod types;
 
 pub use change_merge::changes_to_merge;
 pub use dir_change::to_dir_change;
 pub use directory::{
     ConflictResolution, MergeDirectoryResult, MergeFileResult, handle_conflict, merge_directories,
-    merge_files,
 };
 pub use error::{MergeError, Result};
-pub use types::{ChangingDirEntry, ConflictContext, DirChangeMerge, DirEntryChange};
+pub use file::merge_files;
+pub use types::{
+    ChangingDirEntry, ConflictContext, DirChangeMerge, DirEntryChange, MergeFileOutcome,
+};

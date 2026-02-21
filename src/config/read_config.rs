@@ -27,6 +27,7 @@ const DEFAULT_CACHE_PENDING_WRITES_MAX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const DEFAULT_CACHE_MAX_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_CACHE_MAX_OBJECT_MEMORY_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 const DEFAULT_MEMORY_MAX: u64 = 100 * 1024 * 1024; // 100MB
+const DEFAULT_MEMORY_MAX_MERGE_MEMORY: u64 = 1024 * 1024 * 1024; // 1GB
 const DEFAULT_NETWORK_MAX_CONCURRENT_REQUESTS: u32 = 40;
 const DEFAULT_NETWORK_MAX_REQUESTS_PER_SECOND: u32 = 100;
 const DEFAULT_NETWORK_MAX_READ_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024; // 100MB
@@ -287,6 +288,7 @@ fn default_config() -> Config {
         },
         memory: MemoryConfig {
             max: Limit::Value(ByteSize(DEFAULT_MEMORY_MAX)),
+            max_merge_memory: Limit::Value(ByteSize(DEFAULT_MEMORY_MAX_MERGE_MEMORY)),
         },
         filestores_config: FilestoresConfig {
             global_ignores: parse_comma_separated(DEFAULT_FILESTORES_GLOBAL_IGNORES),
@@ -393,6 +395,12 @@ fn apply_ini_to_config(config: &mut Config, ini: &Ini) -> Result<()> {
         // If not specified in this file, keep existing value
         if !matches!(max, Limit::Inherit) {
             config.memory.max = max;
+        }
+    }
+    if ini.get("memory", "max_merge_memory").is_some() {
+        let max_merge = parse_limit_bytesize(ini, "memory", "max_merge_memory")?;
+        if !matches!(max_merge, Limit::Inherit) {
+            config.memory.max_merge_memory = max_merge;
         }
     }
 
@@ -591,6 +599,10 @@ fn apply_memory_override(config: &mut Config, param: &str, value: &str) -> Resul
     match param {
         "max" => {
             config.memory.max = parse_limit_value_bytesize(value)?;
+            Ok(())
+        }
+        "max_merge_memory" => {
+            config.memory.max_merge_memory = parse_limit_value_bytesize(value)?;
             Ok(())
         }
         _ => Err(ConfigError::InvalidOverrideKey {

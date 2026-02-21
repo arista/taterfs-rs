@@ -284,6 +284,7 @@ mod tests {
             },
             memory: MemoryConfig {
                 max: Limit::Value(ByteSize(100 * 1024 * 1024)),
+                max_merge_memory: Limit::Value(ByteSize(1024 * 1024 * 1024)),
             },
             filestores_config: FilestoresConfig {
                 global_ignores: vec![".git/".to_string(), ".tfs/".to_string()],

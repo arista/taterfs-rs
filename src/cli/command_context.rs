@@ -416,7 +416,10 @@ pub async fn create_command_context(
                 .await?;
             let repo_model = RepoModel::new(repo);
             let branch_model = repo_model.get_branch(branch_name).await.map_err(|e| {
-                CommandContextError::Config(format!("failed to get branch '{}': {}", branch_name, e))
+                CommandContextError::Config(format!(
+                    "failed to get branch '{}': {}",
+                    branch_name, e
+                ))
             })?;
             match branch_model {
                 Some(bm) => Some(bm.branch.commit.clone()),
@@ -424,7 +427,7 @@ pub async fn create_command_context(
                     return Err(CommandContextError::Config(format!(
                         "branch '{}' not found",
                         branch_name
-                    )))
+                    )));
                 }
             }
         } else {
@@ -437,9 +440,10 @@ pub async fn create_command_context(
     // Step 6: Build commit metadata if required
     let commit_metadata = if requirements.require_commit_metadata {
         Some(CommitMetadata {
-            timestamp: input.commit_timestamp.clone().or_else(|| {
-                Some(Utc::now().to_rfc3339())
-            }),
+            timestamp: input
+                .commit_timestamp
+                .clone()
+                .or_else(|| Some(Utc::now().to_rfc3339())),
             author: input.commit_author.clone(),
             committer: input.commit_committer.clone(),
             message: input.commit_message.clone(),
@@ -555,7 +559,10 @@ mod tests {
         let root = PathBuf::from("/store");
 
         // cwd at root
-        assert_eq!(compute_filestore_base_path(&root, &PathBuf::from("/store")), "/");
+        assert_eq!(
+            compute_filestore_base_path(&root, &PathBuf::from("/store")),
+            "/"
+        );
 
         // cwd in subdirectory
         assert_eq!(

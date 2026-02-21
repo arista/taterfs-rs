@@ -331,11 +331,7 @@ mod tests {
     async fn test_local_chunks_cache_set_and_list() {
         let (_temp, cache) = create_test_cache();
 
-        let path_id = cache
-            .get_path_id("/data/file.bin")
-            .await
-            .unwrap()
-            .unwrap();
+        let path_id = cache.get_path_id("/data/file.bin").await.unwrap().unwrap();
 
         // Initially no chunks
         let chunks = cache.list_possible_local_chunks("abc123").await.unwrap();
@@ -361,11 +357,7 @@ mod tests {
     async fn test_local_chunks_cache_invalidate() {
         let (_temp, cache) = create_test_cache();
 
-        let path_id = cache
-            .get_path_id("/data/file.bin")
-            .await
-            .unwrap()
-            .unwrap();
+        let path_id = cache.get_path_id("/data/file.bin").await.unwrap().unwrap();
 
         // Add chunks
         let chunk = LocalChunk {
@@ -404,7 +396,10 @@ mod tests {
 
         // Build path incrementally
         let data_id = cache.get_path_entry_id(None, "data").await.unwrap();
-        let files_id = cache.get_path_entry_id(Some(data_id), "files").await.unwrap();
+        let files_id = cache
+            .get_path_entry_id(Some(data_id), "files")
+            .await
+            .unwrap();
         let test_id = cache
             .get_path_entry_id(Some(files_id), "test.bin")
             .await

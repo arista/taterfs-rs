@@ -6,7 +6,7 @@ mod list;
 mod upload_directory;
 
 pub use list::{
-    list, ListCommandArgs, ListColumnsSpec, ListError, ListFormat, ListJsonFormat, ListLongFormat,
-    ListShortFormat,
+    ListColumnsSpec, ListCommandArgs, ListError, ListFormat, ListJsonFormat, ListLongFormat,
+    ListShortFormat, list,
 };
-pub use upload_directory::{upload_directory, UploadDirectoryArgs, UploadDirectoryError};
+pub use upload_directory::{UploadDirectoryArgs, UploadDirectoryError, upload_directory};

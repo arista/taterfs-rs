@@ -6,9 +6,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tokio::sync::OnceCell;
 
-use crate::app::{
-    modify_branches, search_branches, BranchListModifications, ListModifications,
-};
+use crate::app::{BranchListModifications, ListModifications, modify_branches, search_branches};
 use crate::repo::{Repo, RepoError, SwapResult};
 use crate::repository::{Branch, ObjectId, RepoObject, Root, RootType};
 use crate::util::WithComplete;
@@ -45,9 +43,12 @@ impl RepoModel {
     /// Get the default branch model.
     pub async fn default_branch(&self) -> Result<BranchModel, RepoError> {
         let root = self.get_root().await?;
-        let branch =
-            search_branches(Arc::clone(&self.repo), &root.branches, &root.default_branch_name)
-                .await?;
+        let branch = search_branches(
+            Arc::clone(&self.repo),
+            &root.branches,
+            &root.default_branch_name,
+        )
+        .await?;
         match branch {
             Some(b) => Ok(BranchModel::new(Arc::clone(&self.repo), b)),
             None => Err(RepoError::Other(format!(

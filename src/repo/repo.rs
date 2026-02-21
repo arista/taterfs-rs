@@ -1243,10 +1243,7 @@ impl Repo {
     /// automatically fetching and expanding any `BranchesEntry` references.
     ///
     /// Returns a [`BranchList`] that can be used to iterate over all branches.
-    pub async fn list_branches(
-        self: &Arc<Self>,
-        branches_id: &ObjectId,
-    ) -> Result<BranchList> {
+    pub async fn list_branches(self: &Arc<Self>, branches_id: &ObjectId) -> Result<BranchList> {
         let branches = self.read_branches(branches_id).await?;
         Ok(BranchList::new(Arc::clone(self), branches))
     }
@@ -1258,10 +1255,7 @@ impl Repo {
     ///
     /// This is useful when you have a Directory object and want to iterate over its
     /// entries without performing another read operation.
-    pub fn list_entries_of_directory(
-        self: &Arc<Self>,
-        directory: Directory,
-    ) -> DirectoryEntryList {
+    pub fn list_entries_of_directory(self: &Arc<Self>, directory: Directory) -> DirectoryEntryList {
         DirectoryEntryList::new(Arc::clone(self), directory)
     }
 

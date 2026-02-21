@@ -23,8 +23,7 @@ pub use list_modifier::{
 };
 pub use list_search::{search_branches, search_directory, search_file};
 pub use mod_dir_tree::{
-    mod_dir_tree, DirTreeModSpec, DirTreeModSpecEntry, DirTreeModSpecEntryIter,
-    DirTreeModSpecError,
+    DirTreeModSpec, DirTreeModSpecEntry, DirTreeModSpecEntryIter, DirTreeModSpecError, mod_dir_tree,
 };
 pub use upload::{
     UploadDirectoryResult, UploadError, UploadFileResult, upload_directory, upload_file,

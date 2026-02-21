@@ -7,8 +7,8 @@
 //! pass, avoiding wasteful intermediate directory objects that would never be referenced again.
 
 use std::cmp::Ordering;
-use std::collections::btree_map;
 use std::collections::BTreeMap;
+use std::collections::btree_map;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -160,9 +160,10 @@ impl DirTreeModSpec {
                 }
                 None => {
                     // Create a new nested spec
-                    current
-                        .entries
-                        .insert(component.clone(), DirTreeModSpecEntry::Directory(DirTreeModSpec::new()));
+                    current.entries.insert(
+                        component.clone(),
+                        DirTreeModSpecEntry::Directory(DirTreeModSpec::new()),
+                    );
                 }
             }
 
@@ -340,7 +341,9 @@ async fn apply_spec_entry(
                 name: name.to_string(),
                 directory: result.result.clone(),
             };
-            builder.add(DirectoryLeaf::Dir(dir_entry), result.complete).await?;
+            builder
+                .add(DirectoryLeaf::Dir(dir_entry), result.complete)
+                .await?;
         }
     }
     Ok(())
@@ -440,7 +443,10 @@ mod tests {
 
         spec.add(Path::new("test.txt"), entry1, complete1).unwrap();
         let result = spec.add(Path::new("test.txt"), entry2, complete2);
-        assert!(matches!(result, Err(DirTreeModSpecError::OverlappingPath(_))));
+        assert!(matches!(
+            result,
+            Err(DirTreeModSpecError::OverlappingPath(_))
+        ));
     }
 
     #[test]
@@ -465,7 +471,10 @@ mod tests {
         spec.add(Path::new("foo"), entry1, complete1).unwrap();
         // Then try to add "foo/bar.txt" - should fail because "foo" is already a file
         let result = spec.add(Path::new("foo/bar.txt"), entry2, complete2);
-        assert!(matches!(result, Err(DirTreeModSpecError::OverlappingPath(_))));
+        assert!(matches!(
+            result,
+            Err(DirTreeModSpecError::OverlappingPath(_))
+        ));
     }
 
     #[test]
@@ -484,7 +493,8 @@ mod tests {
                 file: "abc".to_string(),
             }),
             Arc::clone(&complete),
-        ).unwrap();
+        )
+        .unwrap();
         spec.remove(Path::new("middle")).unwrap();
 
         // Iterator should yield in sorted order

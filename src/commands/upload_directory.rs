@@ -9,8 +9,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::app::{
-    mod_dir_tree, upload_directory as app_upload_directory, App, AppCreateFileStoreContext,
-    AppCreateRepoContext, DirTreeModSpec, DirTreeModSpecError, UploadError,
+    App, AppCreateFileStoreContext, AppCreateRepoContext, DirTreeModSpec, DirTreeModSpecError,
+    UploadError, mod_dir_tree, upload_directory as app_upload_directory,
 };
 use crate::cli::command_context::CommandContext;
 use crate::repo::{DirectoryEntry, RepoError};
@@ -133,7 +133,11 @@ pub async fn upload_directory(
 
     // Create RepoModel and update
     let repo_model = RepoModel::new(Arc::clone(&repo));
-    let max_attempts = context.config.config().repositories_config.max_root_swap_attempts;
+    let max_attempts = context
+        .config
+        .config()
+        .repositories_config
+        .max_root_swap_attempts;
 
     let new_repo_model = repo_model
         .update(

@@ -788,7 +788,9 @@ impl<'a> DownloadActions for DownloadToFileStoreActions<'a> {
         executable: bool,
         object_id: &ObjectId,
     ) -> Result<WithComplete<()>> {
-        self.dest.set_executable(path, executable, object_id).await?;
+        self.dest
+            .set_executable(path, executable, object_id)
+            .await?;
         Ok(WithComplete::new(
             (),
             Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
@@ -1012,7 +1014,9 @@ impl<'a> DownloadActions for DownloadWithStageActions<'a> {
         executable: bool,
         object_id: &ObjectId,
     ) -> Result<WithComplete<()>> {
-        self.dest.set_executable(path, executable, object_id).await?;
+        self.dest
+            .set_executable(path, executable, object_id)
+            .await?;
         Ok(WithComplete::new(
             (),
             Arc::new(crate::util::NoopComplete) as Arc<dyn Complete>,
@@ -1080,9 +1084,14 @@ pub async fn download_directory(
     if dry_run {
         let callback = on_action.unwrap_or_else(|| Arc::new(|_: &str| {}));
         let actions = VerboseDownloadActions::new(None, callback);
-        let download =
-            DownloadRepoToStore::new(Arc::clone(&repo), directory_id.clone(), store, path, &actions)
-                .await?;
+        let download = DownloadRepoToStore::new(
+            Arc::clone(&repo),
+            directory_id.clone(),
+            store,
+            path,
+            &actions,
+        )
+        .await?;
         return download.download_repo_to_store().await;
     }
 
@@ -1101,7 +1110,8 @@ pub async fn download_directory(
                 managed_buffers.clone(),
             );
             let phase1_result = if let Some(ref cb) = on_action {
-                let phase1_actions = VerboseDownloadActions::new(Some(&phase1_base), Arc::clone(cb));
+                let phase1_actions =
+                    VerboseDownloadActions::new(Some(&phase1_base), Arc::clone(cb));
                 let download = DownloadRepoToStore::new(
                     Arc::clone(&repo),
                     directory_id.clone(),
@@ -1138,7 +1148,8 @@ pub async fn download_directory(
                 managed_buffers,
             );
             let phase2_result = if let Some(ref cb) = on_action {
-                let phase2_actions = VerboseDownloadActions::new(Some(&phase2_base), Arc::clone(cb));
+                let phase2_actions =
+                    VerboseDownloadActions::new(Some(&phase2_base), Arc::clone(cb));
                 let download = DownloadRepoToStore::new(
                     repo,
                     directory_id.clone(),

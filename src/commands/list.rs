@@ -12,7 +12,9 @@ use thiserror::Error;
 use crate::app::{App, AppCreateRepoContext};
 use crate::cli::CommandContext;
 use crate::repo::RepoError;
-use crate::repo_model::{CommitModel, DirectoryModel, EntryModel, ResolvePathError, ResolvePathResult};
+use crate::repo_model::{
+    CommitModel, DirectoryModel, EntryModel, ResolvePathError, ResolvePathResult,
+};
 use crate::repository::ObjectId;
 
 // =============================================================================
@@ -161,7 +163,13 @@ impl ListEntry {
     }
 
     fn is_executable(&self) -> bool {
-        matches!(self, ListEntry::File { executable: true, .. })
+        matches!(
+            self,
+            ListEntry::File {
+                executable: true,
+                ..
+            }
+        )
     }
 }
 
@@ -170,7 +178,11 @@ impl ListEntry {
 // =============================================================================
 
 /// Execute the list command.
-pub async fn list(args: ListCommandArgs, context: &CommandContext, app: &App) -> Result<(), ListError> {
+pub async fn list(
+    args: ListCommandArgs,
+    context: &CommandContext,
+    app: &App,
+) -> Result<(), ListError> {
     // Get required context fields
     let repo_spec = context
         .repository_spec
@@ -193,9 +205,7 @@ pub async fn list(args: ListCommandArgs, context: &CommandContext, app: &App) ->
         ResolvePathResult::None => {
             return Err(ListError::PathNotFound(args.path));
         }
-        ResolvePathResult::Root => {
-            collect_directory_entries(&root.directory()).await?
-        }
+        ResolvePathResult::Root => collect_directory_entries(&root.directory()).await?,
         ResolvePathResult::Directory(dir_entry) => {
             collect_directory_entries(&dir_entry.directory()).await?
         }
@@ -264,8 +274,12 @@ fn format_long(entries: &[ListEntry], include_id: bool, classify: bool) -> Resul
     for entry in entries {
         let type_char = match entry {
             ListEntry::Directory { .. } => 'd',
-            ListEntry::File { executable: true, .. } => 'x',
-            ListEntry::File { executable: false, .. } => '-',
+            ListEntry::File {
+                executable: true, ..
+            } => 'x',
+            ListEntry::File {
+                executable: false, ..
+            } => '-',
         };
 
         let id_str = if include_id {
@@ -284,7 +298,11 @@ fn format_long(entries: &[ListEntry], include_id: bool, classify: bool) -> Resul
 
         let formatted_name = format_name(entry, classify);
 
-        writeln!(handle, "{}{} {} {}", type_char, id_str, size_str, formatted_name)?;
+        writeln!(
+            handle,
+            "{}{} {} {}",
+            type_char, id_str, size_str, formatted_name
+        )?;
     }
 
     Ok(())
@@ -295,7 +313,11 @@ fn format_long(entries: &[ListEntry], include_id: bool, classify: bool) -> Resul
 // =============================================================================
 
 /// Format entries in short format.
-fn format_short(entries: &[ListEntry], fmt: &ListShortFormat, classify: bool) -> Result<(), ListError> {
+fn format_short(
+    entries: &[ListEntry],
+    fmt: &ListShortFormat,
+    classify: bool,
+) -> Result<(), ListError> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -416,13 +438,22 @@ fn format_json(entries: &[ListEntry], include_id: bool) -> Result<(), ListError>
 
     for entry in entries {
         let json_str = match entry {
-            ListEntry::File { name, size, executable, id } => {
+            ListEntry::File {
+                name,
+                size,
+                executable,
+                id,
+            } => {
                 let json = ListEntryFileJson {
                     type_tag: "File".to_string(),
                     size: *size,
                     executable: if *executable { Some(true) } else { None },
                     name: name.clone(),
-                    id: if include_id { Some(id.to_string()) } else { None },
+                    id: if include_id {
+                        Some(id.to_string())
+                    } else {
+                        None
+                    },
                 };
                 serde_json::to_string(&json).unwrap_or_default()
             }
@@ -430,7 +461,11 @@ fn format_json(entries: &[ListEntry], include_id: bool) -> Result<(), ListError>
                 let json = ListEntryDirectoryJson {
                     type_tag: "Directory".to_string(),
                     name: name.clone(),
-                    id: if include_id { Some(id.to_string()) } else { None },
+                    id: if include_id {
+                        Some(id.to_string())
+                    } else {
+                        None
+                    },
                 };
                 serde_json::to_string(&json).unwrap_or_default()
             }
@@ -455,12 +490,16 @@ fn format_name(entry: &ListEntry, classify: bool) -> String {
             let suffix = if classify { "/" } else { "" };
             (colored, suffix)
         }
-        ListEntry::File { executable: true, .. } => {
+        ListEntry::File {
+            executable: true, ..
+        } => {
             let colored = name.with(Color::Green).to_string();
             let suffix = if classify { "*" } else { "" };
             (colored, suffix)
         }
-        ListEntry::File { executable: false, .. } => {
+        ListEntry::File {
+            executable: false, ..
+        } => {
             // Regular files have no color (default)
             (name, "")
         }
@@ -494,7 +533,33 @@ fn display_width(entry: &ListEntry, classify: bool) -> usize {
 /// Escapes special characters that would need quoting in a shell.
 fn shell_escape(s: &str) -> String {
     let needs_escape = s.chars().any(|c| {
-        matches!(c, ' ' | '\t' | '\n' | '\r' | '\\' | '\'' | '"' | '`' | '$' | '!' | '*' | '?' | '[' | ']' | '{' | '}' | '|' | '&' | ';' | '<' | '>' | '(' | ')' | '#' | '~')
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '\r'
+                | '\\'
+                | '\''
+                | '"'
+                | '`'
+                | '$'
+                | '!'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '|'
+                | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '#'
+                | '~'
+        )
     });
 
     if !needs_escape {

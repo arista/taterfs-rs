@@ -582,8 +582,12 @@ pub trait FileDest: Send + Sync {
     /// update the file store's cache after the executable bit is changed.
     ///
     /// Returns an error if the path does not point to a file.
-    async fn set_executable(&self, path: &Path, executable: bool, object_id: &ObjectId)
-        -> Result<()>;
+    async fn set_executable(
+        &self,
+        path: &Path,
+        executable: bool,
+        object_id: &ObjectId,
+    ) -> Result<()>;
 
     /// Create a staging area for downloading file chunks.
     ///

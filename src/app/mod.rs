@@ -26,5 +26,6 @@ pub use mod_dir_tree::{
     DirTreeModSpec, DirTreeModSpecEntry, DirTreeModSpecEntryIter, DirTreeModSpecError, mod_dir_tree,
 };
 pub use upload::{
-    UploadDirectoryResult, UploadError, UploadFileResult, upload_directory, upload_file,
+    StreamingFileUploader, UploadDirectoryResult, UploadError, UploadFileResult, upload_directory,
+    upload_file,
 };

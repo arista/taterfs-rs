@@ -6,8 +6,8 @@ use clap::{Args, Subcommand};
 
 use crate::app::{App, AppCreateFileStoreContext};
 use crate::cli::{
-    create_command_context, CliError, CommandContextRequirements, GlobalArgs, InputSource,
-    OutputSink, Result,
+    CliError, CommandContextRequirements, GlobalArgs, InputSource, OutputSink, Result,
+    create_command_context,
 };
 use crate::file_store::ScanEvent;
 

@@ -115,7 +115,9 @@ impl FsFileStore {
                     fingerprint,
                     object_id: object_id.clone(),
                 };
-                self.cache.set_fingerprinted_file_info(path_id, &info).await?;
+                self.cache
+                    .set_fingerprinted_file_info(path_id, &info)
+                    .await?;
             }
         }
 
@@ -1614,7 +1616,9 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let test_object_id = "test_object_id".to_string();
-        let result = dest.set_executable(Path::new("missing"), true, &test_object_id).await;
+        let result = dest
+            .set_executable(Path::new("missing"), true, &test_object_id)
+            .await;
         assert!(matches!(result, Err(Error::NotFound(_))));
     }
 
@@ -1627,7 +1631,9 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let test_object_id = "test_object_id".to_string();
-        let result = dest.set_executable(Path::new("dir"), true, &test_object_id).await;
+        let result = dest
+            .set_executable(Path::new("dir"), true, &test_object_id)
+            .await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 
@@ -1667,7 +1673,10 @@ mod tests {
         let state = create_test_sync_state();
 
         // Set next state
-        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager
+            .set_next_sync_state(Some(&state))
+            .await
+            .unwrap();
 
         // Verify it's persisted
         let retrieved = sync_manager.get_next_sync_state().await.unwrap();
@@ -1690,7 +1699,10 @@ mod tests {
         let state = create_test_sync_state();
 
         // Set and commit next state
-        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager
+            .set_next_sync_state(Some(&state))
+            .await
+            .unwrap();
         sync_manager.commit_next_sync_state().await.unwrap();
 
         // Current state should now be set
@@ -1713,7 +1725,10 @@ mod tests {
         let state = create_test_sync_state();
 
         // Set then clear next state
-        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager
+            .set_next_sync_state(Some(&state))
+            .await
+            .unwrap();
         sync_manager.set_next_sync_state(None).await.unwrap();
 
         // Next state should be none
@@ -1737,7 +1752,10 @@ mod tests {
         let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
 
         let state = create_test_sync_state();
-        sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+        sync_manager
+            .set_next_sync_state(Some(&state))
+            .await
+            .unwrap();
 
         // Read the file directly and verify it's pretty-printed
         let path = temp.path().join(".tfs/next_sync_state.json");
@@ -1759,7 +1777,10 @@ mod tests {
         {
             let store = create_store(&temp);
             let sync_manager: &dyn StoreSyncState = store.get_sync_state_manager().unwrap();
-            sync_manager.set_next_sync_state(Some(&state)).await.unwrap();
+            sync_manager
+                .set_next_sync_state(Some(&state))
+                .await
+                .unwrap();
             sync_manager.commit_next_sync_state().await.unwrap();
         }
 

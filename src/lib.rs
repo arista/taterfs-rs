@@ -8,6 +8,7 @@ pub mod commands;
 pub mod config;
 pub mod download;
 pub mod file_store;
+pub mod merge;
 pub mod repo;
 pub mod repo_model;
 pub mod repository;

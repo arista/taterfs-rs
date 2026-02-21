@@ -8,10 +8,12 @@ use sha2::{Digest, Sha256};
 
 use std::path::{Path, PathBuf};
 
-use crate::app::{upload_directory, upload_file, App, AppCreateFileStoreContext, AppCreateRepoContext};
+use crate::app::{
+    App, AppCreateFileStoreContext, AppCreateRepoContext, upload_directory, upload_file,
+};
 use crate::cli::{
-    create_command_context, CliError, CommandContextRequirements, GlobalArgs, InputSource,
-    OutputSink, Result,
+    CliError, CommandContextRequirements, GlobalArgs, InputSource, OutputSink, Result,
+    create_command_context,
 };
 use crate::download::ActionCallback;
 use crate::repo::RepoInitialize;
@@ -756,10 +758,7 @@ impl DownloadDirectoryArgs {
         Ok(())
     }
 
-    fn create_action_callback(
-        &self,
-        ctx: &crate::cli::CommandContext,
-    ) -> Result<ActionCallback> {
+    fn create_action_callback(&self, ctx: &crate::cli::CommandContext) -> Result<ActionCallback> {
         use std::io::Write;
         use std::sync::Mutex;
 

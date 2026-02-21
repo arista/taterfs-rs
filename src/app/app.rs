@@ -11,9 +11,9 @@ use thiserror::Error;
 use crate::app::CapacityManagers;
 use crate::caches::{
     CacheDb, CachingConfig, CachingKeyValueDb, CachingObjectCacheDb, DbFileStoreCaches,
-    DbLocalChunksCache, DbRepoCaches, FileStoreCaches, FsObjectCacheDb, KeyValueDb,
-    LmdbKeyValueDb, LocalChunksCache, NoopCaches, NoopFileStoreCaches, NoopLocalChunksCache,
-    ObjectCacheDb, RepoCaches,
+    DbLocalChunksCache, DbRepoCaches, FileStoreCaches, FsObjectCacheDb, KeyValueDb, LmdbKeyValueDb,
+    LocalChunksCache, NoopCaches, NoopFileStoreCaches, NoopLocalChunksCache, ObjectCacheDb,
+    RepoCaches,
 };
 use crate::config::{ConfigHelper, ConfigSource, read_config};
 use crate::file_store::{
@@ -173,53 +173,52 @@ impl App {
 
         // Create cache infrastructure
         let cache_config = config.config().cache.clone();
-        let (repo_caches, file_store_caches, local_chunks_cache, caching_db) =
-            if cache_config.no_cache {
-                // Caching disabled - use no-op implementations
-                let repo_caches: Arc<dyn RepoCaches> = Arc::new(NoopCaches);
-                let file_store_caches: Arc<dyn FileStoreCaches> = Arc::new(NoopFileStoreCaches);
-                let local_chunks_cache: Arc<dyn LocalChunksCache> =
-                    Arc::new(NoopLocalChunksCache);
-                (repo_caches, file_store_caches, local_chunks_cache, None)
-            } else {
-                // Create LMDB-backed cache for key-value operations
-                let lmdb = LmdbKeyValueDb::new(&cache_config.path)
-                    .map_err(|e| AppError::CacheInit(e.to_string()))?;
+        let (repo_caches, file_store_caches, local_chunks_cache, caching_db) = if cache_config
+            .no_cache
+        {
+            // Caching disabled - use no-op implementations
+            let repo_caches: Arc<dyn RepoCaches> = Arc::new(NoopCaches);
+            let file_store_caches: Arc<dyn FileStoreCaches> = Arc::new(NoopFileStoreCaches);
+            let local_chunks_cache: Arc<dyn LocalChunksCache> = Arc::new(NoopLocalChunksCache);
+            (repo_caches, file_store_caches, local_chunks_cache, None)
+        } else {
+            // Create LMDB-backed cache for key-value operations
+            let lmdb = LmdbKeyValueDb::new(&cache_config.path)
+                .map_err(|e| AppError::CacheInit(e.to_string()))?;
 
-                let caching_config = CachingConfig {
-                    flush_period_ms: cache_config.pending_writes_flush_period_ms,
-                    max_pending_count: cache_config.pending_writes_max_count,
-                    max_pending_size: cache_config.pending_writes_max_size.0 as usize,
-                    max_cache_size: cache_config.max_memory_size.0 as usize,
-                };
-
-                let caching_db = Arc::new(CachingKeyValueDb::new(Arc::new(lmdb), caching_config));
-
-                // Create filesystem-backed object cache with in-memory LRU caching
-                let fs_object_cache = Arc::new(FsObjectCacheDb::new(&cache_config.path));
-                let object_cache: Arc<dyn ObjectCacheDb> = Arc::new(CachingObjectCacheDb::new(
-                    fs_object_cache,
-                    cache_config.max_object_memory_size.0 as usize,
-                ));
-
-                let cache_db = Arc::new(CacheDb::new(
-                    caching_db.clone() as Arc<dyn KeyValueDb>,
-                    object_cache,
-                ));
-
-                let repo_caches: Arc<dyn RepoCaches> =
-                    Arc::new(DbRepoCaches::new(cache_db.clone()));
-                let file_store_caches: Arc<dyn FileStoreCaches> =
-                    Arc::new(DbFileStoreCaches::new(cache_db.clone()));
-                let local_chunks_cache: Arc<dyn LocalChunksCache> =
-                    Arc::new(DbLocalChunksCache::new(cache_db));
-                (
-                    repo_caches,
-                    file_store_caches,
-                    local_chunks_cache,
-                    Some(caching_db),
-                )
+            let caching_config = CachingConfig {
+                flush_period_ms: cache_config.pending_writes_flush_period_ms,
+                max_pending_count: cache_config.pending_writes_max_count,
+                max_pending_size: cache_config.pending_writes_max_size.0 as usize,
+                max_cache_size: cache_config.max_memory_size.0 as usize,
             };
+
+            let caching_db = Arc::new(CachingKeyValueDb::new(Arc::new(lmdb), caching_config));
+
+            // Create filesystem-backed object cache with in-memory LRU caching
+            let fs_object_cache = Arc::new(FsObjectCacheDb::new(&cache_config.path));
+            let object_cache: Arc<dyn ObjectCacheDb> = Arc::new(CachingObjectCacheDb::new(
+                fs_object_cache,
+                cache_config.max_object_memory_size.0 as usize,
+            ));
+
+            let cache_db = Arc::new(CacheDb::new(
+                caching_db.clone() as Arc<dyn KeyValueDb>,
+                object_cache,
+            ));
+
+            let repo_caches: Arc<dyn RepoCaches> = Arc::new(DbRepoCaches::new(cache_db.clone()));
+            let file_store_caches: Arc<dyn FileStoreCaches> =
+                Arc::new(DbFileStoreCaches::new(cache_db.clone()));
+            let local_chunks_cache: Arc<dyn LocalChunksCache> =
+                Arc::new(DbLocalChunksCache::new(cache_db));
+            (
+                repo_caches,
+                file_store_caches,
+                local_chunks_cache,
+                Some(caching_db),
+            )
+        };
 
         Ok(Self {
             config,

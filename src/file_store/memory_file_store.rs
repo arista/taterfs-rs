@@ -1663,7 +1663,9 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let test_object_id = "test_object_id".to_string();
-        let result = dest.set_executable(Path::new("missing"), true, &test_object_id).await;
+        let result = dest
+            .set_executable(Path::new("missing"), true, &test_object_id)
+            .await;
         assert!(matches!(result, Err(Error::NotFound(_))));
     }
 
@@ -1675,7 +1677,9 @@ mod tests {
         let dest: &dyn crate::file_store::FileDest = store.get_dest().unwrap();
 
         let test_object_id = "test_object_id".to_string();
-        let result = dest.set_executable(Path::new("dir"), true, &test_object_id).await;
+        let result = dest
+            .set_executable(Path::new("dir"), true, &test_object_id)
+            .await;
         assert!(matches!(result, Err(Error::NotAFile(_))));
     }
 }

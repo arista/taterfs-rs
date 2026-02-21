@@ -6,35 +6,37 @@ Performing a 3-way directory merge is a key element in combining changes from tw
 
 A DirChange is a change from an entry in the base to the corresponding entry in dir (dir1 or dir2).  The entry and change are represented as:
 
+Note: `FileEntry` refers to the struct from repo_objects.rs (name, size, executable, file ObjectId). In these enums, `name` comes from the zipper iteration context.
+
 ```
 enum ChangingDirEntry {
   None
-  File(f: ObjectId, executable: bool)
+  File(FileEntry)
   Directory(d: ObjectId)
 }
 
 enum DirEntryChange {
   Unchanged
-  FileCreated(f, executable)
-  FileChanged(base, Option<f>, Option<executable>) - Option indicates which, or both, changed
-  FileChangedToDirectory(f, d)
+  FileCreated(FileEntry)
+  FileChanged(base: FileEntry, Option<FileEntry>, Option<executable>) - Options indicate content change and/or executable change
+  FileChangedToDirectory(base: FileEntry, d: ObjectId)
   FileRemoved
-  DirectoryCreated(d)
-  DirectoryChanged(d1, d2)
-  DirectoryChangedToFile(d, f, executable)
+  DirectoryCreated(d: ObjectId)
+  DirectoryChanged(base: ObjectId, d: ObjectId)
+  DirectoryChangedToFile(base: ObjectId, FileEntry)
   DirectoryRemoved
 }
 
 impl DirEntryChange {
-  new_directory() -> Option<directory ObjectId> {
-    FileChangedToDirectory(d) => d
+  new_directory() -> Option<ObjectId> {
+    FileChangedToDirectory(_, d) => d
     DirectoryCreated(d) => d
     _ => None
   }
 
-  new_file() -> Option<file ObjectId, executable> {
-    FileCreated(f, executable) -> f, executable
-    DirectoryChangedToFile(d, f, executable) -> f, executable
+  new_file() -> Option<FileEntry> {
+    FileCreated(fe) -> fe
+    DirectoryChangedToFile(_, fe) -> fe
     _ => None
   }
 
@@ -51,34 +53,34 @@ to_dir_change(e1: ChangingDirEntry, e2: ChangingDirEntry) -> DirEntryChange {
   e1 {
     None -> e2 {
       None -> error
-      File(f, executable) -> FileCreated(f, executable)
+      File(fe) -> FileCreated(fe)
       Directory(d) -> DirectoryCreated(d)
     }
-    File(f1, executable1) -> {
+    File(fe1) -> e2 {
       None -> FileRemoved
-      File(f2, executable2) -> {
-        if f1 == f2 {
-          if executable1 == executable2 {
+      File(fe2) -> {
+        if fe1.file == fe2.file {
+          if fe1.executable == fe2.executable {
             Unchanged
           }
           else {
-            FileChanged(f1, None, executable2)
+            FileChanged(fe1, None, fe2.executable)
           }
         }
         else {
-          if executable1 == executable2 {
-            FileChanged(f1, f2, None)
+          if fe1.executable == fe2.executable {
+            FileChanged(fe1, fe2, None)
           }
           else {
-            FileChanged(f1, f2, executable2)
+            FileChanged(fe1, fe2, fe2.executable)
           }
         }
       }
-      Directory(d) -> FileChangedToDirectory(d)
+      Directory(d) -> FileChangedToDirectory(fe1, d)
     }
-    Directory(d1) -> {
+    Directory(d1) -> e2 {
       None -> DirectoryRemoved
-      File(f, executable) -> DirectoryChangedToFile(f, executable)
+      File(fe) -> DirectoryChangedToFile(d1, fe)
       Directory(d2) -> {
         if d1 == d2 {
           Unchanged
@@ -102,13 +104,14 @@ enum DirChangeMerge {
   Take1 // take entry 1
   Take2 // take entry 2
   Remove // remove entry
-  MergeDirectories(Option<base>, d1, d2) // recursively merge directories
-  MergeFiles(Option<base>, f1, f2, executable) // attempt to merge files
-  TakeFile(f, executable) // take a file changed from one and executable changed from the other
+  MergeDirectories(Option<ObjectId>, d1: ObjectId, d2: ObjectId) // recursively merge directories
+  MergeFiles(Option<FileEntry>, fe1: FileEntry, fe2: FileEntry, executable: bool) // attempt to merge files
+  TakeFile(FileEntry) // take a file (possibly with merged executable from both sides)
   Conflict // conflict that can't be auto-reconciled
 }
 
 ConflictContext {
+  name: String
   base: ChangingDirEntry
   entry_1: ChangingDirEntry
   entry_2: ChangingDirEntry
@@ -138,48 +141,50 @@ changes_to_merge(c1: DirEntryChange, c2: DirEntryChange) -> DirChangeMerge {
   if c1.is_removed() && c2.is_removed {
     Remove
   }
-  
+
   // If both directories changed, but not in the same way, merge them
-  if c1 == DirectoryChanged(b1, d1) && c2 == DirectoryChanged(b2, d2) {
-    MergeDirectories(b1, d1, d2)
+  if c1 == DirectoryChanged(b, d1) && c2 == DirectoryChanged(_, d2) {
+    MergeDirectories(b, d1, d2)
   }
 
   // If both created a new directory, treat as a merge with no base
-  if c1.new_directory()->d1 && c2.new_directory->d2 {
+  if c1.new_directory()->d1 && c2.new_directory()->d2 {
     MergeDirectories(None, d1, d2)
   }
 
   // If both files changed, merge them
-  if c1 == FileChanged(b1, f1, e1) && c2 == FileChanged(b2, f2, e2) {
-    executable = e1 || e2 || base executable
-    if f1 {
-      if f2 {
-        MergeFiles(b1, f1, f2, executable)
+  // c1 = FileChanged(base1, Option<fe1>, Option<e1>)
+  // c2 = FileChanged(base2, Option<fe2>, Option<e2>)
+  if c1 == FileChanged(base, fe1_opt, e1_opt) && c2 == FileChanged(_, fe2_opt, e2_opt) {
+    executable = e1_opt || e2_opt || base.executable  // first available
+    if fe1_opt {
+      if fe2_opt {
+        MergeFiles(base, fe1_opt.with_executable(executable), fe2_opt.with_executable(executable), executable)
       }
       else {
-        TakeFile(f1, executable)
+        TakeFile(fe1_opt.with_executable(executable))
       }
     }
     else {
-      if f2 {
-        TakeFile(f2, executable)
+      if fe2_opt {
+        TakeFile(fe2_opt.with_executable(executable))
       }
       else {
-        TakeFile(base, executable)
+        TakeFile(base.with_executable(executable))
       }
     }
   }
 
   // If both created a new file, treat as a merge with no base
-  if c1.new_file()->d1,e1 && c2.new_file->d2,e2 {
-    if e1 == e2 {
-      MergeFiles(None, f1, f2, e1)
+  if c1.new_file()->fe1 && c2.new_file()->fe2 {
+    if fe1.executable == fe2.executable {
+      MergeFiles(None, fe1, fe2, fe1.executable)
     }
     else {
       Conflict
     }
   }
-  
+
   // All other cases are treated as conflicts
   Conflict
 }
@@ -201,10 +206,10 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
       TakeEither => add entry_1 to directory_builder
       Take1 => add entry_1 to directory_builder
       Take2 => add entry_2 to directory_builder
-      TakeFile => add file and executable to directory_builder
+      TakeFile(fe) => add fe (with name) to directory_builder
       Remove => skip this entry
       MergeDirectories(b, d1, d2) => recursively call merge_directories(repo, b, d1, d2), add to directory_builder and completes
-      MergeFiles(b, f1, f2, e) => call merge_files, add to directory_builder and completes
+      MergeFiles(b, fe1, fe2, e) => call merge_files(repo, name, b, fe1, fe2, e, conflict_context), add to directory_builder and completes
       Conflict => call conflict
     }
   }
@@ -212,7 +217,7 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
   return directory_builder ObjectId and completes
 }
 
-async merge_files(repo: Repo, name: string, base: Option<file ObjectId> , file_1: ObjectId, file_2: ObjectId, executable: bool, conflict: ConflictContext) -> DirectoryEntry {
+async merge_files(repo: Repo, name: String, base: Option<FileEntry>, fe1: FileEntry, fe2: FileEntry, executable: bool, conflict: ConflictContext) -> DirectoryEntry {
   // FIXME - to be defined later
 }
 

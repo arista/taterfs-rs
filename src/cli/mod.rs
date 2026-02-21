@@ -11,8 +11,8 @@ use crate::app::{App, AppError};
 
 pub use args::{GlobalArgs, InputSource, OutputSink};
 pub use command_context::{
-    create_command_context, CommandContext, CommandContextError, CommandContextInput,
-    CommandContextRequirements,
+    CommandContext, CommandContextError, CommandContextInput, CommandContextRequirements,
+    create_command_context,
 };
 
 // =============================================================================
@@ -177,9 +177,7 @@ impl Cli {
                     Command::UploadDirectory {
                         filestore_path,
                         repo_path,
-                    } => {
-                        run_upload_directory(app, &global, filestore_path, repo_path).await
-                    }
+                    } => run_upload_directory(app, &global, filestore_path, repo_path).await,
                     Command::Repo { command } => command.run(app, &global).await,
                     Command::FileStore { command } => command.run(app, &global).await,
                     Command::KeyValueCache { command } => command.run(app, &global).await,
@@ -224,7 +222,10 @@ async fn run_upload_directory(
 
     // Output the result
     if context.json {
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
     } else {
         println!("{}", result);
     }
@@ -283,7 +284,10 @@ async fn run_ls(
 
     // Build command args
     let args = crate::commands::ListCommandArgs {
-        path: context.repository_path.clone().unwrap_or_else(|| "/".to_string()),
+        path: context
+            .repository_path
+            .clone()
+            .unwrap_or_else(|| "/".to_string()),
         format,
         classify_format: classify,
     };

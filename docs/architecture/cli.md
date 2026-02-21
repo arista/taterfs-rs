@@ -54,6 +54,13 @@ Some commands require a branch:
 ```
 If not specified, the branch defaults to the repo's default branch
 
+Some commands require a commit:
+
+```
+--commit={full commit id}
+```
+If not specified, the commit defaults to the branch's commit
+
 Some commands make use of commit metadata to associate with a commit that the command will create.  All of these are optional and default to None, except for timestamp, which defaults to the current time in ISO 8601 format.
 
 ```
@@ -75,6 +82,7 @@ CommandContextInput {
   json: Option<bool>
   no_cache: Option<bool>
   branch: Option<string>
+  commit: Option<ObjectId>
   repository_spec: Option<string>
   file_store_spec: Option<string>
   commit_timestamp: Option<string>
@@ -85,6 +93,7 @@ CommandContextInput {
 
 CommandContextRequirements {
   require_branch: bool
+  require_commit: bool
   require_repository: bool
   require_repository_path: bool
   require_file_store: bool
@@ -97,6 +106,7 @@ CommandContext {
   json: bool
   no_cache: bool
   branch: Option<string>
+  commit: Option<ObjectId>
   repository_spec: Option<string>
   repository_path: Option<string>
   file_store_spec: Option<string>
@@ -108,6 +118,18 @@ async create_command_context(input: CommandContextInput, requirements: CommandCo
 ```
 
 ## CLI top-level commands
+
+
+```
+tfs ls {repo path}
+  [-l  long format]
+  [-1  force single column]
+  [-x  multi-column with horizontal sort]
+  [-w {cols}  manually specify screen width (defaults to terminal width)]
+  [-F  enable classify_format]
+```
+Call the [list_command](./commands.md).  Default is to use short format, with multi-column vertical sort, with the number of columns determined by the terminal width.  The --json flag switches to JSON format (which is actually jsonl in this case).
+
 
 ```
 tfs upload-directory {filestore path} {repo path}

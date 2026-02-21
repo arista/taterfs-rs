@@ -16,8 +16,7 @@ enum ChangingDirEntry {
 enum DirEntryChange {
   Unchanged
   FileCreated(f, executable)
-  FileChanged(base, f, executable)
-  FileExecutableChanged(f, executable)
+  FileChanged(base, Option<f>, Option<executable>) - Option indicates which, or both, changed
   FileChangedToDirectory(f, d)
   FileRemoved
   DirectoryCreated(d)
@@ -63,11 +62,16 @@ to_dir_change(e1: ChangingDirEntry, e2: ChangingDirEntry) -> DirEntryChange {
             Unchanged
           }
           else {
-            FileExecutableChanged(f1, executable2)
+            FileChanged(f1, None, executable2)
           }
         }
         else {
-          FileChanged(f1, f2, executable2)
+          if executable1 == executable2 {
+            FileChanged(f1, f2, None)
+          }
+          else {
+            FileChanged(f1, f2, executable2)
+          }
         }
       }
       Directory(d) -> FileChangedToDirectory(d)
@@ -100,6 +104,7 @@ enum DirChangeMerge {
   Remove // remove entry
   MergeDirectories(Option<base>, d1, d2) // recursively merge directories
   MergeFiles(Option<base>, f1, f2, executable) // attempt to merge files
+  TakeFile(f, executable) // take a file changed from one and executable changed from the other
   Conflict // conflict that can't be auto-reconciled
 }
 
@@ -144,13 +149,24 @@ changes_to_merge(c1: DirEntryChange, c2: DirEntryChange) -> DirChangeMerge {
     MergeDirectories(None, d1, d2)
   }
 
-  // If both files changed, but not in the same way, merge them
+  // If both files changed, merge them
   if c1 == FileChanged(b1, f1, e1) && c2 == FileChanged(b2, f2, e2) {
-    if e1 == e2 {
-      MergeFiles(b1, f1, f2, e1)
+    executable = e1 || e2 || base executable
+    if f1 {
+      if f2 {
+        MergeFiles(b1, f1, f2, executable)
+      }
+      else {
+        TakeFile(f1, executable)
+      }
     }
     else {
-      Conflict
+      if f2 {
+        TakeFile(f2, executable)
+      }
+      else {
+        TakeFile(base, executable)
+      }
     }
   }
 
@@ -185,6 +201,7 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
       TakeEither => add entry_1 to directory_builder
       Take1 => add entry_1 to directory_builder
       Take2 => add entry_2 to directory_builder
+      TakeFile => add file and executable to directory_builder
       Remove => skip this entry
       MergeDirectories(b, d1, d2) => recursively call merge_directories(repo, b, d1, d2), add to directory_builder and completes
       MergeFiles(b, f1, f2, e) => call merge_files, add to directory_builder and completes
@@ -195,7 +212,7 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
   return directory_builder ObjectId and completes
 }
 
-async merge_files(repo: Repo, name: string, base: Option<file ObjectId> , file_1: ObjectId, file_2: ObjectId, conflict: ConflictContext) -> DirectoryEntry {
+async merge_files(repo: Repo, name: string, base: Option<file ObjectId> , file_1: ObjectId, file_2: ObjectId, executable: bool, conflict: ConflictContext) -> DirectoryEntry {
   // FIXME - to be defined later
 }
 

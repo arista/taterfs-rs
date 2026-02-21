@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Implement ls in [cli.md](/docs/architecture/cli.md).  This involves a change to the command context for specifying a commit.  Also involves a new "list" command.
+Look at [merge](./docs/architecture/merge.md), implement the functions and changes there.  Start a new directory under src/merge/merge.rs to hold this.
 
 ## Planned Features
 

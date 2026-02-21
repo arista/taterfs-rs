@@ -102,6 +102,14 @@ enum DirChangeMerge {
   MergeFiles(Option<base>, f1, f2, executable) // attempt to merge files
   Conflict // conflict that can't be auto-reconciled
 }
+
+ConflictContext {
+  base: ChangingDirEntry
+  entry_1: ChangingDirEntry
+  entry_2: ChangingDirEntry
+  change_1: DirEntryChange
+  change_2: DirEntryChange
+}
 ```
 
 The algorithm for determining the merge:
@@ -158,5 +166,40 @@ changes_to_merge(c1: DirEntryChange, c2: DirEntryChange) -> DirChangeMerge {
   
   // All other cases are treated as conflicts
   Conflict
+}
+```
+
+## merge_directories
+
+With the above defined, the merge_directories function looks something like this:
+
+```
+async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: ObjectId, dir_2: ObjectId) -> WithComplete<new Directory ObjectId> {
+  start a directory_builder
+  create a completes
+  "zipper" through the ChangingDirEntry entries of base, dir_1, and dir_2, treating base as an empty list if None - for each (name, base_entry, entry_1, entry_2) {
+    change_1 = to_dir_change(base_entry, entry_1)
+    change_2 = to_dir_change(base_entry, entry_2)
+    merge_action = changes_to_merge(change_1, change2)
+    merge_action {
+      TakeEither => add entry_1 to directory_builder
+      Take1 => add entry_1 to directory_builder
+      Take2 => add entry_2 to directory_builder
+      Remove => skip this entry
+      MergeDirectories(b, d1, d2) => recursively call merge_directories(repo, b, d1, d2), add to directory_builder and completes
+      MergeFiles(b, f1, f2, e) => call merge_files, add to directory_builder and completes
+      Conflict => call conflict
+    }
+  }
+  finish the directory_builder, add to completes
+  return directory_builder ObjectId and completes
+}
+
+async merge_files(repo: Repo, name: string, base: Option<file ObjectId> , file_1: ObjectId, file_2: ObjectId, conflict: ConflictContext) -> DirectoryEntry {
+  // FIXME - to be defined later
+}
+
+async conflict(repo: Repo, name: string, conflict: ConflictContext) -> DirectoryEntry {
+  // FIXME - to be defined later
 }
 ```

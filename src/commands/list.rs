@@ -79,8 +79,8 @@ pub struct ListLongFormat {
 
 /// Short format options.
 pub struct ListShortFormat {
-    /// Terminal width (None = detect automatically).
-    pub width: Option<usize>,
+    /// Terminal width.
+    pub width: usize,
     /// Column layout specification.
     pub columns_spec: ListColumnsSpec,
 }
@@ -300,12 +300,7 @@ fn format_short(entries: &[ListEntry], fmt: &ListShortFormat, classify: bool) ->
         return Ok(());
     }
 
-    let width = fmt.width.unwrap_or_else(|| {
-        crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80)
-    });
-
+    let width = fmt.width;
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
@@ -339,8 +334,12 @@ fn format_multi_column_vertical<W: Write>(
         .max()
         .unwrap_or(0);
 
-    let column_width = max_name_len + 2; // 2 spaces between columns
-    let num_columns = std::cmp::max(1, width / column_width);
+    // Calculate number of columns. The 2-space gap is only between columns, not after the last.
+    // For n columns: total = n * max_name_len + (n-1) * 2 = n * (max_name_len + 2) - 2
+    // So: n = (width + 2) / (max_name_len + 2)
+    let spacing = 2;
+    let num_columns = std::cmp::max(1, (width + spacing) / (max_name_len + spacing));
+    let column_width = max_name_len + spacing;
     let num_rows = entries.len().div_ceil(num_columns);
 
     for row in 0..num_rows {
@@ -379,8 +378,12 @@ fn format_multi_column_horizontal<W: Write>(
         .max()
         .unwrap_or(0);
 
-    let column_width = max_name_len + 2;
-    let num_columns = std::cmp::max(1, width / column_width);
+    // Calculate number of columns. The 2-space gap is only between columns, not after the last.
+    // For n columns: total = n * max_name_len + (n-1) * 2 = n * (max_name_len + 2) - 2
+    // So: n = (width + 2) / (max_name_len + 2)
+    let spacing = 2;
+    let num_columns = std::cmp::max(1, (width + spacing) / (max_name_len + spacing));
+    let column_width = max_name_len + spacing;
 
     for chunk in entries.chunks(num_columns) {
         let mut line = String::new();

@@ -269,8 +269,14 @@ async fn run_ls(
         } else {
             crate::commands::ListColumnsSpec::MultiVerticalSort
         };
+        // Compute terminal width: use explicit width, or detect from terminal, or default to 80
+        let resolved_width = width.unwrap_or_else(|| {
+            crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80)
+        });
         crate::commands::ListFormat::Short(crate::commands::ListShortFormat {
-            width,
+            width: resolved_width,
             columns_spec,
         })
     };

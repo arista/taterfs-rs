@@ -48,6 +48,7 @@
 //! ```
 
 mod change_merge;
+mod commit;
 mod conflict;
 mod dir_change;
 mod directory;
@@ -56,6 +57,7 @@ mod file;
 mod types;
 
 pub use change_merge::changes_to_merge;
+pub use commit::{MergeCommitResult, merge_commits};
 pub use conflict::build_conflict_directory;
 pub use dir_change::to_dir_change;
 pub use directory::{MergeDirectoryResult, MergeFileResult, merge_directories};

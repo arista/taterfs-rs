@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::app::{DirectoryLeaf, DirectoryListBuilder};
 use crate::merge::change_merge::changes_to_merge;
+use crate::merge::conflict::build_conflict_directory;
 use crate::merge::dir_change::to_dir_change;
 use crate::merge::error::{MergeError, Result};
 use crate::merge::file::merge_files;
@@ -42,23 +43,6 @@ pub enum MergeFileResult {
     },
     /// Could not merge - conflict.
     Conflict(Box<ConflictContext>),
-}
-
-// =============================================================================
-// ConflictResolution
-// =============================================================================
-
-/// How to handle a conflict.
-pub enum ConflictResolution {
-    /// Skip this entry (don't include in merged directory).
-    Skip,
-    /// Use a specific entry.
-    UseEntry {
-        /// The entry to use.
-        leaf: DirectoryLeaf,
-        /// Completion handle.
-        complete: Arc<dyn Complete>,
-    },
 }
 
 // =============================================================================
@@ -226,6 +210,22 @@ pub async fn merge_directories(
                         builder.add(DirectoryLeaf::File(file), complete).await?;
                     }
                     MergeFileResult::Conflict(ctx) => {
+                        // Build a conflict directory containing all versions
+                        let conflict_result =
+                            build_conflict_directory(Arc::clone(&repo), (*ctx).clone()).await?;
+
+                        // Add the conflict directory to the builder
+                        completes.add(conflict_result.complete).map_err(|e| {
+                            MergeError::Repo(crate::repo::RepoError::Other(e.to_string()))
+                        })?;
+                        builder
+                            .add(
+                                conflict_result.result,
+                                Arc::new(NoopComplete) as Arc<dyn Complete>,
+                            )
+                            .await?;
+
+                        // Record the conflict for reporting
                         conflicts.push(*ctx);
                     }
                 }
@@ -241,15 +241,23 @@ pub async fn merge_directories(
                     merge_file_result: None,
                 };
 
-                let resolution = handle_conflict(context.clone());
-                match resolution {
-                    ConflictResolution::Skip => {
-                        conflicts.push(context);
-                    }
-                    ConflictResolution::UseEntry { leaf, complete } => {
-                        builder.add(leaf, complete).await?;
-                    }
-                }
+                // Build a conflict directory containing all versions
+                let conflict_result =
+                    build_conflict_directory(Arc::clone(&repo), context.clone()).await?;
+
+                // Add the conflict directory to the builder
+                completes
+                    .add(conflict_result.complete)
+                    .map_err(|e| MergeError::Repo(crate::repo::RepoError::Other(e.to_string())))?;
+                builder
+                    .add(
+                        conflict_result.result,
+                        Arc::new(NoopComplete) as Arc<dyn Complete>,
+                    )
+                    .await?;
+
+                // Record the conflict for reporting
+                conflicts.push(context);
             }
         }
 
@@ -276,20 +284,6 @@ pub async fn merge_directories(
         },
         conflicts,
     })
-}
-
-// =============================================================================
-// handle_conflict (stub)
-// =============================================================================
-
-/// Handle a merge conflict.
-///
-/// STUB: Currently just skips the entry and records the conflict.
-/// Future implementation may create conflict markers or special entries.
-pub fn handle_conflict(_context: ConflictContext) -> ConflictResolution {
-    // STUB: Skip and record conflict
-    // TODO: Implement conflict handling strategies
-    ConflictResolution::Skip
 }
 
 // =============================================================================

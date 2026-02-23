@@ -223,10 +223,6 @@ async merge_directories(repo: Repo, base: <Option directory ObjectId>, dir_1: Ob
   finish the directory_builder, add to completes
   return directory_builder ObjectId and completes
 }
-
-async conflict(repo: Repo, name: string, conflict: ConflictContext) -> DirectoryEntry {
-  // FIXME - to be defined later
-}
 ```
 
 ## merge_files
@@ -267,3 +263,59 @@ async merge_files(repo: Repo, managed_buffers, base: Option<FileEntry>, fe1: Fil
   otherwise return Merged with the uploader's complete
 }
 ```
+
+## conflict representation
+
+If a directory entry with a given name (i.e., {directory}/{name}) cannot be resolved without a conflict, this means that two different values are vying for that name.  Traditionally those values are called "theirs" and "ours", with some heuristics for determining which should be called which.  There is also a "base" value, from which both values are derived.  Finally, if both values are text files and a merge was attempted between them, then there is a "merged" value, which should contain conflict markers.
+
+The values need not be files.  For example, if one change added a file while another added a directory, then "theirs" might be the file and "ours" might be the directory.  Or if one changed a file while another deleted it, then "ours" might hold the changed file, and "theirs" might not exist at all.
+
+Given all this, a conflict is represented like this:
+
+* {directory}/{name} becomes a directory, regardless of what its original value was
+* {directory}/{name} contains these entries (if they exist):
+    * base
+    * theirs
+    * ours
+    * merged
+* {directory}/{name} also contains CONFLICT.txt, that explains why there's a conflict and possible resolutions
+* {directory}/{name} also contains a script called "take", which takes argument "base|theirs|ours|merged", and replaces the entire conflict directory with the specified entry (if it exists).
+
+This is what the "conflict()" function does, which is called when a merge results in a conflict:
+
+```
+async conflict(repo: Repo, name: string, conflict: ConflictContext) -> WithComplete<DirectoryEntry> {
+  generate the conflict directory structure above, treating entry 1 as "theirs" and entry 2 as "ours"
+  use the StreamingFileUploader to generate the "CONFLICT.txt" and "take" files, using a Completes to gather their complete flags
+  use a DirectoryBuilder to create the actual directory, adding its complete flag to the Completes
+  return the resulting DirectoryEntry, with complete flags
+}
+```
+
+The CONFLICT.txt file should contain the following:
+
+* An indication that this directory represents a conflict that occurred when trying to merge two commits derived from a base commit
+* List the three commits involved, using the "theirs" and "ours" terminology
+* Summarize the change from base to theirs, and the change from base to ours
+* If a merge was attempted into "merged", indicate that as well
+* Explain that the conflict should be resolved by deleting the directory and replacing it with the intended contents after being manually resolved.  Explain that calling the "take" script can make this easier
+
+The "take" script should be a bash script.
+
+TBD - should the "take" script just make a call to the CLI, passing in the conflict directory and any additional arguments passed to it?  That way the logic and behavior of the "take" script can be maintained as part of the cli, as opposed to being a separately-generated bash script.  The issue, though, is locating the cli executable.
+
+## conflict discussion
+
+Every merge results in a new commit that's intended to be added to a particular branch.  That merge might contain conflicts, as represented above.  If so, what should happen?
+
+* Discard the commit, and alert the user to the conflicts
+* Add the commit to the intended branch, and alert the user that there are conflicts on the branch that should be resolved
+* Place the commit on a new branch, alerting the user
+
+Most version control systems effectively do the first, where they at least put up a good fight before allowing a conflict into the repo.
+
+This system is a little different though, in that it's targeted to individual users trying to archive content shared across multiple machines.  The emphasis is on getting the content safely into the system, and less on putting roadblocks in the way of getting that content in, even if it isn't quite right.
+
+So that would point to getting the conflict into the repo.  The simplest thing to do is to just put it on the branch, and warn the user very loudly that there are conflicts that should be resolved.  But that runs the risk of allowing work to continue, building on top of conflicts (which even raises the possibility of conflict directories that themselves contain conflicts, leading to nested conflict directories).
+
+The "safer" choice is to put the commit on a separate branch and loudly alerting the user that those conflicts and that branch exist.  But this runs the risk of the user just missing that messaging and not realizing that changes aren't on the expected branch.  It also means that there should be clear tools and messaging for addressing the conflicts.

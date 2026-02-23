@@ -441,31 +441,54 @@ async fn process_repo_group(
         }
     }
 
-    // Download phase for all items
-    for item in &mut all_items {
-        if item.result.is_some() {
-            continue; // Already has a result (success or failure)
-        }
+    // Download phase for all items - run in parallel
+    let download_futures: Vec<_> = all_items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.result.is_none())
+        .map(|(idx, item)| {
+            // Find the new commit for this item's branch
+            let new_commit_id = branch_updates
+                .iter()
+                .find(|(b, _)| *b == item.sync_state.branch_name)
+                .map(|(_, c)| c.clone());
 
-        // Find the new commit for this item's branch
-        let new_commit_id = branch_updates
-            .iter()
-            .find(|(b, _)| *b == item.sync_state.branch_name)
-            .map(|(_, c)| c.clone());
+            let repo = Arc::clone(&group.repo);
+            let file_store = Arc::clone(&item.file_store);
+            let repo_directory = item.repo_directory.clone();
+            let sync_state = item.sync_state.clone();
+            let with_stage = options.with_stage;
 
-        if let Some(commit_id) = new_commit_id {
-            match download_and_finalize(item, &group.repo, &commit_id, options).await {
-                Ok(conflicts) => {
-                    item.result = Some(SyncResult::success(conflicts));
-                }
-                Err(e) => {
-                    item.result = Some(SyncResult::failure(e));
-                }
+            async move {
+                let result = if let Some(commit_id) = new_commit_id {
+                    download_and_finalize_item(
+                        &repo,
+                        &file_store,
+                        &repo_directory,
+                        &sync_state,
+                        &commit_id,
+                        with_stage,
+                    )
+                    .await
+                } else {
+                    Err(SyncError::Other("missing branch update".to_string()))
+                };
+                (idx, result)
             }
-        } else {
-            item.result = Some(SyncResult::failure(SyncError::Other(
-                "missing branch update".to_string(),
-            )));
+        })
+        .collect();
+
+    let download_results = join_all(download_futures).await;
+
+    // Apply download results to items
+    for (idx, result) in download_results {
+        match result {
+            Ok(conflicts) => {
+                all_items[idx].result = Some(SyncResult::success(conflicts));
+            }
+            Err(e) => {
+                all_items[idx].result = Some(SyncResult::failure(e));
+            }
         }
     }
 
@@ -744,15 +767,19 @@ async fn merge_uploaded_directories(
     Ok((current_ours_commit_id, all_conflicts))
 }
 
-/// Download merged content and finalize sync state.
-async fn download_and_finalize(
-    item: &mut SyncItem,
+/// Download merged content and finalize sync state for a single item.
+///
+/// This is a standalone version that takes individual parameters instead of
+/// a SyncItem reference, allowing parallel execution.
+async fn download_and_finalize_item(
     repo: &Arc<Repo>,
+    file_store: &Arc<dyn FileStore>,
+    repo_directory: &str,
+    sync_state: &SyncState,
     new_commit_id: &str,
-    options: &RunSyncsOptions,
+    with_stage: bool,
 ) -> Result<Vec<ConflictContext>> {
-    let sync_mgr = item
-        .file_store
+    let sync_mgr = file_store
         .get_sync_state_manager()
         .ok_or(SyncError::NoSyncStateSupport)?;
 
@@ -760,26 +787,26 @@ async fn download_and_finalize(
     let commit = repo.read_commit(&new_commit_id.to_string()).await?;
 
     // Resolve the repo directory path to get the specific subdirectory
-    let dir_to_download = if item.repo_directory.is_empty() || item.repo_directory == "/" {
+    let dir_to_download = if repo_directory.is_empty() || repo_directory == "/" {
         commit.directory.clone()
     } else {
         // We need to resolve the path within the commit's directory
         let repo_model = RepoModel::new(Arc::clone(repo));
         let branch_model = repo_model
-            .get_branch(&item.sync_state.branch_name)
+            .get_branch(&sync_state.branch_name)
             .await?
-            .ok_or_else(|| SyncError::BranchNotFound(item.sync_state.branch_name.clone()))?;
+            .ok_or_else(|| SyncError::BranchNotFound(sync_state.branch_name.clone()))?;
         let commit_model = branch_model.commit();
         let root = commit_model.root().await?;
 
-        let resolved = root.resolve_path(&item.repo_directory).await?;
+        let resolved = root.resolve_path(repo_directory).await?;
         match resolved {
             crate::repo_model::ResolvePathResult::Directory(d) => d.id().clone(),
             crate::repo_model::ResolvePathResult::Root => commit.directory.clone(),
             _ => {
                 return Err(SyncError::Other(format!(
                     "repo path {} is not a directory after merge",
-                    item.repo_directory
+                    repo_directory
                 )));
             }
         }
@@ -788,9 +815,9 @@ async fn download_and_finalize(
     // Create pending sync state before download
     let pending_state = SyncState {
         created_at: Utc::now().to_rfc3339(),
-        repository_url: item.sync_state.repository_url.clone(),
-        repository_directory: item.repo_directory.clone(),
-        branch_name: item.sync_state.branch_name.clone(),
+        repository_url: sync_state.repository_url.clone(),
+        repository_directory: repo_directory.to_string(),
+        branch_name: sync_state.branch_name.clone(),
         base_commit: new_commit_id.to_string(),
     };
     sync_mgr.set_next_sync_state(Some(&pending_state)).await?;
@@ -799,9 +826,9 @@ async fn download_and_finalize(
     let download_result = download_directory(
         Arc::clone(repo),
         &dir_to_download,
-        &*item.file_store,
+        &**file_store,
         std::path::PathBuf::new(),
-        options.with_stage,
+        with_stage,
         false,
         None,
     )

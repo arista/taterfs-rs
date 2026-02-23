@@ -48,6 +48,7 @@
 //! ```
 
 mod change_merge;
+mod conflict;
 mod dir_change;
 mod directory;
 mod error;
@@ -55,10 +56,9 @@ mod file;
 mod types;
 
 pub use change_merge::changes_to_merge;
+pub use conflict::build_conflict_directory;
 pub use dir_change::to_dir_change;
-pub use directory::{
-    ConflictResolution, MergeDirectoryResult, MergeFileResult, handle_conflict, merge_directories,
-};
+pub use directory::{MergeDirectoryResult, MergeFileResult, merge_directories};
 pub use error::{MergeError, Result};
 pub use file::merge_files;
 pub use types::{

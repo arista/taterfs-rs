@@ -15,7 +15,7 @@ use crate::repo::Repo;
 use crate::repo_model::{DirectoryModel, RepoModel, ResolvePathResult};
 use crate::repository::CommitMetadata;
 use crate::sync::error::{Result, SyncError};
-use crate::util::{Complete, Completes, WithComplete};
+use crate::util::NoopComplete;
 
 /// Options for the add_sync operation.
 #[derive(Debug, Clone, Default)]
@@ -54,9 +54,7 @@ pub async fn add_sync(
     branch: &str,
     repo_directory: &str,
     options: AddSyncOptions,
-) -> Result<WithComplete<()>> {
-    let completes = Completes::new();
-
+) -> Result<()> {
     // Check if file store supports sync state
     let sync_state_mgr = file_store
         .get_sync_state_manager()
@@ -82,10 +80,10 @@ pub async fn add_sync(
         .commit_message
         .unwrap_or_else(|| format!("Add sync to /{}", repo_directory));
 
-    let base_commit_id = match (file_store_empty, repo_dir_empty) {
+    match (file_store_empty, repo_dir_empty) {
         // Both empty - create empty repo directory
         (true, true) => {
-            let commit_id = create_empty_directory_commit(
+            let base_commit_id = create_empty_directory_commit_with_update(
                 &repo,
                 repo_model,
                 branch,
@@ -94,10 +92,19 @@ pub async fn add_sync(
                 branch_commit_id.as_ref(),
             )
             .await?;
-            completes
-                .add(commit_id.complete)
-                .map_err(|e| SyncError::Other(e.to_string()))?;
-            commit_id.result
+
+            // Create and commit sync state
+            let sync_state = SyncState {
+                created_at: Utc::now().to_rfc3339(),
+                repository_url: repo_url.to_string(),
+                repository_directory: repo_directory.to_string(),
+                branch_name: branch.to_string(),
+                base_commit: base_commit_id,
+            };
+            sync_state_mgr
+                .set_next_sync_state(Some(&sync_state))
+                .await?;
+            sync_state_mgr.commit_next_sync_state().await?;
         }
 
         // File store empty, repo has content - download
@@ -118,9 +125,7 @@ pub async fn add_sync(
             let dir_to_download = if repo_directory.is_empty() || repo_directory == "/" {
                 root.directory().id.clone()
             } else {
-                let resolved = root
-                    .resolve_path(repo_directory)
-                    .await?;
+                let resolved = root.resolve_path(repo_directory).await?;
                 match resolved {
                     ResolvePathResult::Directory(d) => d.id().clone(),
                     ResolvePathResult::Root => root.directory().id.clone(),
@@ -140,18 +145,18 @@ pub async fn add_sync(
             };
 
             // Create pending sync state before download
-            let pending_state = SyncState {
+            let sync_state = SyncState {
                 created_at: Utc::now().to_rfc3339(),
                 repository_url: repo_url.to_string(),
                 repository_directory: repo_directory.to_string(),
                 branch_name: branch.to_string(),
-                base_commit: branch_commit.clone(),
+                base_commit: branch_commit,
             };
             sync_state_mgr
-                .set_next_sync_state(Some(&pending_state))
+                .set_next_sync_state(Some(&sync_state))
                 .await?;
 
-            // Download
+            // Download and wait for completion
             let download_result = download_directory(
                 Arc::clone(&repo),
                 &dir_to_download,
@@ -162,14 +167,14 @@ pub async fn add_sync(
                 None,
             )
             .await?;
-            completes
-                .add(download_result.complete)
-                .map_err(|e| SyncError::Other(e.to_string()))?;
+            download_result
+                .complete
+                .complete()
+                .await
+                .map_err(|e| SyncError::Other(format!("download completion failed: {}", e)))?;
 
             // Commit sync state
             sync_state_mgr.commit_next_sync_state().await?;
-
-            branch_commit
         }
 
         // Repo empty, file store has content - upload
@@ -177,52 +182,48 @@ pub async fn add_sync(
             // Get file store cache
             let cache = file_store.get_cache();
 
-            // Upload file store contents
+            // Upload file store contents and wait for completion
             let upload_result =
                 upload_directory(&*file_store, Arc::clone(&repo), cache, None).await?;
-            completes
-                .add(upload_result.complete.clone())
-                .map_err(|e| SyncError::Other(e.to_string()))?;
+            upload_result
+                .complete
+                .complete()
+                .await
+                .map_err(|e| SyncError::Other(format!("upload completion failed: {}", e)))?;
 
-            // Create commit with the uploaded directory
-            let commit_id = create_directory_commit(
+            // Create commit with the uploaded directory using RepoModel.update
+            let base_commit_id = create_directory_commit_with_update(
                 &repo,
                 repo_model,
                 branch,
                 repo_directory,
-                upload_result.result.hash.clone(),
+                upload_result.result.hash,
                 &commit_message,
                 branch_commit_id.as_ref(),
             )
             .await?;
-            completes
-                .add(commit_id.complete)
-                .map_err(|e| SyncError::Other(e.to_string()))?;
 
-            commit_id.result
+            // Create and commit sync state
+            let sync_state = SyncState {
+                created_at: Utc::now().to_rfc3339(),
+                repository_url: repo_url.to_string(),
+                repository_directory: repo_directory.to_string(),
+                branch_name: branch.to_string(),
+                base_commit: base_commit_id,
+            };
+            sync_state_mgr
+                .set_next_sync_state(Some(&sync_state))
+                .await?;
+            sync_state_mgr.commit_next_sync_state().await?;
         }
 
         // Both have content - error
         (false, false) => {
             return Err(SyncError::BothHaveContent);
         }
-    };
+    }
 
-    // Create the final sync state
-    let sync_state = SyncState {
-        created_at: Utc::now().to_rfc3339(),
-        repository_url: repo_url.to_string(),
-        repository_directory: repo_directory.to_string(),
-        branch_name: branch.to_string(),
-        base_commit: base_commit_id,
-    };
-    sync_state_mgr
-        .set_next_sync_state(Some(&sync_state))
-        .await?;
-    sync_state_mgr.commit_next_sync_state().await?;
-
-    completes.done();
-    Ok(WithComplete::new((), Arc::new(completes) as Arc<dyn Complete>))
+    Ok(())
 }
 
 /// Check if a file store is empty (has no files).
@@ -313,20 +314,25 @@ async fn is_directory_empty(dir: &DirectoryModel) -> Result<bool> {
     }
 }
 
-/// Create an empty directory and commit it.
-async fn create_empty_directory_commit(
+/// Create an empty directory and commit it using RepoModel.update.
+async fn create_empty_directory_commit_with_update(
     repo: &Arc<Repo>,
     repo_model: &RepoModel,
     branch: &str,
     repo_directory: &str,
     commit_message: &str,
     parent_commit: Option<&String>,
-) -> Result<WithComplete<String>> {
-    // Create an empty directory
+) -> Result<String> {
+    // Create an empty directory and wait for completion
     let builder = DirectoryListBuilder::new(Arc::clone(repo));
     let empty_dir = builder.finish().await?;
+    empty_dir
+        .complete
+        .complete()
+        .await
+        .map_err(|e| SyncError::Other(format!("empty directory completion failed: {}", e)))?;
 
-    create_directory_commit(
+    create_directory_commit_with_update(
         repo,
         repo_model,
         branch,
@@ -338,8 +344,8 @@ async fn create_empty_directory_commit(
     .await
 }
 
-/// Create a commit with the given directory at the specified repo path.
-async fn create_directory_commit(
+/// Create a commit with the given directory at the specified repo path using RepoModel.update.
+async fn create_directory_commit_with_update(
     repo: &Arc<Repo>,
     repo_model: &RepoModel,
     branch: &str,
@@ -347,13 +353,10 @@ async fn create_directory_commit(
     directory_id: String,
     commit_message: &str,
     parent_commit: Option<&String>,
-) -> Result<WithComplete<String>> {
+) -> Result<String> {
     use crate::app::{mod_dir_tree, DirTreeModSpec};
     use crate::repo::DirectoryEntry;
     use crate::repository::{Commit, CommitType, DirEntry, Directory, DirectoryType, RepoObject};
-    use crate::util::NoopComplete;
-
-    let completes = Completes::new();
 
     // Get or create the root directory
     let root_dir = if let Some(parent_id) = parent_commit {
@@ -388,16 +391,18 @@ async fn create_directory_commit(
         .map_err(|e| SyncError::Other(e.to_string()))?;
 
         let result = mod_dir_tree(repo, root_dir, spec).await?;
-        completes
-            .add(result.complete)
-            .map_err(|e| SyncError::Other(e.to_string()))?;
+        result
+            .complete
+            .complete()
+            .await
+            .map_err(|e| SyncError::Other(format!("mod_dir_tree completion failed: {}", e)))?;
         result.result
     };
 
     // Create the commit
     let commit = Commit {
         type_tag: CommitType::Commit,
-        directory: final_root_dir_id,
+        directory: final_root_dir_id.clone(),
         parents: parent_commit.into_iter().cloned().collect(),
         metadata: Some(CommitMetadata {
             timestamp: Some(Utc::now().to_rfc3339()),
@@ -408,15 +413,32 @@ async fn create_directory_commit(
     };
 
     let commit_result = repo.write_object(&RepoObject::Commit(commit)).await?;
-    completes
-        .add(commit_result.complete)
-        .map_err(|e| SyncError::Other(e.to_string()))?;
+    commit_result
+        .complete
+        .complete()
+        .await
+        .map_err(|e| SyncError::Other(format!("commit write completion failed: {}", e)))?;
 
-    // Update the branch to point to the new commit
-    let _update_result = repo_model
-        .create_next_branches(branch, Some(commit_result.result.clone()))
+    let commit_id = commit_result.result;
+
+    // Use RepoModel.update to atomically update the repo with the new branch
+    let branch_owned = branch.to_string();
+    let commit_id_for_closure = commit_id.clone();
+    let repo_for_closure = Arc::clone(repo);
+    repo_model
+        .update(
+            || {
+                let branch_name = branch_owned.clone();
+                let cid = commit_id_for_closure.clone();
+                let r = Arc::clone(&repo_for_closure);
+                async move {
+                    let rm = RepoModel::new(r);
+                    rm.create_next_branches(&branch_name, Some(cid)).await
+                }
+            },
+            3, // max_attempts
+        )
         .await?;
 
-    completes.done();
-    Ok(WithComplete::new(commit_result.result, Arc::new(completes) as Arc<dyn Complete>))
+    Ok(commit_id)
 }

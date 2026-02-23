@@ -11,6 +11,7 @@ DirTreeMod is driven by a DirTreeModSpec.  This acts as a "virtual directory hie
 ```
 impl DirTreeModSpec {
   add(path, entry: DirectoryEntry, complete: Complete)
+  can_add(path) -> bool
   remove(path)
 }
 ```
@@ -38,7 +39,7 @@ enum DirTreeModSpecEntry {
 
 The idea being that when a Path is specified, it is broken down into components and Directory entries are placed to form the hierarchy until the final name component is reached, at which point either a Remove or an Entry is placed.
 
-It is an error to "overlap" modifications.  For example, if an entry has already been placed or removed at "/a/b/c", then it is an error to try to make another modification at that path, or any subpath (e.g., "/a/b/c/d")
+It is an error to "overlap" modifications.  For example, if an entry has already been placed or removed at "/a/b/c", then it is an error to try to make another modification at that path, or any subpath (e.g., "/a/b/c/d").  The can_add() function indicates if an add can be performed safely.
 
 The list of entries can then be extracted, sorted by name:
 

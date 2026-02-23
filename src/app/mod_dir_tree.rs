@@ -121,6 +121,60 @@ impl DirTreeModSpec {
         self.entries.is_empty()
     }
 
+    /// Check if a path can be added without overlapping existing modifications.
+    ///
+    /// Returns `true` if `add` or `remove` would succeed for this path,
+    /// `false` if it would return an `OverlappingPath` error.
+    ///
+    /// Note: Returns `false` for empty paths (which would cause `EmptyPath` error).
+    pub fn can_add(&self, path: &Path) -> bool {
+        let components: Vec<&str> = path
+            .components()
+            .filter_map(|c| {
+                if let std::path::Component::Normal(s) = c {
+                    s.to_str()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if components.is_empty() {
+            return false;
+        }
+
+        // Navigate through the path, checking for overlaps
+        let mut current = self;
+        let final_idx = components.len() - 1;
+
+        for (i, component) in components.iter().enumerate() {
+            let component_str = (*component).to_string();
+
+            match current.entries.get(&component_str) {
+                Some(DirTreeModSpecEntry::Directory(nested)) => {
+                    if i == final_idx {
+                        // Trying to add at a path where a Directory already exists
+                        // This is an overlap
+                        return false;
+                    }
+                    // Continue into the nested spec
+                    current = nested;
+                }
+                Some(_) => {
+                    // Entry or Remove exists at this path - overlap
+                    return false;
+                }
+                None => {
+                    // No entry at this component - safe to add
+                    return true;
+                }
+            }
+        }
+
+        // If we get here, the path exists as a Directory entry
+        false
+    }
+
     /// Internal method to insert an entry at a path.
     fn insert_at_path(
         &mut self,
@@ -503,5 +557,84 @@ mod tests {
         assert_eq!(entries[0].0, "alpha");
         assert_eq!(entries[1].0, "middle");
         assert_eq!(entries[2].0, "zebra");
+    }
+
+    #[test]
+    fn test_can_add_empty_spec() {
+        let spec = DirTreeModSpec::new();
+        assert!(spec.can_add(Path::new("foo")));
+        assert!(spec.can_add(Path::new("foo/bar")));
+        assert!(spec.can_add(Path::new("foo/bar/baz")));
+    }
+
+    #[test]
+    fn test_can_add_empty_path() {
+        let spec = DirTreeModSpec::new();
+        assert!(!spec.can_add(Path::new("")));
+    }
+
+    #[test]
+    fn test_can_add_same_path() {
+        let mut spec = DirTreeModSpec::new();
+        let entry = DirectoryEntry::File(FileEntry {
+            name: "test.txt".to_string(),
+            size: 100,
+            executable: false,
+            file: "abc123".to_string(),
+        });
+        let complete: Arc<dyn Complete> = Arc::new(NoopComplete);
+
+        spec.add(Path::new("test.txt"), entry, complete).unwrap();
+
+        // Same path should not be addable
+        assert!(!spec.can_add(Path::new("test.txt")));
+        // Different path should be addable
+        assert!(spec.can_add(Path::new("other.txt")));
+    }
+
+    #[test]
+    fn test_can_add_subpath_of_file() {
+        let mut spec = DirTreeModSpec::new();
+        let entry = DirectoryEntry::File(FileEntry {
+            name: "foo".to_string(),
+            size: 100,
+            executable: false,
+            file: "abc123".to_string(),
+        });
+        let complete: Arc<dyn Complete> = Arc::new(NoopComplete);
+
+        spec.add(Path::new("foo"), entry, complete).unwrap();
+
+        // Subpath of file should not be addable
+        assert!(!spec.can_add(Path::new("foo/bar")));
+        assert!(!spec.can_add(Path::new("foo/bar/baz")));
+    }
+
+    #[test]
+    fn test_can_add_nested_non_overlapping() {
+        let mut spec = DirTreeModSpec::new();
+        let entry = DirectoryEntry::File(FileEntry {
+            name: "file.txt".to_string(),
+            size: 100,
+            executable: false,
+            file: "abc123".to_string(),
+        });
+        let complete: Arc<dyn Complete> = Arc::new(NoopComplete);
+
+        spec.add(Path::new("foo/bar/file.txt"), entry, complete)
+            .unwrap();
+
+        // Sibling paths should be addable
+        assert!(spec.can_add(Path::new("foo/bar/other.txt")));
+        assert!(spec.can_add(Path::new("foo/other")));
+        assert!(spec.can_add(Path::new("other")));
+
+        // Existing path and subpaths should not be addable
+        assert!(!spec.can_add(Path::new("foo/bar/file.txt")));
+        assert!(!spec.can_add(Path::new("foo/bar/file.txt/sub")));
+
+        // Parent paths that would conflict with intermediate directories
+        assert!(!spec.can_add(Path::new("foo/bar")));
+        assert!(!spec.can_add(Path::new("foo")));
     }
 }

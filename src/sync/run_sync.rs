@@ -116,6 +116,12 @@ struct BranchGroup {
     items: Vec<SyncItem>,
 }
 
+/// A group of syncs targeting the same repo+branch+base commit.
+struct BaseGroup {
+    base_commit_id: String,
+    items: Vec<SyncItem>,
+}
+
 /// A group of syncs targeting the same repo.
 struct RepoGroup {
     repo_spec: String,
@@ -364,6 +370,29 @@ fn group_by_branch(items: Vec<SyncItem>) -> Vec<BranchGroup> {
         .collect()
 }
 
+/// Group sync items by base commit, returning groups sorted by base commit id.
+fn group_by_base_commit(items: Vec<SyncItem>) -> Vec<BaseGroup> {
+    let mut base_map: HashMap<String, Vec<SyncItem>> = HashMap::new();
+    for item in items {
+        base_map
+            .entry(item.sync_state.base_commit.clone())
+            .or_default()
+            .push(item);
+    }
+
+    let mut groups: Vec<BaseGroup> = base_map
+        .into_iter()
+        .map(|(base_commit_id, items)| BaseGroup {
+            base_commit_id,
+            items,
+        })
+        .collect();
+
+    // Sort by base commit id for deterministic ordering
+    groups.sort_by(|a, b| a.base_commit_id.cmp(&b.base_commit_id));
+    groups
+}
+
 /// Process a single repo group.
 async fn process_repo_group(
     group: RepoGroup,
@@ -496,91 +525,107 @@ async fn process_branch_group(
         }
     }
 
-    // Get items that uploaded successfully
-    let uploadable_items: Vec<&SyncItem> = group
-        .items
-        .iter()
-        .filter(|i| i.result.is_none() && i.uploaded_dir_id.is_some())
-        .collect();
-
-    if uploadable_items.is_empty() {
-        return (group.items, None);
+    // Separate items into uploaded (success) and failed
+    let mut uploaded_items: Vec<SyncItem> = Vec::new();
+    let mut failed_items: Vec<SyncItem> = Vec::new();
+    for item in group.items {
+        if item.result.is_some() {
+            failed_items.push(item);
+        } else if item.uploaded_dir_id.is_some() {
+            uploaded_items.push(item);
+        } else {
+            // No result and no upload - shouldn't happen, but mark as failed
+            let mut item = item;
+            item.result = Some(SyncResult::failure(SyncError::Other(
+                "item has no upload result".to_string(),
+            )));
+            failed_items.push(item);
+        }
     }
 
-    // Get the current branch head and base commit
+    if uploaded_items.is_empty() {
+        return (failed_items, None);
+    }
+
+    // Get the current branch head
     let branch_model = match repo_model.get_branch(&branch_name).await {
         Ok(Some(b)) => b,
         Ok(None) => {
-            for item in &mut group.items {
-                if item.result.is_none() {
-                    item.result = Some(SyncResult::failure(SyncError::BranchNotFound(
-                        branch_name.clone(),
-                    )));
-                }
+            for item in &mut uploaded_items {
+                item.result = Some(SyncResult::failure(SyncError::BranchNotFound(
+                    branch_name.clone(),
+                )));
             }
-            return (group.items, None);
+            uploaded_items.extend(failed_items);
+            return (uploaded_items, None);
         }
         Err(e) => {
-            for item in &mut group.items {
-                if item.result.is_none() {
-                    item.result = Some(SyncResult::failure(SyncError::Repo(e.clone())));
-                }
+            for item in &mut uploaded_items {
+                item.result = Some(SyncResult::failure(SyncError::Repo(e.clone())));
             }
-            return (group.items, None);
+            uploaded_items.extend(failed_items);
+            return (uploaded_items, None);
         }
     };
 
-    let branch_head_commit = branch_model.commit();
-    let branch_head_id = branch_head_commit.id.clone();
+    let branch_head_id = branch_model.commit().id.clone();
 
-    // Use first item's base commit (they should all be the same for a valid sync)
-    let base_commit_id = uploadable_items[0].sync_state.base_commit.clone();
+    // Group uploaded items by base commit
+    let base_groups = group_by_base_commit(uploaded_items);
 
-    // Merge uploaded directories with retry for overlapping paths
-    let merge_result = merge_uploaded_directories(
-        &repo,
-        repo_model,
-        &uploadable_items,
-        &base_commit_id,
-        &branch_head_id,
-        options,
-    )
-    .await;
+    // Process each base group in sequence, chaining the commits
+    let mut current_commit_1_id = branch_head_id;
+    let mut all_processed_items: Vec<SyncItem> = Vec::new();
 
-    match merge_result {
-        Ok((new_commit_id, _conflicts)) => {
-            // Store conflicts on all items (they all share the same merge)
-            for item in &mut group.items {
-                if item.result.is_none() && item.uploaded_dir_id.is_some() {
-                    // Don't set result yet - download phase will do that
-                    // But store conflicts for later
-                    // We'll pass conflicts through the download phase
-                }
+    for base_group in base_groups {
+        let items_refs: Vec<&SyncItem> = base_group.items.iter().collect();
+
+        // Merge uploaded directories with retry for overlapping paths
+        let merge_result = merge_uploaded_directories(
+            &repo,
+            &items_refs,
+            &base_group.base_commit_id,
+            &current_commit_1_id,
+            options,
+        )
+        .await;
+
+        match merge_result {
+            Ok((new_commit_id, _conflicts)) => {
+                // Update commit_1 for the next base group
+                current_commit_1_id = new_commit_id;
+                // Items will get their results during download phase
+                all_processed_items.extend(base_group.items);
             }
-            // Return items and branch update info with conflicts
-            // We'll need to pass conflicts to the download phase
-            // For now, store them in a way that download_and_finalize can use
-            (group.items, Some((branch_name, new_commit_id)))
-        }
-        Err(e) => {
-            let error_msg = e.to_string();
-            for item in &mut group.items {
-                if item.result.is_none() {
+            Err(e) => {
+                let error_msg = e.to_string();
+                for mut item in base_group.items {
                     item.result = Some(SyncResult::failure(SyncError::Other(error_msg.clone())));
+                    all_processed_items.push(item);
                 }
             }
-            (group.items, None)
         }
     }
+
+    // Combine with failed items
+    all_processed_items.extend(failed_items);
+
+    (all_processed_items, Some((branch_name, current_commit_1_id)))
 }
 
 /// Merge uploaded directories using DirTreeModSpec with retry for overlaps.
+///
+/// # Arguments
+/// * `repo` - The repository
+/// * `items` - Items to merge (must all have the same base commit)
+/// * `base_commit_id` - The common base commit for all items
+/// * `commit_1_id` - The "ours" commit for merging (branch head or previous merge result)
+/// * `options` - Sync options
 async fn merge_uploaded_directories(
     repo: &Arc<Repo>,
-    _repo_model: &RepoModel,
     items: &[&SyncItem],
     base_commit_id: &str,
-    branch_head_id: &str,
+    commit_1_id: &str,
     options: &RunSyncsOptions,
 ) -> Result<(String, Vec<ConflictContext>)> {
     // Sort items by path depth (descending), then alphabetically
@@ -602,8 +647,8 @@ async fn merge_uploaded_directories(
     let base_commit = repo.read_commit(&base_commit_id.to_string()).await?;
     let base_root_dir = repo.read_directory(&base_commit.directory).await?;
 
-    // Track the current commit for merging (starts as uploaded content)
-    let mut current_commit_id: Option<String> = None;
+    // Track the current "ours" commit for merging (starts as the provided commit_1)
+    let mut current_ours_commit_id = commit_1_id.to_string();
     let mut all_conflicts: Vec<ConflictContext> = Vec::new();
     let mut remaining_items: Vec<&SyncItem> = sorted_items;
 
@@ -650,7 +695,7 @@ async fn merge_uploaded_directories(
         modified_dir.complete.complete().await
             .map_err(|e| SyncError::Other(format!("mod_dir_tree completion failed: {}", e)))?;
 
-        // Create a commit with this modified directory
+        // Create a commit with this modified directory (the "theirs" commit)
         let upload_commit = Commit {
             type_tag: CommitType::Commit,
             directory: modified_dir.result.clone(),
@@ -666,17 +711,16 @@ async fn merge_uploaded_directories(
         upload_commit_result.complete.complete().await
             .map_err(|e| SyncError::Other(format!("commit write completion failed: {}", e)))?;
 
-        // Merge: base vs branch_head vs upload_commit
+        // Merge: base vs ours (current_ours_commit_id) vs theirs (upload_commit)
         let base_model = CommitModel::new(Arc::clone(repo), base_commit_id.to_string());
-        let commit_1_id = current_commit_id.as_ref().unwrap_or(&branch_head_id.to_string()).clone();
-        let commit_1_model = CommitModel::new(Arc::clone(repo), commit_1_id);
-        let commit_2_model = CommitModel::new(Arc::clone(repo), upload_commit_result.result.clone());
+        let ours_model = CommitModel::new(Arc::clone(repo), current_ours_commit_id.clone());
+        let theirs_model = CommitModel::new(Arc::clone(repo), upload_commit_result.result.clone());
 
         let merge_result = merge_commits(
             Arc::clone(repo),
             &base_model,
-            &commit_1_model,
-            &commit_2_model,
+            &ours_model,
+            &theirs_model,
             Some(CommitMetadata {
                 timestamp: Some(Utc::now().to_rfc3339()),
                 author: None,
@@ -691,12 +735,13 @@ async fn merge_uploaded_directories(
             .map_err(|e| SyncError::Other(format!("merge completion failed: {}", e)))?;
 
         all_conflicts.extend(merge_result.conflicts);
-        current_commit_id = Some(merge_result.commit.result);
+        // Update "ours" to the merge result for the next iteration
+        current_ours_commit_id = merge_result.commit.result;
 
         remaining_items = retry_list;
     }
 
-    Ok((current_commit_id.unwrap(), all_conflicts))
+    Ok((current_ours_commit_id, all_conflicts))
 }
 
 /// Download merged content and finalize sync state.
@@ -918,5 +963,70 @@ mod tests {
         // depth 1: /a and /z, alphabetically /a < /z
         assert_eq!(sorted_paths[3], "/a"); // depth 1
         assert_eq!(sorted_paths[4], "/z"); // depth 1
+    }
+
+    #[test]
+    fn test_group_by_base_commit() {
+        // Create test sync items with different base commits
+        let sync_state_base_a1 = SyncState {
+            created_at: String::new(),
+            repository_url: "test://repo".to_string(),
+            repository_directory: "/dir_1".to_string(),
+            branch_name: "main".to_string(),
+            base_commit: "commit_aaa".to_string(),
+        };
+        let sync_state_base_b = SyncState {
+            created_at: String::new(),
+            repository_url: "test://repo".to_string(),
+            repository_directory: "/dir_2".to_string(),
+            branch_name: "main".to_string(),
+            base_commit: "commit_bbb".to_string(),
+        };
+        let sync_state_base_a2 = SyncState {
+            created_at: String::new(),
+            repository_url: "test://repo".to_string(),
+            repository_directory: "/dir_3".to_string(),
+            branch_name: "main".to_string(),
+            base_commit: "commit_aaa".to_string(),
+        };
+
+        let items = vec![
+            SyncItem {
+                original_index: 0,
+                file_store: Arc::new(crate::file_store::MemoryFileStore::builder().build()),
+                repo_directory: "/dir_1".to_string(),
+                sync_state: sync_state_base_a1,
+                uploaded_dir_id: None,
+                result: None,
+            },
+            SyncItem {
+                original_index: 1,
+                file_store: Arc::new(crate::file_store::MemoryFileStore::builder().build()),
+                repo_directory: "/dir_2".to_string(),
+                sync_state: sync_state_base_b,
+                uploaded_dir_id: None,
+                result: None,
+            },
+            SyncItem {
+                original_index: 2,
+                file_store: Arc::new(crate::file_store::MemoryFileStore::builder().build()),
+                repo_directory: "/dir_3".to_string(),
+                sync_state: sync_state_base_a2,
+                uploaded_dir_id: None,
+                result: None,
+            },
+        ];
+
+        let groups = group_by_base_commit(items);
+
+        // Should have 2 groups: commit_aaa with 2 items, commit_bbb with 1 item
+        assert_eq!(groups.len(), 2);
+
+        // Groups should be sorted by base commit id
+        assert_eq!(groups[0].base_commit_id, "commit_aaa");
+        assert_eq!(groups[1].base_commit_id, "commit_bbb");
+
+        assert_eq!(groups[0].items.len(), 2);
+        assert_eq!(groups[1].items.len(), 1);
     }
 }

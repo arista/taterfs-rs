@@ -19,7 +19,7 @@ Use [RepoModel](./repo_model.md) to modify the repo or traverse repo directory p
 In non-error cases, adding a sync should create a pending StoreSyncState, then when all operations are complete (uploads and downloads), it should commit that StoreSyncState.
 
 ```
-async add_sync(file_store, repo_model, branch, repo_directory: Path) -> WithComplete<()>
+async add_sync(file_store, repo_model, branch, repo_directory: Path)
 ```
 
 ## running a sync
@@ -40,15 +40,19 @@ That's the basic process for sync'ing a single filestore.  Where things get more
 
 To do this, when a sync is initiated with multiple file stores, the syncs should be grouped first by repo spec.  Each "repo group" then proceeds simultaneously with the other "repo groups".
 
-Each "repo group" is then broken down by branch, into "repo+branch groups", each proceeding simultaneously with the other "repo+branch groups".
+Each "repo group" is then broken down by branch, into "repo+branch groups", each proceeding simultaneously with the other "repo+branch groups".  Each "repo+branch" group is then grouped by common base commit, into separate "repo+branch+base groups", sorted by base id.
 
-Each "repo+branch group" proceeds by uploading the contents of its file stores.  It then uses [mod_dir_tree](./dir_tree_mod.md) to gather all of those uploaded file stores into a single root directory tree, with each uploaded filestore positioned to the repo directory specified by its sync.  It then uses merge_commits to create a new commit as described above.
+Each "repo+branch+base group" proceeds by uploading the contents of its file stores.  It then uses [mod_dir_tree](./dir_tree_mod.md) to gather all of those uploaded file stores into a single root directory tree, with each uploaded filestore positioned to the repo directory specified by its sync.  It then uses merge_commits to create a new commit as described above.
 
 There's a bit of a catch here - there's no guarantee that the filestores will have non-overlapping directories, as is required by [DirTreeModSpec](./dir_tree_mod.md).  If there are overlapping directories, then multiple merges and commits will be required.
 
-To handle this, the algorithm will sort the repo directories in each "repo+branch group" - first by number of path components, descending (i.e., longest paths first), then alphabetically.  The idea is to get an order that tries to group as many nonoverlapping paths as it can, in a deterministic way.  Then, when it uses mod_dir_tree, it goes through that list in order.  If any items fail DirTreeModSpec.can_add, then they will not be added, and will instead be placed on a retry list.
+To handle this, the algorithm will sort the repo directories in each "repo+branch+base group" - first by number of path components, descending (i.e., longest paths first), then alphabetically.  The idea is to get an order that tries to group as many nonoverlapping paths as it can, in a deterministic way.  Then, when it uses mod_dir_tree, it goes through that list in order.  If any items fail DirTreeModSpec.can_add, then they will not be added, and will instead be placed on a retry list.
 
-The merge_commits call then proceeds.  Once it completes, it checks to see if there are any items remaining on the retry list.  If so, then it goes back repeats the process of using mod_dir_tree and merge_commits, this time using the commit that was created in the prevoius merge as commit 2.  Once the retry list is exhausted, we have the final commit needed.
+The merge_commits call then proceeds.  Once it completes, it checks to see if there are any items remaining on the retry list.  If so, then it goes back and repeats the process of using mod_dir_tree and merge_commits, this time using the commit that was created in the prevoius merge as commit 1.  Once the retry list is exhausted, we have the final commit needed.
+
+If a "repo+branch group" has multiple "repo+branch+base groups", then this process repeats for each "repo+branch+base group", but with each previous operation using the previous commit as commit 1.
+
+In other words, it proceeds as if the overlapping groups and the different repo+branch+base groups happened in succession against the same branch.
 
 Once all the "repo+branch groups" are complete for a single "repo group", that repo can be updated.  The repo is updated to set all the branches to their new commits simultaneously.  The downloads can then proceed for the syncs associated with that repo.
 

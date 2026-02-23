@@ -264,6 +264,20 @@ async merge_files(repo: Repo, managed_buffers, base: Option<FileEntry>, fe1: Fil
 }
 ```
 
+## merge_commits
+
+Merging commits is the same as merging their corresponding directories, except that accommodations are made for "fast forward" merges.  That is, if one of the commits is the same as the base, then the result of the merge is simply the other commit.  If not, then a new commit needs to be created, using [CommitModel.create_next_commit](./repo_model.md)
+
+```
+async merge_commits(repo: Repo, base: CommitModel, commit_1: CommitModel, commit_2: CommitModel, commit_metadata: Option<CommitMetadata> -> WithComplete<commit ObjectId> {
+  if base and commit_1 are the same id, return commit_2's id
+  if base and commit_2 are the same id, return commit_1's id
+  
+  call merge_directories, get the resulting new directory
+  call commit_1.create_next_commit with the merged directory, and commit_2 as an additional_parent
+}
+```
+
 ## conflict representation
 
 If a directory entry with a given name (i.e., {directory}/{name}) cannot be resolved without a conflict, this means that two different values are vying for that name.  Traditionally those values are called "theirs" and "ours", with some heuristics for determining which should be called which.  There is also a "base" value, from which both values are derived.  Finally, if both values are text files and a merge was attempted between them, then there is a "merged" value, which should contain conflict markers.

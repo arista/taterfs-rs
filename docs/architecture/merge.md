@@ -300,9 +300,9 @@ The CONFLICT.txt file should contain the following:
 * If a merge was attempted into "merged", indicate that as well
 * Explain that the conflict should be resolved by deleting the directory and replacing it with the intended contents after being manually resolved.  Explain that calling the "take" script can make this easier
 
-The "take" script should turn into a call to "tfs take {conflict directory} {arguments passed to the script}".  The take script doesn't need to do argument checking - that can be implemented by "tfs take".
+The "take" script should be a bash script.
 
-FIXME - how do we know if the "tfs" executable is in the path, or if that's even what it's called
+TBD - should the "take" script just make a call to the CLI, passing in the conflict directory and any additional arguments passed to it?  That way the logic and behavior of the "take" script can be maintained as part of the cli, as opposed to being a separately-generated bash script.  The issue, though, is locating the cli executable.
 
 ## conflict discussion
 

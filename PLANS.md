@@ -4,7 +4,7 @@ This document tracks the roadmap and planned features for taterfs-rs.
 
 ## Current Focus
 
-Look at the changes in [merge.md](./docs/architecture/merge.md) on this branch, particularly merge_commits.
+Look at the changes in [sync.md](./docs/architecture/sync.md) and prepare to implement, in src/sync/.  The changes also require a slight modification to [dir_tree_mod](./docs/architecture/dir_tree_mod.md).
 
 ## Planned Features
 

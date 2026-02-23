@@ -12,6 +12,7 @@ pub mod merge;
 pub mod repo;
 pub mod repo_model;
 pub mod repository;
+pub mod sync;
 pub mod util;
 
 pub use util::{CapacityManager, ReplenishmentRate, UsedCapacity};

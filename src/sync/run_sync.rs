@@ -642,13 +642,17 @@ async fn process_branch_group(
 /// * `repo` - The repository
 /// * `items` - Items to merge (must all have the same base commit)
 /// * `base_commit_id` - The common base commit for all items
-/// * `commit_1_id` - The "ours" commit for merging (branch head or previous merge result)
+/// * `theirs_commit_id` - The "theirs" commit (branch head or previous merge result)
 /// * `options` - Sync options
+///
+/// # Terminology
+/// - "ours" = the uploaded filestore content (what the user has locally)
+/// - "theirs" = the branch head (the remote state)
 async fn merge_uploaded_directories(
     repo: &Arc<Repo>,
     items: &[&SyncItem],
     base_commit_id: &str,
-    commit_1_id: &str,
+    theirs_commit_id: &str,
     options: &RunSyncsOptions,
 ) -> Result<(String, Vec<ConflictContext>)> {
     // Sort items by path depth (descending), then alphabetically
@@ -670,8 +674,9 @@ async fn merge_uploaded_directories(
     let base_commit = repo.read_commit(&base_commit_id.to_string()).await?;
     let base_root_dir = repo.read_directory(&base_commit.directory).await?;
 
-    // Track the current "ours" commit for merging (starts as the provided commit_1)
-    let mut current_ours_commit_id = commit_1_id.to_string();
+    // Track the current "theirs" commit for merging (starts as branch head)
+    // After each merge, this becomes the merge result for the next iteration
+    let mut current_theirs_commit_id = theirs_commit_id.to_string();
     let mut all_conflicts: Vec<ConflictContext> = Vec::new();
     let mut remaining_items: Vec<&SyncItem> = sorted_items;
 
@@ -718,7 +723,7 @@ async fn merge_uploaded_directories(
         modified_dir.complete.complete().await
             .map_err(|e| SyncError::Other(format!("mod_dir_tree completion failed: {}", e)))?;
 
-        // Create a commit with this modified directory (the "theirs" commit)
+        // Create a commit with this modified directory (the "ours" commit - uploaded content)
         let upload_commit = Commit {
             type_tag: CommitType::Commit,
             directory: modified_dir.result.clone(),
@@ -734,16 +739,17 @@ async fn merge_uploaded_directories(
         upload_commit_result.complete.complete().await
             .map_err(|e| SyncError::Other(format!("commit write completion failed: {}", e)))?;
 
-        // Merge: base vs ours (current_ours_commit_id) vs theirs (upload_commit)
+        // Merge: base vs theirs (branch head) vs ours (uploaded)
+        // commit_1 = theirs (branch head), commit_2 = ours (uploaded)
         let base_model = CommitModel::new(Arc::clone(repo), base_commit_id.to_string());
-        let ours_model = CommitModel::new(Arc::clone(repo), current_ours_commit_id.clone());
-        let theirs_model = CommitModel::new(Arc::clone(repo), upload_commit_result.result.clone());
+        let theirs_model = CommitModel::new(Arc::clone(repo), current_theirs_commit_id.clone());
+        let ours_model = CommitModel::new(Arc::clone(repo), upload_commit_result.result.clone());
 
         let merge_result = merge_commits(
             Arc::clone(repo),
             &base_model,
-            &ours_model,
             &theirs_model,
+            &ours_model,
             Some(CommitMetadata {
                 timestamp: Some(Utc::now().to_rfc3339()),
                 author: None,
@@ -758,13 +764,13 @@ async fn merge_uploaded_directories(
             .map_err(|e| SyncError::Other(format!("merge completion failed: {}", e)))?;
 
         all_conflicts.extend(merge_result.conflicts);
-        // Update "ours" to the merge result for the next iteration
-        current_ours_commit_id = merge_result.commit.result;
+        // Update "theirs" to the merge result for the next iteration
+        current_theirs_commit_id = merge_result.commit.result;
 
         remaining_items = retry_list;
     }
 
-    Ok((current_ours_commit_id, all_conflicts))
+    Ok((current_theirs_commit_id, all_conflicts))
 }
 
 /// Download merged content and finalize sync state for a single item.

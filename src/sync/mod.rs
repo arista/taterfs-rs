@@ -19,6 +19,6 @@ mod add_sync;
 mod error;
 mod run_sync;
 
-pub use add_sync::{add_sync, AddSyncOptions};
+pub use add_sync::{AddSyncOptions, add_sync};
 pub use error::{Result, SyncError};
-pub use run_sync::{run_syncs, RunSyncsOptions, RunSyncsResult, SyncResult, SyncSpec};
+pub use run_sync::{RunSyncsOptions, RunSyncsResult, SyncResult, SyncSpec, run_syncs};

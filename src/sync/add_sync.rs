@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::app::{upload_directory, DirectoryListBuilder};
+use crate::app::{DirectoryListBuilder, upload_directory};
 use crate::download::download_directory;
 use crate::file_store::{FileStore, SyncState};
 use crate::repo::Repo;
@@ -279,9 +279,7 @@ async fn is_repo_directory_empty(
         let is_empty = is_directory_empty(&dir).await?;
         Ok((is_empty, Some(commit_id)))
     } else {
-        let resolved = root
-            .resolve_path(repo_directory)
-            .await?;
+        let resolved = root.resolve_path(repo_directory).await?;
         match resolved {
             ResolvePathResult::Directory(d) => {
                 let dir = d.directory();
@@ -354,7 +352,7 @@ async fn create_directory_commit_with_update(
     commit_message: &str,
     parent_commit: Option<&String>,
 ) -> Result<String> {
-    use crate::app::{mod_dir_tree, DirTreeModSpec};
+    use crate::app::{DirTreeModSpec, mod_dir_tree};
     use crate::repo::DirectoryEntry;
     use crate::repository::{Commit, CommitType, DirEntry, Directory, DirectoryType, RepoObject};
 
@@ -383,12 +381,8 @@ async fn create_directory_commit_with_update(
                 .to_string(),
             directory: directory_id,
         });
-        spec.add(
-            Path::new(repo_directory),
-            dir_entry,
-            Arc::new(NoopComplete),
-        )
-        .map_err(|e| SyncError::Other(e.to_string()))?;
+        spec.add(Path::new(repo_directory), dir_entry, Arc::new(NoopComplete))
+            .map_err(|e| SyncError::Other(e.to_string()))?;
 
         let result = mod_dir_tree(repo, root_dir, spec).await?;
         result

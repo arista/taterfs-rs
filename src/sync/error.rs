@@ -17,7 +17,9 @@ pub enum SyncError {
     PendingSyncState,
 
     /// Both file store and repo directory have content - cannot add sync.
-    #[error("both file store and repo directory have content - clear or move aside file store content first")]
+    #[error(
+        "both file store and repo directory have content - clear or move aside file store content first"
+    )]
     BothHaveContent,
 
     /// File store error.

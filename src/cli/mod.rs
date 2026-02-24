@@ -215,7 +215,16 @@ impl Cli {
                         filestore_specs,
                         force_pending_downloads,
                         no_stage,
-                    } => run_sync(app, &global, filestore_specs, force_pending_downloads, no_stage).await,
+                    } => {
+                        run_sync(
+                            app,
+                            &global,
+                            filestore_specs,
+                            force_pending_downloads,
+                            no_stage,
+                        )
+                        .await
+                    }
                 }
             })
         })

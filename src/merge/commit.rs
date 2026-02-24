@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::merge::directory::{merge_directories, MergeDirectoryResult};
+use crate::merge::directory::{MergeDirectoryResult, merge_directories};
 use crate::merge::error::Result;
 use crate::merge::types::ConflictContext;
 use crate::repo::Repo;
@@ -176,7 +176,10 @@ mod tests {
             parents,
             metadata: None,
         };
-        let result = repo.write_object(&RepoObject::Commit(commit)).await.unwrap();
+        let result = repo
+            .write_object(&RepoObject::Commit(commit))
+            .await
+            .unwrap();
         result.complete.complete().await.unwrap();
         result.result
     }

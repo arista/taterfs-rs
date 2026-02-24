@@ -19,8 +19,8 @@ use std::sync::Arc;
 use crate::app::{DirectoryLeaf, DirectoryListBuilder, StreamingFileUploader};
 use crate::merge::error::{MergeError, Result};
 use crate::merge::types::{ChangingDirEntry, ConflictContext, DirEntryChange, MergeFileOutcome};
-use crate::repo::RepoError;
 use crate::repo::Repo;
+use crate::repo::RepoError;
 use crate::repository::{DirEntry, FileEntry};
 use crate::util::{Complete, Completes, ManagedBuffers, NoopComplete, WithComplete};
 
@@ -55,7 +55,10 @@ pub async fn build_conflict_directory(
         .add(conflict_txt.complete)
         .map_err(|e| MergeError::Repo(RepoError::Other(e.to_string())))?;
     builder
-        .add(conflict_txt.result, Arc::new(NoopComplete) as Arc<dyn Complete>)
+        .add(
+            conflict_txt.result,
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        )
         .await?;
 
     // Add "base" entry if it exists
@@ -94,7 +97,10 @@ pub async fn build_conflict_directory(
         .add(take_script.complete)
         .map_err(|e| MergeError::Repo(RepoError::Other(e.to_string())))?;
     builder
-        .add(take_script.result, Arc::new(NoopComplete) as Arc<dyn Complete>)
+        .add(
+            take_script.result,
+            Arc::new(NoopComplete) as Arc<dyn Complete>,
+        )
         .await?;
 
     // Add "theirs" entry (from entry_1) if it exists
@@ -240,7 +246,9 @@ fn format_conflict_txt(context: &ConflictContext) -> String {
                 content.push_str("  Successfully merged (should not see this in conflict)\n\n");
             }
             MergeFileOutcome::MergeConflict { .. } => {
-                content.push_str("  A text merge was attempted. The \"merged\" file contains the result\n");
+                content.push_str(
+                    "  A text merge was attempted. The \"merged\" file contains the result\n",
+                );
                 content.push_str("  with conflict markers (<<<<<<< / ======= / >>>>>>>).\n\n");
             }
             MergeFileOutcome::Binary => {
@@ -304,11 +312,15 @@ fn describe_change(change: &DirEntryChange) -> String {
                 (false, false) => "No change".to_string(),
             }
         }
-        DirEntryChange::FileChangedToDirectory { .. } => "Changed from file to directory".to_string(),
+        DirEntryChange::FileChangedToDirectory { .. } => {
+            "Changed from file to directory".to_string()
+        }
         DirEntryChange::FileRemoved => "Removed file".to_string(),
         DirEntryChange::DirectoryCreated(_) => "Created directory".to_string(),
         DirEntryChange::DirectoryChanged { .. } => "Directory contents changed".to_string(),
-        DirEntryChange::DirectoryChangedToFile { .. } => "Changed from directory to file".to_string(),
+        DirEntryChange::DirectoryChangedToFile { .. } => {
+            "Changed from directory to file".to_string()
+        }
         DirEntryChange::DirectoryRemoved => "Removed directory".to_string(),
     }
 }
@@ -490,7 +502,10 @@ mod tests {
     #[tokio::test]
     async fn test_describe_change() {
         assert_eq!(describe_change(&DirEntryChange::Unchanged), "No change");
-        assert_eq!(describe_change(&DirEntryChange::FileRemoved), "Removed file");
+        assert_eq!(
+            describe_change(&DirEntryChange::FileRemoved),
+            "Removed file"
+        );
         assert_eq!(
             describe_change(&DirEntryChange::DirectoryRemoved),
             "Removed directory"

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::app::{DirectoryLeaf, DirectoryListBuilder, FileListBuilder};
 use crate::caches::{DbId, FileStoreCache, FingerprintedFileInfo};
-use crate::file_store::{FileStore, ScanEvent, ScanEvents, CHUNK_SIZES, next_chunk_size};
+use crate::file_store::{CHUNK_SIZES, FileStore, ScanEvent, ScanEvents, next_chunk_size};
 use crate::repo::{Repo, RepoError};
 use crate::repository::{ChunkFilePart, DirEntry, Directory, File, FileEntry, ObjectId};
 use crate::util::{Complete, ManagedBuffer, ManagedBuffers, NoopComplete, WithComplete};
@@ -430,9 +430,7 @@ impl StreamingFileUploader {
 
         // Wrap in a ManagedBuffer (unmanaged — original buffers' capacity is
         // released as they are consumed above)
-        let managed = ManagedBuffers::new()
-            .get_buffer_with_data(assembled)
-            .await;
+        let managed = ManagedBuffers::new().get_buffer_with_data(assembled).await;
 
         // Write to repo
         let write_result = self.repo.write(&hash, Arc::new(managed)).await?;

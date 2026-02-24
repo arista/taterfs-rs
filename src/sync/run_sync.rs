@@ -10,10 +10,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use futures::future::join_all;
 
-use crate::app::{mod_dir_tree, upload_directory, App, AppCreateRepoContext, DirTreeModSpec};
+use crate::app::{App, AppCreateRepoContext, DirTreeModSpec, mod_dir_tree, upload_directory};
 use crate::download::download_directory;
 use crate::file_store::{FileStore, SyncState};
-use crate::merge::{merge_commits, ConflictContext};
+use crate::merge::{ConflictContext, merge_commits};
 use crate::repo::Repo;
 use crate::repo_model::{CommitModel, RepoModel};
 use crate::repository::{Commit, CommitMetadata, CommitType, DirEntry, RepoObject};
@@ -213,19 +213,18 @@ pub async fn run_syncs(
     let repo_results = join_all(repo_futures).await;
 
     // Collect all items back and sort by original index
-    let mut all_items: Vec<SyncItem> = repo_results
-        .into_iter()
-        .flatten()
-        .collect();
+    let mut all_items: Vec<SyncItem> = repo_results.into_iter().flatten().collect();
 
     all_items.sort_by_key(|item| item.original_index);
 
     // Build final results
     let results: Vec<SyncResult> = all_items
         .into_iter()
-        .map(|item| item.result.unwrap_or_else(|| SyncResult::failure(
-            SyncError::Other("sync item missing result".to_string())
-        )))
+        .map(|item| {
+            item.result.unwrap_or_else(|| {
+                SyncResult::failure(SyncError::Other("sync item missing result".to_string()))
+            })
+        })
         .collect();
 
     // Ensure we have the right number of results
@@ -283,10 +282,7 @@ async fn build_sync_item(
 }
 
 /// Group sync items by repo spec.
-async fn group_by_repo(
-    mut items: HashMap<usize, SyncItem>,
-    app: &App,
-) -> Result<Vec<RepoGroup>> {
+async fn group_by_repo(mut items: HashMap<usize, SyncItem>, app: &App) -> Result<Vec<RepoGroup>> {
     // Separate items that already have results (failures) from those to process
     let mut failed_items: Vec<SyncItem> = vec![];
     let mut items_to_process: Vec<SyncItem> = vec![];
@@ -401,7 +397,11 @@ async fn process_repo_group(
 ) -> Vec<SyncItem> {
     // Skip if this is a "dummy" group of failed items
     if group.repo_spec.is_empty() {
-        return group.branch_groups.into_iter().flat_map(|bg| bg.items).collect();
+        return group
+            .branch_groups
+            .into_iter()
+            .flat_map(|bg| bg.items)
+            .collect();
     }
 
     let repo_model = RepoModel::new(Arc::clone(&group.repo));
@@ -535,9 +535,10 @@ async fn process_branch_group(
             Ok(upload_result) => {
                 // Wait for upload to complete
                 if let Err(e) = upload_result.complete.complete().await {
-                    group.items[idx].result = Some(SyncResult::failure(SyncError::Other(
-                        format!("upload completion failed: {}", e),
-                    )));
+                    group.items[idx].result = Some(SyncResult::failure(SyncError::Other(format!(
+                        "upload completion failed: {}",
+                        e
+                    ))));
                 } else {
                     group.items[idx].uploaded_dir_id = Some(upload_result.result.hash);
                 }
@@ -633,7 +634,10 @@ async fn process_branch_group(
     // Combine with failed items
     all_processed_items.extend(failed_items);
 
-    (all_processed_items, Some((branch_name, current_commit_1_id)))
+    (
+        all_processed_items,
+        Some((branch_name, current_commit_1_id)),
+    )
 }
 
 /// Merge uploaded directories using DirTreeModSpec with retry for overlaps.
@@ -659,13 +663,18 @@ async fn merge_uploaded_directories(
     let mut sorted_items: Vec<(&SyncItem, usize)> = items
         .iter()
         .map(|item| {
-            let depth = item.repo_directory.split('/').filter(|s| !s.is_empty()).count();
+            let depth = item
+                .repo_directory
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .count();
             (*item, depth)
         })
         .collect();
     sorted_items.sort_by(|a, b| {
         // Sort by depth descending, then by path ascending
-        b.1.cmp(&a.1).then_with(|| a.0.repo_directory.cmp(&b.0.repo_directory))
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.repo_directory.cmp(&b.0.repo_directory))
     });
 
     let sorted_items: Vec<&SyncItem> = sorted_items.into_iter().map(|(item, _)| item).collect();
@@ -720,7 +729,10 @@ async fn merge_uploaded_directories(
 
         // Apply modifications to create new directory tree
         let modified_dir = mod_dir_tree(repo, base_root_dir.clone(), spec).await?;
-        modified_dir.complete.complete().await
+        modified_dir
+            .complete
+            .complete()
+            .await
             .map_err(|e| SyncError::Other(format!("mod_dir_tree completion failed: {}", e)))?;
 
         // Create a commit with this modified directory (the "ours" commit - uploaded content)
@@ -735,8 +747,13 @@ async fn merge_uploaded_directories(
                 message: Some("Sync upload".to_string()),
             }),
         };
-        let upload_commit_result = repo.write_object(&RepoObject::Commit(upload_commit)).await?;
-        upload_commit_result.complete.complete().await
+        let upload_commit_result = repo
+            .write_object(&RepoObject::Commit(upload_commit))
+            .await?;
+        upload_commit_result
+            .complete
+            .complete()
+            .await
             .map_err(|e| SyncError::Other(format!("commit write completion failed: {}", e)))?;
 
         // Merge: base vs theirs (branch head) vs ours (uploaded)
@@ -760,7 +777,11 @@ async fn merge_uploaded_directories(
         )
         .await?;
 
-        merge_result.commit.complete.complete().await
+        merge_result
+            .commit
+            .complete
+            .complete()
+            .await
             .map_err(|e| SyncError::Other(format!("merge completion failed: {}", e)))?;
 
         all_conflicts.extend(merge_result.conflicts);
@@ -840,7 +861,10 @@ async fn download_and_finalize_item(
     )
     .await?;
 
-    download_result.complete.complete().await
+    download_result
+        .complete
+        .complete()
+        .await
         .map_err(|e| SyncError::Other(format!("download completion failed: {}", e)))?;
 
     // Commit sync state

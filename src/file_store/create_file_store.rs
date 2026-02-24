@@ -82,6 +82,7 @@ impl ParsedFileStoreSpec {
     /// - `s3://bucket/prefix?endpoint_url=...&region=...`
     /// - `file:///path/to/directory`
     /// - `http://host/path` or `https://host/path`
+    /// - `/path/to/directory` (short form for local filesystem)
     /// - A bare name (looked up in config)
     pub fn parse(spec: &str, config: Option<&ConfigHelper>) -> Result<Self> {
         // Check for URL schemes
@@ -93,6 +94,11 @@ impl ParsedFileStoreSpec {
         }
         if spec.starts_with("http://") || spec.starts_with("https://") {
             return Self::parse_http_url(spec);
+        }
+
+        // Check for absolute path (short form for local filesystem)
+        if spec.starts_with('/') {
+            return Self::parse_absolute_path(spec);
         }
 
         // Treat as a named file store
@@ -168,6 +174,17 @@ impl ParsedFileStoreSpec {
         Ok(Self {
             store_type: FileStoreType::Http,
             location: url.to_string(),
+            prefix: None,
+            endpoint_url: None,
+            region: None,
+        })
+    }
+
+    fn parse_absolute_path(path: &str) -> Result<Self> {
+        // Short form: /path/to/directory -> treated as local filesystem
+        Ok(Self {
+            store_type: FileStoreType::FileSystem,
+            location: path.to_string(),
             prefix: None,
             endpoint_url: None,
             region: None,
@@ -517,6 +534,19 @@ mod tests {
     fn test_parse_empty_file_path() {
         let result = ParsedFileStoreSpec::parse("file://", None);
         assert!(matches!(result, Err(CreateFileStoreError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn test_parse_absolute_path() {
+        let spec = ParsedFileStoreSpec::parse("/home/user/files", None).unwrap();
+        assert_eq!(spec.store_type, FileStoreType::FileSystem);
+        assert_eq!(spec.location, "/home/user/files");
+        assert_eq!(spec.prefix, None);
+
+        // Single slash should also work
+        let spec = ParsedFileStoreSpec::parse("/", None).unwrap();
+        assert_eq!(spec.store_type, FileStoreType::FileSystem);
+        assert_eq!(spec.location, "/");
     }
 
     #[tokio::test]

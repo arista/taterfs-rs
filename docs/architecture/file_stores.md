@@ -386,6 +386,12 @@ http://...
 
 Each of those URL's would lead to the creation of an S3FileStore, FsFileStore, or HttpFileStore
 
+An FsFileStore can also be specified in short form through an absolute path:
+
+```
+/{directory}
+```
+
 Some file store types might require additional parmeters.  The S3FileStore, for example, can optionally take an endpoint_url and a region.  Those can be specified as query parameters to the URL:
 
 ```

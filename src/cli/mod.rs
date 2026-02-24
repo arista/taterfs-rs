@@ -132,6 +132,32 @@ pub enum Command {
         #[command(subcommand)]
         command: commands::key_value_cache::KeyValueCacheCommand,
     },
+
+    /// Add a sync relationship between a filestore and repo directory.
+    #[command(name = "add-sync")]
+    AddSync {
+        /// Path within the filestore to sync.
+        #[arg(default_value = "/")]
+        filestore_path: String,
+
+        /// Path within the repository to sync.
+        repo_path: String,
+    },
+
+    /// Run sync operations for one or more filestores.
+    #[command(name = "sync")]
+    Sync {
+        /// Filestore specs to sync.
+        filestore_specs: Vec<String>,
+
+        /// Force completion of pending downloads before proceeding.
+        #[arg(long)]
+        force_pending_downloads: bool,
+
+        /// Download without using a staging area.
+        #[arg(long)]
+        no_stage: bool,
+    },
 }
 
 // =============================================================================
@@ -181,6 +207,15 @@ impl Cli {
                     Command::Repo { command } => command.run(app, &global).await,
                     Command::FileStore { command } => command.run(app, &global).await,
                     Command::KeyValueCache { command } => command.run(app, &global).await,
+                    Command::AddSync {
+                        filestore_path,
+                        repo_path,
+                    } => run_add_sync(app, &global, filestore_path, repo_path).await,
+                    Command::Sync {
+                        filestore_specs,
+                        force_pending_downloads,
+                        no_stage,
+                    } => run_sync(app, &global, filestore_specs, force_pending_downloads, no_stage).await,
                 }
             })
         })
@@ -298,6 +333,38 @@ async fn run_ls(
         .map_err(|e| CliError::Other(e.to_string()))?;
 
     Ok(())
+}
+
+/// Run the add-sync command.
+async fn run_add_sync(
+    app: &App,
+    global: &GlobalArgs,
+    filestore_path: String,
+    repo_path: String,
+) -> Result<()> {
+    let args = commands::sync::AddSyncArgs {
+        filestore_path,
+        repo_path,
+        output: args::OutputSink::default(),
+    };
+    args.run(app, global).await
+}
+
+/// Run the sync command.
+async fn run_sync(
+    app: &App,
+    global: &GlobalArgs,
+    filestore_specs: Vec<String>,
+    force_pending_downloads: bool,
+    no_stage: bool,
+) -> Result<()> {
+    let args = commands::sync::RunSyncsArgs {
+        filestore_specs,
+        force_pending_downloads,
+        no_stage,
+        output: args::OutputSink::default(),
+    };
+    args.run(app, global).await
 }
 
 /// Main entry point for the CLI.

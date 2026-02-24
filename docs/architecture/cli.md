@@ -146,6 +146,7 @@ Call the [add_sync command](./commands.md).
 
 ```
 tfs sync {filestore path} [...{filestore path}]
+  [-f / --force-pending-downloads]
 ```
 Call the [sync command](./commands.md).
 

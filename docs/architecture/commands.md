@@ -105,3 +105,29 @@ Modify the repository so that the given directory from the filestore has been up
   * use [create_next_root](./repo_model.md) to obtain a new Root and its complete
   * combine all the completes
   * return the new root and the combined Completes
+
+# add_sync
+
+```
+AddSyncCommandArgs {
+    repo_path: Path
+}
+
+add_sync(args: AddSyncCommandArgs, context: CommandContext)
+```
+CommandContext requires: repository spec, filestore spec, branch
+
+Performs an ["add_sync"](./sync.md).
+
+# sync
+
+```
+SyncCommandArgs {
+    filestore_spec: []
+}
+
+sync(args: SyncCommandArgs, context: CommandContext)
+```
+CommandContext requires: nothing
+
+Performs a ["run_syncs"](./sync.md).

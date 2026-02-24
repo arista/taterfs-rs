@@ -137,6 +137,18 @@ tfs upload-directory {filestore path} {repo path}
 ```
 Call the [upload_directory command](./commands.md).
 
+
+```
+tfs add-sync {filestore path} {repo path}
+```
+Call the [add_sync command](./commands.md).
+
+
+```
+tfs sync {filestore path} [...{filestore path}]
+```
+Call the [sync command](./commands.md).
+
 ## CLI sub-commands
 
 ### tfs repo

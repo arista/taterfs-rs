@@ -1057,22 +1057,22 @@ impl Repo {
         acquired: Option<AcquiredCapacity>,
     ) -> Result<Arc<ManagedBuffer>> {
         // Try local chunks cache first (silent on failure)
-        if let Some(ref local_cache) = self.local_chunks_cache {
-            if let Ok(Some(data)) = local_cache.get_chunk(id).await {
-                // Found in local cache - wrap in ManagedBuffer
-                let managed_buffer = if let Some(acq) = acquired {
-                    if let Some(ref mb) = self.flow_control.managed_buffers {
-                        mb.create_buffer_with_acquired(data, acq)
-                    } else {
-                        ManagedBuffers::new().create_buffer_with_acquired(data, acq)
-                    }
-                } else if let Some(ref mb) = self.flow_control.managed_buffers {
-                    mb.get_buffer_with_data(data).await
+        if let Some(ref local_cache) = self.local_chunks_cache
+            && let Ok(Some(data)) = local_cache.get_chunk(id).await
+        {
+            // Found in local cache - wrap in ManagedBuffer
+            let managed_buffer = if let Some(acq) = acquired {
+                if let Some(ref mb) = self.flow_control.managed_buffers {
+                    mb.create_buffer_with_acquired(data, acq)
                 } else {
-                    ManagedBuffers::new().get_buffer_with_data(data).await
-                };
-                return Ok(Arc::new(managed_buffer));
-            }
+                    ManagedBuffers::new().create_buffer_with_acquired(data, acq)
+                }
+            } else if let Some(ref mb) = self.flow_control.managed_buffers {
+                mb.get_buffer_with_data(data).await
+            } else {
+                ManagedBuffers::new().get_buffer_with_data(data).await
+            };
+            return Ok(Arc::new(managed_buffer));
         }
 
         let backend = Arc::clone(&self.backend);
